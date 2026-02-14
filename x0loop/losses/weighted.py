@@ -1,0 +1,133 @@
+from __future__ import annotations
+
+from typing import Callable
+
+import torch
+
+from x0loop.losses.base import BaseLoss
+
+
+WeightFn = Callable[[torch.Tensor, dict | None], torch.Tensor]
+
+
+class WeightedLoss(BaseLoss):
+    def __init__(self, inner: BaseLoss, weight_fn: WeightFn):
+        self.inner = inner
+        self.weight_fn = weight_fn
+
+    def compute_per_example(self, model_out, target, *, t=None, aux=None) -> torch.Tensor:
+        if t is None:
+            raise ValueError("WeightedLoss requires timestep t")
+        per_ex = self.inner.compute_per_example(model_out, target, t=t, aux=aux)
+        w = self.weight_fn(t, aux)
+        if w.ndim > 1:
+            w = w.view(w.shape[0], -1).mean(dim=1)
+        return w * per_ex
+
+
+def make_weight_fn(
+    name: str,
+    schedule,
+    eps: float = 1e-8,
+    balance_factor: float = 0.5,
+    balance_time: str = "auto",
+    balance_integral_steps: int = 2000,
+) -> WeightFn:
+    balance_factor = float(balance_factor)
+    if not (0.0 <= balance_factor <= 1.0):
+        raise ValueError(f"balance_factor must be in [0, 1], got {balance_factor}")
+    balance_time = str(balance_time).lower()
+    if balance_time not in {"auto", "discrete", "continuous"}:
+        raise ValueError(f"balance_time must be one of auto/discrete/continuous, got {balance_time}")
+    balance_integral_steps = int(balance_integral_steps)
+    if balance_integral_steps <= 0:
+        raise ValueError("balance_integral_steps must be > 0")
+
+    def _snr(t, aux=None):
+        return schedule.snr(t).clamp_min(eps)
+
+    def _inv_snr(t, aux=None):
+        return 1.0 / schedule.snr(t).clamp_min(eps)
+
+    def _logsnr(t, aux=None):
+        return torch.log(schedule.snr(t).clamp_min(eps))
+
+    inv_alpha_avg_discrete_cache: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
+    inv_alpha_avg_continuous_cache: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
+
+    def _inv_alpha_avg_discrete(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        key = (device, dtype)
+        if key in inv_alpha_avg_discrete_cache:
+            return inv_alpha_avg_discrete_cache[key]
+        steps = int(getattr(schedule, "num_steps", 1000))
+        t_grid = torch.arange(1, steps + 1, device=device, dtype=torch.float32) / float(steps)
+        inv_alpha = 1.0 / schedule.alpha(t_grid).clamp_min(eps)
+        avg = inv_alpha.to(dtype).mean().clamp_min(eps)
+        inv_alpha_avg_discrete_cache[key] = avg
+        return avg
+
+    def _inv_alpha_avg_continuous(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        key = (device, dtype)
+        if key in inv_alpha_avg_continuous_cache:
+            return inv_alpha_avg_continuous_cache[key]
+        # Midpoint rule on [0,1] for E_t[1/alpha(t)] with t~Uniform(0,1).
+        m = balance_integral_steps
+        t_mid = (torch.arange(m, device=device, dtype=torch.float32) + 0.5) / float(m)
+        inv_alpha = 1.0 / schedule.alpha(t_mid).clamp_min(eps)
+        avg = inv_alpha.to(dtype).mean().clamp_min(eps)
+        inv_alpha_avg_continuous_cache[key] = avg
+        return avg
+
+    def _balance_weights(t, aux=None):
+        del aux
+        # Base definition:
+        #   let S = sum_i 1/alpha_i (or continuous analog T*E[1/alpha])
+        #   w_raw = (1-bf) * 1/S + bf * 1/(T*(1/alpha(t)))
+        #         = (1-bf) * 1/S + bf * alpha(t)/T
+        #   w = w_raw * S = (1-bf) + bf * alpha(t) * (S/T)
+        # where S/T = E[1/alpha].
+        alpha_t = schedule.alpha(t).clamp_min(eps)
+
+        if balance_time == "discrete":
+            inv_alpha_avg = _inv_alpha_avg_discrete(device=t.device, dtype=alpha_t.dtype)
+        elif balance_time == "continuous":
+            inv_alpha_avg = _inv_alpha_avg_continuous(device=t.device, dtype=alpha_t.dtype)
+        else:
+            steps = float(int(getattr(schedule, "num_steps", 1000)))
+            is_discrete_batch = torch.allclose(t * steps, torch.round(t * steps), atol=1e-6, rtol=0.0)
+            inv_alpha_avg = (
+                _inv_alpha_avg_discrete(device=t.device, dtype=alpha_t.dtype)
+                if is_discrete_batch
+                else _inv_alpha_avg_continuous(device=t.device, dtype=alpha_t.dtype)
+            )
+
+        return (1.0 - balance_factor) + balance_factor * (alpha_t * inv_alpha_avg)
+
+    if name == "snr":
+        return _snr
+    if name == "inv_snr":
+        return _inv_snr
+    if name == "logsnr":
+        return _logsnr
+    if name == "balance_weights":
+        return _balance_weights
+    raise ValueError(f"Unknown weight fn: {name}")
+
+
+class PiecewiseWeightFn:
+    def __init__(self, edges: list[float], values: list[float]):
+        if len(edges) < 2 or len(values) != len(edges) - 1:
+            raise ValueError("values length must be len(edges)-1")
+        self.edges = edges
+        self.values = values
+
+    def __call__(self, t: torch.Tensor, aux=None) -> torch.Tensor:
+        w = torch.zeros_like(t)
+        for i, v in enumerate(self.values):
+            lo, hi = self.edges[i], self.edges[i + 1]
+            if i == len(self.values) - 1:
+                mask = (t >= lo) & (t <= hi)
+            else:
+                mask = (t >= lo) & (t < hi)
+            w = torch.where(mask, torch.full_like(t, float(v)), w)
+        return w

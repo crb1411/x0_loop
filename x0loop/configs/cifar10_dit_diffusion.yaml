@@ -1,0 +1,57 @@
+dataset:
+  name: cifar10
+  root: /root/data
+
+model:
+  image_size: 32
+  in_channels: 3
+  out_channels: 3
+  patch_size: 4
+  dim: 384
+  depth: 8
+  heads: 6
+  mlp_ratio: 4.0
+  dropout: 0.0
+
+process:
+  name: diffusion
+  sampler: ddim # ddim | posterior
+  posterior_noise_scale: 1.0 # used when sampler=posterior
+
+schedule:
+  mode: diffusion
+  num_steps: 1000
+  diffusion_lambda: 12.0
+
+loss:
+  name: mse
+
+augment:
+  name: none
+
+train:
+  seed: 42
+  deterministic: false
+  epochs: 400
+  batch_size: 256
+  num_workers: 8
+  lr: 2.0e-4
+  weight_decay: 0.05
+  use_ema: true
+  ema_decay: 0.9999
+  resume: null
+
+logging:
+  out_dir: runs/cifar10_diffusion
+  log_every: 50
+  window_size: 20
+  use_tb: true
+  sample_every: 2000
+  sample_rank0_only: true
+
+sample:
+  steps: 50
+  num: 16
+  sampler: auto # auto | ddim | posterior (auto uses process.sampler)
+  posterior_noise_scale: 1.0 # used when sampler=posterior
+  save_trace: true

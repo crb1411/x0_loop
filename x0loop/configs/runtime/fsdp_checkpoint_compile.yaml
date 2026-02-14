@@ -1,0 +1,18 @@
+distributed:
+  backend: nccl
+  fsdp: true
+  fsdp_mode: fsdp2_prefer
+  sharding: full_shard
+  precision: bf16
+  grad_clip_norm: 1.0
+  activation_ckpt: true
+  checkpoint:
+    mode: sharded
+    every_steps: 4000
+
+compile:
+  enabled: true
+  allow_fsdp: true
+  mode: default
+  fullgraph: false
+  dynamic: false

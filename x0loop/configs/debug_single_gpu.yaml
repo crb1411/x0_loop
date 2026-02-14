@@ -1,0 +1,60 @@
+dataset:
+  name: tiny-imagenet
+  root: /root/data/tiny-imagenet-200
+  split: train
+
+model:
+  image_size: 64
+  in_channels: 3
+  out_channels: 3
+  patch_size: 4
+  dim: 192
+  depth: 4
+  heads: 4
+  mlp_ratio: 4.0
+  dropout: 0.0
+  norm_layer: rmsnorm
+
+process:
+  name: diffusion
+  sampler: ddim # ddim | posterior
+  posterior_noise_scale: 1.0 # used when sampler=posterior
+
+schedule:
+  mode: diffusion
+  num_steps: 1000
+  diffusion_lambda: 12.0
+
+loss:
+  name: mse
+
+augment:
+  name: strongaugment
+  mode: data_only
+
+train:
+  seed: 42
+  deterministic: false
+  epochs: 20
+  batch_size: 8
+  num_workers: 4
+  lr: 1.0e-4
+  weight_decay: 0.05
+  use_ema: true
+  ema_decay: 0.9999
+  resume: null
+
+logging:
+  out_dir: runs/debug_single_gpu
+  log_every: 1
+  window_size: 5
+  use_tb: false
+  sample_every: 0
+  sample_rank0_only: true
+
+sample:
+  steps: 10
+  num: 4
+  sampler: auto # auto | ddim | posterior (auto uses process.sampler)
+  posterior_noise_scale: 1.0 # used when sampler=posterior
+  save_trace: false
