@@ -1,7 +1,7 @@
 dataset:
-  name: tiny-imagenet
+  name: tiny-imagenet # cifar10 | mnist | imagefolder | tiny-imagenet | tiny_imagenet
   root: /root/data/tiny-imagenet-200
-  split: train
+  split: train # train | val | test, used by imagefolder/tiny-imagenet when split subdir exists
 
 model:
   image_size: 64
@@ -13,15 +13,15 @@ model:
   heads: 6
   mlp_ratio: 4.0
   dropout: 0.0
-  norm_layer: layernorm
+  norm_layer: layernorm # layernorm | ln | rmsnorm | rms
 
 process:
-  name: diffusion
+  name: diffusion # diffusion | flow
   sampler: ddim # ddim | posterior
   posterior_noise_scale: 1.0 # used when sampler=posterior
 
 schedule:
-  mode: diffusion
+  mode: diffusion # diffusion | flow
   num_steps: 1000
   diffusion_lambda: 12.0
 
@@ -36,44 +36,44 @@ loss:
   dual_balance_factor: 0.5 # [0,1], total=(1-b)*L_eps + b*L_x0; b=0 means original eps-only loss
 
 augment:
-  name: geom
-  mode: data_only
+  name: geom # none | geom | dit | dit_original | strongaugment | strong
+  mode: data_only # data_only | equivariant_in_loss; strongaugment supports data_only only
   hflip_prob: 0.5
   max_translation: 2
   crop_min_scale: 0.9
-  enable_crop_resize: true
+  enable_crop_resize: true # false | true
 
 train:
   seed: 42
-  deterministic: false
+  deterministic: false # false | true
   epochs: 1000000
   batch_size: 256
   num_workers: 8
   lr: 5.0e-5 # used when lr_scheduler.name=constant, and as fallback max/init value
   lr_scheduler:
-    name: cosine # constant | cosine
+    name: cosine # none | constant | cosine
     max_lr: 5.0e-5 # peak lr
     min_lr: 1.0e-6 # floor lr
     warmup_steps: 80000 # linear warmup: min_lr -> max_lr
     cosine_steps: 200000 # cosine decay: max_lr -> min_lr, then hold min_lr
   weight_decay: 0.04
   max_clip_grad: 10.0 # overrides distributed.grad_clip_norm when set
-  use_ema: true
+  use_ema: true # false | true
   ema_decay: 0.996
   resume: null
 
 logging:
-  out_dir: runs/exp_default
+  out_dir_base: runs/exp_default
   log_every: 100
   window_size: 100
-  use_tb: true
+  use_tb: true # false | true
   sample_every: 5000
-  sample_rank0_only: true
-  summary_include_x0: true # when dual_x0 is enabled, include lx0/lx0_avg in summary
+  sample_rank0_only: true # false | true
+  summary_include_x0: true # false | true; when dual_x0 is enabled, include lx0/lx0_avg in summary
 
 sample:
   steps: 100
   num: 4
   sampler: auto # auto | ddim | posterior (auto uses process.sampler)
   posterior_noise_scale: 1.0 # used when sampler=posterior
-  save_trace: false
+  save_trace: false # false | true

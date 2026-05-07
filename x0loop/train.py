@@ -13,7 +13,7 @@ from torch.utils.data.distributed import DistributedSampler
 from x0loop.aug.geom import GeomAugment
 from x0loop.aug.identity import NoAug
 from x0loop.aug.strong_augment import strongAugment
-from x0loop.core.config import DEFAULT_RUNTIME_CONFIG, load_merged_config
+from x0loop.core.config import DEFAULT_RUNTIME_CONFIG, dump_resolved_config, load_merged_config, resolve_logging_output_dir
 from x0loop.core.schedules import TimeSchedule
 from x0loop.losses.composite import CompositeLoss
 from x0loop.losses.regression import HuberLoss, L1Loss, MSELoss
@@ -525,6 +525,23 @@ def train(cfg: dict):
     is_main = dist_info["is_main"]
     is_distributed = dist_info["is_distributed"]
 
+    run_timestamp = os.environ.get("X0LOOP_RUN_TIMESTAMP", "")
+    if is_main and not run_timestamp:
+        run_timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+    if is_distributed:
+        payload = [run_timestamp]
+        dist.broadcast_object_list(payload, src=0)
+        run_timestamp = payload[0]
+    os.environ["X0LOOP_RUN_TIMESTAMP"] = run_timestamp
+    resolve_logging_output_dir(cfg, timestamp=run_timestamp)
+
+    out_dir = cfg["logging"]["out_dir"]
+    logger = Logger(out_dir=out_dir, is_main=is_main, use_tb=bool(cfg["logging"].get("use_tb", True)))
+    if is_main:
+        logger.log_text(f"output_dir={out_dir}")
+        resolved_config_path = dump_resolved_config(cfg, out_dir)
+        logger.log_text(f"resolved_config={resolved_config_path}")
+
     device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
     dist_utils.seed_everything(int(cfg["train"].get("seed", 42)), rank=rank, deterministic=bool(cfg["train"].get("deterministic", False)))
 
@@ -546,22 +563,20 @@ def train(cfg: dict):
     if is_main:
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"[model] init: model = DiT(model_cfg).to(device), device={device}", flush=True)
-        print(
+        logger.log_text(f"[model] init: model = DiT(model_cfg).to(device), device={device}")
+        logger.log_text(
             "[model] config: "
             f"image_size={model_cfg.image_size}, in_channels={model_cfg.in_channels}, out_channels={model_cfg.out_channels}, "
             f"patch_size={model_cfg.patch_size}, dim={model_cfg.dim}, depth={model_cfg.depth}, heads={model_cfg.heads}, "
-            f"mlp_ratio={model_cfg.mlp_ratio}, norm_layer={model_cfg.norm_layer}",
-            flush=True,
+            f"mlp_ratio={model_cfg.mlp_ratio}, norm_layer={model_cfg.norm_layer}"
         )
-        print(
+        logger.log_text(
             "[model] shapes: "
             f"input=[B,{model_cfg.in_channels},{model_cfg.image_size},{model_cfg.image_size}], "
             f"output=[B,{model_cfg.out_channels},{model_cfg.image_size},{model_cfg.image_size}], "
-            f"tokens={model.num_tokens} ({model.h_tokens}x{model.w_tokens}), token_dim={model_cfg.dim}",
-            flush=True,
+            f"tokens={model.num_tokens} ({model.h_tokens}x{model.w_tokens}), token_dim={model_cfg.dim}"
         )
-        print(f"[model] params: total={total_params:,}, trainable={trainable_params:,}", flush=True)
+        logger.log_text(f"[model] params: total={total_params:,}, trainable={trainable_params:,}")
 
 
     use_fsdp = bool(distributed_cfg.get("fsdp", False) and is_distributed)
@@ -571,7 +586,7 @@ def train(cfg: dict):
     if compile_enabled and (not use_fsdp or allow_compile_with_fsdp):
         model = maybe_compile_model(model, compile_cfg)
     elif compile_enabled and use_fsdp and (not allow_compile_with_fsdp) and is_main:
-        print("compile.enabled=true but skipped because FSDP is on. Set compile.allow_fsdp=true to force it.", flush=True)
+        logger.log_text("compile.enabled=true but skipped because FSDP is on. Set compile.allow_fsdp=true to force it.")
 
     fsdp_meta = None
     if use_fsdp:
@@ -588,10 +603,9 @@ def train(cfg: dict):
 
         fsdp_meta = FSDPMeta(enabled=False, mode="none")
     if is_main:
-        print(
+        logger.log_text(
             f"[runtime] distributed={is_distributed}, world_size={world_size}, use_fsdp={use_fsdp}, "
-            f"fsdp_mode={fsdp_meta.mode}, compile={compile_enabled}, precision={distributed_cfg.get('precision', 'bf16')}",
-            flush=True,
+            f"fsdp_mode={fsdp_meta.mode}, compile={compile_enabled}, precision={distributed_cfg.get('precision', 'bf16')}"
         )
 
     schedule = build_schedule(cfg)
@@ -605,9 +619,8 @@ def train(cfg: dict):
         raise ValueError(f"loss.dual_balance_factor must be in [0,1], got {dual_balance_factor}")
     summary_include_x0 = bool(cfg.get("logging", {}).get("summary_include_x0", dual_x0_enabled))
     if is_main and dual_x0_enabled:
-        print(
+        logger.log_text(
             f"[loss] dual_x0 enabled: total=(1-{dual_balance_factor:.4g})*L_eps + {dual_balance_factor:.4g}*L_x0",
-            flush=True,
         )
 
     lr = float(cfg["train"].get("lr", 1e-4))
@@ -616,7 +629,7 @@ def train(cfg: dict):
     precision = str(distributed_cfg.get("precision", "bf16"))
     if device.type == "cpu" and precision in {"bf16", "fp16"}:
         if is_main:
-            print(f"precision={precision} is not stable on CPU here, fallback to fp32.", flush=True)
+            logger.log_text(f"precision={precision} is not stable on CPU here, fallback to fp32.")
         precision = "fp32"
     scaler = maybe_make_scaler(precision=precision, use_fsdp=use_fsdp)
 
@@ -643,15 +656,12 @@ def train(cfg: dict):
         global_step = int(ckpt.get("step", 0))
         if is_main:
             ckpt_keys = ",".join(sorted(ckpt.keys()))
-            print(
+            logger.log_text(
                 f"[resume] loaded: path={resume_path}, mode={ckpt_mode}, step={global_step}, epoch={start_epoch}, keys=[{ckpt_keys}]",
-                flush=True,
             )
     elif is_main:
-        print("[resume] none (start from scratch)", flush=True)
+        logger.log_text("[resume] none (start from scratch)")
 
-    out_dir = cfg["logging"]["out_dir"]
-    logger = Logger(out_dir=out_dir, is_main=is_main, use_tb=bool(cfg["logging"].get("use_tb", True)))
     meters = MetricLogger(window_size=int(cfg["logging"].get("window_size", 20)))
 
     epochs = int(cfg["train"]["epochs"])
@@ -664,26 +674,24 @@ def train(cfg: dict):
         grad_clip_cfg = distributed_cfg.get("grad_clip_norm", 0.0)
     grad_clip = float(grad_clip_cfg)
     if is_main:
-        print(f"[train] grad_clip={grad_clip}", flush=True)
+        logger.log_text(f"[train] grad_clip={grad_clip}")
         if lr_sched_meta.get("name") == "cosine_warmup_hold":
-            print(
+            logger.log_text(
                 "[train] lr_scheduler=cosine(warmup->cosine->hold_min) "
                 f"max_lr={lr_sched_meta['max_lr']:.6g} min_lr={lr_sched_meta['min_lr']:.6g} "
                 f"warmup_steps={lr_sched_meta['warmup_steps']} cosine_steps={lr_sched_meta['cosine_steps']} "
-                f"hold_min_from_step={lr_sched_meta['hold_min_from_step']}",
-                flush=True,
+                f"hold_min_from_step={lr_sched_meta['hold_min_from_step']}"
             )
         elif lr_sched_meta.get("name") in {"cosine_legacy", "cosine"}:
-            print(
+            logger.log_text(
                 "[train] lr_scheduler=cosine(legacy) "
                 f"init_lr={lr_sched_meta['init_lr']:.6g} max_lr={lr_sched_meta['max_lr']:.6g} "
                 f"min_lr={lr_sched_meta['min_lr']:.6g} init_steps={lr_sched_meta['init_steps']} "
                 f"max_steps={lr_sched_meta['max_steps']} min_steps={lr_sched_meta['min_steps']} "
-                f"cosine_steps={lr_sched_meta['cosine_steps']}",
-                flush=True,
+                f"cosine_steps={lr_sched_meta['cosine_steps']}"
             )
         else:
-            print(f"[train] lr_scheduler=constant lr={lr_sched_meta.get('base_lr', 0.0):.6g}", flush=True)
+            logger.log_text(f"[train] lr_scheduler=constant lr={lr_sched_meta.get('base_lr', 0.0):.6g}")
     log_every = int(cfg["logging"].get("log_every", 50))
     sample_every = int(cfg["logging"].get("sample_every", 2000))
     save_every = int(distributed_cfg.get("checkpoint", {}).get("every_steps", 2000))
@@ -944,5 +952,5 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    cfg = load_merged_config(args.config, args.runtime_config)
+    cfg = load_merged_config(args.config, args.runtime_config, resolve_logging=False)
     train(cfg)

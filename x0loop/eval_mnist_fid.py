@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import random
+import sys
 import time
+from pathlib import Path
 
 import numpy as np
 import torch
 from PIL import Image
 from torchvision.datasets import MNIST
 
-from x0loop.core.config import load_merged_config
+from x0loop.core.config import dump_resolved_config, load_merged_config
 from x0loop.models.dit import DiT, DiTConfig
 from x0loop.train import build_process, build_schedule
 from x0loop.utils.checkpoint import load_checkpoint
@@ -23,7 +26,8 @@ def parse_args():
     p.add_argument("--config", type=str, required=True, help="Run runtime yaml (full merged config).")
     p.add_argument("--runtime-config", type=str, default="", help="Optional extra runtime override.")
     p.add_argument("--ckpt", type=str, required=True)
-    p.add_argument("--out-dir", type=str, required=True)
+    p.add_argument("--out-dir", type=str, default="")
+    p.add_argument("--out-dir-base", type=str, default="")
     p.add_argument("--num-samples", type=int, default=10000)
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--steps", type=int, default=-1)
@@ -38,6 +42,53 @@ def parse_args():
     p.add_argument("--sampler", type=str, default="auto", choices=["auto", "ddim", "posterior"])
     p.add_argument("--posterior-noise-scale", type=float, default=None)
     return p.parse_args()
+
+
+class _Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data: str):
+        for stream in self.streams:
+            stream.write(data)
+            stream.flush()
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+
+def resolve_eval_output_dir(args) -> str:
+    if args.out_dir:
+        return args.out_dir
+    if not args.out_dir_base:
+        raise ValueError("Either --out-dir or --out-dir-base must be set.")
+
+    timestamp = os.environ.get("X0LOOP_RUN_TIMESTAMP")
+    if not timestamp:
+        timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        os.environ["X0LOOP_RUN_TIMESTAMP"] = timestamp
+    return str(Path(args.out_dir_base) / f"{timestamp}_eval")
+
+
+def setup_file_logging(out_dir: str) -> str:
+    log_dir = Path(out_dir) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "log.txt"
+    orig_stdout = sys.stdout
+    orig_stderr = sys.stderr
+    fp = log_file.open("a", encoding="utf-8", buffering=1)
+    sys.stdout = _Tee(orig_stdout, fp)
+    sys.stderr = _Tee(orig_stderr, fp)
+
+    def cleanup():
+        sys.stdout = orig_stdout
+        sys.stderr = orig_stderr
+        fp.flush()
+        fp.close()
+
+    atexit.register(cleanup)
+    return str(log_file)
 
 
 def set_seed(seed: int):
@@ -111,7 +162,16 @@ def export_fake_images(
 
 def main():
     args = parse_args()
-    cfg = load_merged_config(args.config, args.runtime_config if args.runtime_config else None)
+    out_dir = resolve_eval_output_dir(args)
+    log_file = setup_file_logging(out_dir)
+    print(f"[fid] output_dir={out_dir}", flush=True)
+    print(f"[fid] log_file={log_file}", flush=True)
+
+    cfg = load_merged_config(args.config, args.runtime_config if args.runtime_config else None, resolve_logging=False)
+    cfg.setdefault("logging", {})
+    cfg["logging"]["out_dir"] = out_dir
+    resolved_config_path = dump_resolved_config(cfg, out_dir)
+    print(f"[fid] resolved_config={resolved_config_path}", flush=True)
 
     ds_name = str(cfg.get("dataset", {}).get("name", "")).lower()
     if ds_name != "mnist":
@@ -163,7 +223,6 @@ def main():
     process = build_process(cfg, schedule)
 
     steps = int(args.steps if args.steps > 0 else cfg.get("sample", {}).get("steps", 100))
-    out_dir = args.out_dir
     fake_dir = os.path.join(out_dir, "fake")
     if args.real_dir:
         real_dir = args.real_dir
