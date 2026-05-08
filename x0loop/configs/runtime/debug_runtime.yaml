@@ -1,7 +1,7 @@
 distributed:
   backend: nccl
   fsdp: false
-  fsdp_mode: fsdp2_prefer
+  fsdp_mode: fsdp2
   sharding: full_shard
   precision: bf16
   grad_clip_norm: 1.0

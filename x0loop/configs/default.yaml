@@ -37,7 +37,7 @@ loss:
 
 augment:
   name: geom # none | geom | dit | dit_original | strongaugment | strong
-  mode: data_only # data_only | equivariant_in_loss; strongaugment supports data_only only
+  mode: data_only # data_only
   hflip_prob: 0.5
   max_translation: 2
   crop_min_scale: 0.9

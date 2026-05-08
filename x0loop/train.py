@@ -24,7 +24,7 @@ from x0loop.processes.flow_process import FlowProcess
 from x0loop.utils import dist as dist_utils
 from x0loop.utils.checkpoint import load_checkpoint, save_checkpoint
 from x0loop.utils.ema import EMA
-from x0loop.utils.fsdp import wrap_fsdp2
+from x0loop.utils.fsdp import clip_grad_norm, wrap_fsdp2
 from x0loop.utils.logger import Logger, MetricLogger
 
 
@@ -131,6 +131,8 @@ def build_augment(cfg: dict):
     mode = ac.get("mode", "data_only")
     if name == "none":
         return NoAug(), "none"
+    if mode != "data_only":
+        raise ValueError("augment.mode only supports data_only.")
     if name == "geom":
         aug = GeomAugment(
             hflip_prob=float(ac.get("hflip_prob", 0.5)),
@@ -151,8 +153,6 @@ def build_augment(cfg: dict):
         )
         return aug, mode
     if name in {"strongaugment", "strong"}:
-        if mode != "data_only":
-            raise ValueError("augment.name=strongaugment currently supports mode=data_only only.")
         # Strong image-model recipe (without label-mixing ops such as mixup/cutmix).
         aug = strongAugment(
             hflip_prob=float(ac.get("hflip_prob", 0.5)),
@@ -278,9 +278,19 @@ def compute_tbin_value_sum(
 
 
 def compute_per_example_x0_unweighted_loss(process, fb, out) -> torch.Tensor:
-    x0_target = fb.aux.get("x0_orig", fb.x0)
     x0_pred = process.x0_from_output(fb.xt.detach(), fb.t.detach(), out.detach(), aux=fb.aux)
-    return ((x0_pred - x0_target.detach()) ** 2).view(x0_pred.shape[0], -1).mean(dim=1)
+    return ((x0_pred - fb.x0.detach()) ** 2).view(x0_pred.shape[0], -1).mean(dim=1)
+
+
+def compute_dual_x0_loss(process, fb, out, loss_fn) -> torch.Tensor:
+    x0_pred = process.x0_from_output(fb.xt, fb.t, out, aux=fb.aux)
+    per_example = ((x0_pred - fb.x0) ** 2).view(x0_pred.shape[0], -1).mean(dim=1)
+    if isinstance(loss_fn, WeightedLoss):
+        w = loss_fn.weight_fn(fb.t, fb.aux)
+        if w.ndim > 1:
+            w = w.view(w.shape[0], -1).mean(dim=1)
+        per_example = per_example * w.to(dtype=per_example.dtype)
+    return per_example.mean()
 
 
 def format_tbin_summary(
@@ -588,9 +598,9 @@ def train(cfg: dict):
     elif compile_enabled and use_fsdp and (not allow_compile_with_fsdp) and is_main:
         logger.log_text("compile.enabled=true but skipped because FSDP is on. Set compile.allow_fsdp=true to force it.")
 
-    fsdp_meta = None
+    fsdp_mode = "none"
     if use_fsdp:
-        model, fsdp_meta = wrap_fsdp2(
+        model, fsdp_mode = wrap_fsdp2(
             model,
             mixed_precision=distributed_cfg.get("precision", "bf16") in {"bf16", "fp16"},
             precision=distributed_cfg.get("precision", "bf16"),
@@ -598,14 +608,10 @@ def train(cfg: dict):
             activation_ckpt=bool(distributed_cfg.get("activation_ckpt", False)),
             device_id=local_rank,
         )
-    else:
-        from x0loop.utils.fsdp import FSDPMeta
-
-        fsdp_meta = FSDPMeta(enabled=False, mode="none")
     if is_main:
         logger.log_text(
             f"[runtime] distributed={is_distributed}, world_size={world_size}, use_fsdp={use_fsdp}, "
-            f"fsdp_mode={fsdp_meta.mode}, compile={compile_enabled}, precision={distributed_cfg.get('precision', 'bf16')}"
+            f"fsdp_mode={fsdp_mode}, compile={compile_enabled}, precision={distributed_cfg.get('precision', 'bf16')}"
         )
 
     schedule = build_schedule(cfg)
@@ -723,30 +729,9 @@ def train(cfg: dict):
             t = schedule.sample_t(bsz, device=device)
             cond = y.to(device, non_blocking=True) if (use_label_cond and isinstance(y, torch.Tensor)) else None
 
-            if augment_mode in {"data_only", "equivariant_in_loss"}:
-                params = augment.sample_params(bsz, device=device)
-            else:
-                params = None
-
-            x0_orig = x0
             if augment_mode == "data_only":
-                x0 = augment.apply(x0, params)
-                fb = process.forward_sample(x0=x0, t=t)
-            elif augment_mode == "equivariant_in_loss":
-                x0_aug = augment.apply(x0, params)
-                fb = process.forward_sample(x0=x0_aug, t=t)
-
-                # Redefine target so that:
-                #   a * x0_aug + s * eps = a * x0_orig + s * target
-                alpha = fb.aux.get("alpha", schedule.alpha(t))
-                sigma = fb.aux.get("sigma", schedule.sigma(t))
-                a = process._reshape_coeff(alpha, x0_orig)
-                s = process._reshape_coeff(sigma, x0_orig).clamp_min(1e-5)
-                fb.target = (fb.xt - a * x0_orig) / s
-                fb.aux["x0_orig"] = x0_orig
-                fb.aux["x0_aug"] = x0_aug
-            else:
-                fb = process.forward_sample(x0=x0, t=t)
+                x0 = augment.apply(x0, augment.sample_params(bsz, device=device))
+            fb = process.forward_sample(x0=x0, t=t)
 
             amp_dtype = torch.float32
             if precision == "bf16":
@@ -759,35 +744,29 @@ def train(cfg: dict):
             x0_loss = None
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=(precision in {"bf16", "fp16"})):
                 out = model(fb.xt, fb.t, cond=cond)
+
                 eps_loss = loss_fn(out, fb.target, t=fb.t, aux=fb.aux)
                 loss = eps_loss
+
                 if dual_x0_enabled and dual_balance_factor > 0.0:
-                    x0_target = fb.aux.get("x0_orig", fb.x0)
-                    x0_pred = process.x0_from_output(fb.xt, fb.t, out, aux=fb.aux)
-                    x0_per_example = ((x0_pred - x0_target) ** 2).view(x0_pred.shape[0], -1).mean(dim=1)
-                    if isinstance(loss_fn, WeightedLoss):
-                        w = loss_fn.weight_fn(fb.t, fb.aux)
-                        if w.ndim > 1:
-                            w = w.view(w.shape[0], -1).mean(dim=1)
-                        x0_per_example = x0_per_example * w.to(dtype=x0_per_example.dtype)
-                    x0_loss = x0_per_example.mean()
+                    x0_loss = compute_dual_x0_loss(process, fb, out, loss_fn)
                     loss = (1.0 - dual_balance_factor) * eps_loss + dual_balance_factor * x0_loss
 
             if scaler is not None:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 if grad_clip > 0:
-                    grad_norm = fsdp_meta.clip_grad_norm(model, grad_clip)
+                    grad_norm = clip_grad_norm(model, grad_clip)
                 else:
-                    grad_norm = fsdp_meta.clip_grad_norm(model, float("inf"))
+                    grad_norm = clip_grad_norm(model, float("inf"))
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
                 if grad_clip > 0:
-                    grad_norm = fsdp_meta.clip_grad_norm(model, grad_clip)
+                    grad_norm = clip_grad_norm(model, grad_clip)
                 else:
-                    grad_norm = fsdp_meta.clip_grad_norm(model, float("inf"))
+                    grad_norm = clip_grad_norm(model, float("inf"))
                 optimizer.step()
 
             if ema is not None:

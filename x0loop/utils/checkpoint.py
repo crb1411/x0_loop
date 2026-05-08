@@ -15,7 +15,7 @@ def _strip_state_dict_prefix(state_dict: dict, prefix: str) -> dict:
 
 
 def _candidate_state_dicts(state_dict: dict) -> list[tuple[str, dict]]:
-    # Try common wrapper prefixes from compile/DDP/FSDP stacks.
+    # Try common wrapper prefixes from compile/DDP/FSDP2 stacks.
     cands: list[tuple[str, dict]] = [("none", state_dict)]
     prefixes = [
         "_orig_mod.",
@@ -56,10 +56,8 @@ def _load_model_state_with_fallback(model, state_dict: dict, strict: bool = True
 
 def _get_fsdp_mode(model) -> str:
     mode = getattr(model, "_x0loop_fsdp_mode", None)
-    if isinstance(mode, str) and mode in {"fsdp1", "fsdp2", "none"}:
+    if isinstance(mode, str) and mode in {"fsdp2", "none"}:
         return mode
-    if model.__class__.__name__ == "FullyShardedDataParallel":
-        return "fsdp1"
     return "none"
 
 
@@ -97,24 +95,10 @@ def save_checkpoint(
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
     fsdp_mode = _get_fsdp_mode(model)
-    use_fsdp = fsdp_mode in {"fsdp1", "fsdp2"}
-    if fsdp_mode == "fsdp1":
-        try:
-            from torch.distributed.fsdp import (
-                FullyShardedDataParallel as FSDP,
-                FullStateDictConfig,
-                ShardedStateDictConfig,
-                StateDictType,
-            )
-        except Exception:
-            use_fsdp = False
+    use_fsdp = fsdp_mode == "fsdp2"
 
     if use_fsdp and mode == "sharded":
-        if fsdp_mode == "fsdp1":
-            with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT, ShardedStateDictConfig(offload_to_cpu=True)):
-                model_state = model.state_dict()
-        else:
-            model_state = model.state_dict()
+        model_state = model.state_dict()
         ckpt = {
             "model": model_state,
             "optimizer": optimizer.state_dict(),
@@ -131,19 +115,9 @@ def save_checkpoint(
         return
 
     if use_fsdp and mode == "full":
-        if fsdp_mode == "fsdp1":
-            if not is_main:
-                return
-            with FSDP.state_dict_type(
-                model,
-                StateDictType.FULL_STATE_DICT,
-                FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
-            ):
-                model_state = model.state_dict()
-        else:
-            model_state = _maybe_fsdp2_full_state_dict(model)
-            if not is_main:
-                return
+        model_state = _maybe_fsdp2_full_state_dict(model)
+        if not is_main:
+            return
     else:
         if not is_main:
             return

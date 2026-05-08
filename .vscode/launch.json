@@ -11,7 +11,7 @@
                 "--config",
                 "x0loop/configs/default.yaml",
                 "--runtime-config",
-                "/x0loop/configs/runtime/debug_runtime.yaml"
+                "x0loop/configs/runtime/debug_runtime.yaml"
             ],
             "env": {
                 "CUDA_VISIBLE_DEVICES": "0",
