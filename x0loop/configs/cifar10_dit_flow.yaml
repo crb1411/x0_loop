@@ -23,6 +23,7 @@ schedule:
 
 loss:
   name: mse
+  train_mode: v # eps | x0 | v | x0_dual
 
 augment:
   name: none

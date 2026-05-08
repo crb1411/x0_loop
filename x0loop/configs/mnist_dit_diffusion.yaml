@@ -28,13 +28,13 @@ schedule:
 
 loss:
   name: weighted # mse | l1 | huber | weighted | composite
+  train_mode: x0_dual # eps | x0 | v | x0_dual
   inner: mse # mse | l1 | huber (used when name=weighted)
   weight: balance_weights # snr | inv_snr | logsnr | balance_weights
   balance_factor: 0.3 # [0,1], used when weight=balance_weights
   balance_time: auto # auto | discrete | continuous (used when weight=balance_weights)
   balance_integral_steps: 2000 # used when balance_time=continuous
-  dual_x0: true # false | true, add x0 reconstruction MSE term
-  dual_balance_factor: 0.5 # [0,1], total=(1-b)*L_eps + b*L_x0; b=0 means original eps-only loss
+  dual_balance_factor: 0.5 # [0,1], used when train_mode=x0_dual: total=(1-b)*L_eps + b*L_x0
 
 
 augment:
