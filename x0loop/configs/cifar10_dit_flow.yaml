@@ -12,6 +12,7 @@ model:
   heads: 6
   mlp_ratio: 4.0
   dropout: 0.0
+  num_classes: 10 # 0 disables class conditioning; when >0, label id num_classes is the CFG null label
 
 process:
   name: flow
@@ -32,6 +33,7 @@ train:
   epochs: 400
   batch_size: 256
   gradient_accumulation_steps: 1
+  class_dropout_prob: 0.1 # [0,1], replace class label with CFG null label during training
   num_workers: 8
   lr: 2.0e-4
   weight_decay: 0.05
@@ -51,5 +53,6 @@ sample:
   steps: 50
   num: 16
   sampler: auto # ignored for flow process; kept for config compatibility
+  guidance_scale: 1.0 # 1.0 disables CFG; >1 uses conditional + null-label unconditional prediction
   posterior_noise_scale: 1.0 # ignored for flow process
   save_trace: true

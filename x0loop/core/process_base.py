@@ -62,6 +62,8 @@ class BaseProcess:
         rng=None,
         return_trace: bool = False,
         cond=None,
+        null_cond=None,
+        guidance_scale: float = 1.0,
         sampler: str | None = None,
         posterior_noise_scale: float | None = None,
     ) -> dict:
@@ -72,6 +74,9 @@ class BaseProcess:
         for t_scalar, s_scalar in self.schedule.iter_pairs(steps=steps, device=device):
             t = torch.full((shape[0],), float(t_scalar.item()), device=device, dtype=torch.float32)
             out = model(x, t, cond=cond)
+            if cond is not None and null_cond is not None and float(guidance_scale) != 1.0:
+                out_uncond = model(x, t, cond=null_cond)
+                out = out_uncond + float(guidance_scale) * (out - out_uncond)
             x0_hat = self.x0_from_output(x, t, out, aux={})
             step_aux: dict[str, Any] = {}
             if sampler is not None:

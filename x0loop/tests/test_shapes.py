@@ -32,3 +32,25 @@ def test_shapes_diffusion():
 
 def test_shapes_flow():
     _run_shape_test("flow")
+
+
+def test_dit_cfg_null_label():
+    cfg = DiTConfig(
+        image_size=32,
+        in_channels=3,
+        out_channels=3,
+        patch_size=4,
+        dim=128,
+        depth=2,
+        heads=4,
+        mlp_ratio=2.0,
+        num_classes=10,
+    )
+    model = DiT(cfg)
+    assert model.label_emb.num_embeddings == 11
+
+    x = torch.randn(2, 3, 32, 32)
+    t = torch.rand(2)
+    cond = torch.tensor([0, 10])
+    out = model(x, t, cond=cond)
+    assert out.shape == x.shape

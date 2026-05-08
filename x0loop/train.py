@@ -307,6 +307,22 @@ def build_sample_cond(
     return cond[:sample_num]
 
 
+def build_null_class_cond(cfg: dict, *, sample_num: int, device: torch.device) -> torch.Tensor | None:
+    num_classes = int(cfg.get("model", {}).get("num_classes", 0))
+    if num_classes <= 0:
+        return None
+    return torch.full((sample_num,), num_classes, device=device, dtype=torch.long)
+
+
+def apply_classifier_free_label_dropout(cond: torch.Tensor | None, *, null_class_id: int, drop_prob: float) -> torch.Tensor | None:
+    if cond is None or drop_prob <= 0.0:
+        return cond
+    if not (0.0 <= drop_prob <= 1.0):
+        raise ValueError(f"train.class_dropout_prob must be in [0,1], got {drop_prob}")
+    drop_mask = torch.rand(cond.shape, device=cond.device) < drop_prob
+    return torch.where(drop_mask, torch.full_like(cond, null_class_id), cond)
+
+
 def bucket_losses(t: torch.Tensor, per_example_loss: torch.Tensor) -> dict[str, float]:
     edges = [0.0, 0.1, 0.3, 0.7, 1.0]
     out = {}
@@ -958,6 +974,7 @@ def amp_dtype_for_precision(precision: str) -> torch.dtype:
 
 def compute_forward_batch(
     *,
+    cfg: dict,
     model: torch.nn.Module,
     runtime: RuntimeContext,
     model_ctx: ModelContext,
@@ -970,6 +987,12 @@ def compute_forward_batch(
     bsz = x0.shape[0]
     t = components.schedule.sample_t(bsz, device=runtime.device)
     cond = y.to(runtime.device, non_blocking=True) if (use_label_cond and isinstance(y, torch.Tensor)) else None
+    if cond is not None:
+        cond = apply_classifier_free_label_dropout(
+            cond,
+            null_class_id=int(model_ctx.model_cfg.num_classes),
+            drop_prob=float(cfg["train"].get("class_dropout_prob", 0.0)),
+        )
 
     if components.augment_mode == "data_only":
         x0 = components.augment.apply(x0, components.augment.sample_params(bsz, device=runtime.device))
@@ -1115,6 +1138,8 @@ def run_sampling_if_due(
                 device=runtime.device,
                 batch_cond=cond if use_label_cond else None,
             )
+            null_cond = build_null_class_cond(cfg, sample_num=sample_num, device=runtime.device)
+            guidance_scale = float(cfg["sample"].get("guidance_scale", 1.0))
             sample_sampler = cfg["sample"].get("sampler", None)
             if isinstance(sample_sampler, str) and sample_sampler.lower() == "auto":
                 sample_sampler = None
@@ -1126,6 +1151,8 @@ def run_sampling_if_due(
                 dtype=torch.float32,
                 return_trace=True,
                 cond=sample_cond,
+                null_cond=null_cond,
+                guidance_scale=guidance_scale,
                 sampler=sample_sampler,
                 posterior_noise_scale=cfg["sample"].get("posterior_noise_scale", None),
             )
@@ -1216,6 +1243,7 @@ def train(cfg: dict):
                 components.optimizer.zero_grad(set_to_none=True)
 
             batch = compute_forward_batch(
+                cfg=cfg,
                 model=model,
                 runtime=runtime,
                 model_ctx=model_ctx,

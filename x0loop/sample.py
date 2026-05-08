@@ -7,7 +7,7 @@ import torch
 
 from x0loop.core.config import DEFAULT_RUNTIME_CONFIG, load_merged_config
 from x0loop.models.dit import DiT, DiTConfig
-from x0loop.train import build_process, build_sample_cond, build_schedule, save_sample_grid
+from x0loop.train import build_null_class_cond, build_process, build_sample_cond, build_schedule, save_sample_grid
 from x0loop.utils.checkpoint import load_checkpoint
 from x0loop.utils.dist import init_distributed, is_main_process
 from x0loop.utils.ema import EMA
@@ -22,6 +22,7 @@ def parse_args():
     p.add_argument("--out", type=str, default=None)
     p.add_argument("--sampler", type=str, default="auto", choices=["auto", "ddim", "posterior"])
     p.add_argument("--posterior-noise-scale", type=float, default=None)
+    p.add_argument("--guidance-scale", type=float, default=None)
     return p.parse_args()
 
 
@@ -89,6 +90,7 @@ def main():
     model.eval()
     sample_num = int(cfg["sample"].get("num", 16))
     sample_cond = build_sample_cond(cfg, sample_num=sample_num, device=device, batch_cond=None)
+    null_cond = build_null_class_cond(cfg, sample_num=sample_num, device=device)
     with torch.no_grad():
         sampler = None if args.sampler == "auto" else args.sampler
         if sampler is None:
@@ -104,6 +106,10 @@ def main():
             dtype=torch.float32,
             return_trace=bool(cfg["sample"].get("save_trace", False)),
             cond=sample_cond,
+            null_cond=null_cond,
+            guidance_scale=float(
+                args.guidance_scale if args.guidance_scale is not None else cfg["sample"].get("guidance_scale", 1.0)
+            ),
             sampler=sampler,
             posterior_noise_scale=(
                 args.posterior_noise_scale

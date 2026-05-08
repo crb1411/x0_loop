@@ -155,7 +155,8 @@ class DiT(nn.Module):
 
         self.pos = nn.Parameter(torch.zeros(1, self.num_tokens, cfg.dim))
         self.time_mlp = TimeEmbedMLP(dim=cfg.dim)
-        self.label_emb = nn.Embedding(cfg.num_classes, cfg.dim) if cfg.num_classes > 0 else None
+        self.null_class_id = cfg.num_classes if cfg.num_classes > 0 else None
+        self.label_emb = nn.Embedding(cfg.num_classes + 1, cfg.dim) if cfg.num_classes > 0 else None
         self.cond_proj = nn.Linear(cfg.cond_dim, cfg.dim) if cfg.cond_dim > 0 else None
         self.blocks = nn.ModuleList(
             [
@@ -212,12 +213,20 @@ class DiT(nn.Module):
 
     def _cond_embedding(self, cond: torch.Tensor | None, batch: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         if cond is None:
+            if self.label_emb is not None and self.null_class_id is not None:
+                null_cond = torch.full((batch,), self.null_class_id, device=device, dtype=torch.long)
+                return self.label_emb(null_cond).to(dtype)
             return torch.zeros(batch, self.cfg.dim, device=device, dtype=dtype)
 
         if cond.ndim == 1 and cond.dtype in (torch.int32, torch.int64, torch.int16, torch.uint8):
             if self.label_emb is None:
                 raise ValueError("Received class-label cond but DiTConfig.num_classes <= 0.")
-            return self.label_emb(cond.to(device=device, dtype=torch.long)).to(dtype)
+            cond = cond.to(device=device, dtype=torch.long)
+            if bool((cond < 0).any()) or bool((cond > self.null_class_id).any()):
+                raise ValueError(
+                    f"Class-label cond must be in [0, {self.null_class_id}], where {self.null_class_id} is the null CFG label."
+                )
+            return self.label_emb(cond).to(dtype)
 
         if cond.ndim == 2:
             cond = cond.to(device=device, dtype=dtype)
