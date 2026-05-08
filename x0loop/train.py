@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import math
 import os
 import time
@@ -26,6 +27,108 @@ from x0loop.utils.checkpoint import load_checkpoint, save_checkpoint
 from x0loop.utils.ema import EMA
 from x0loop.utils.fsdp import clip_grad_norm, wrap_fsdp2
 from x0loop.utils.logger import Logger, MetricLogger
+
+
+@dataclass
+class RuntimeContext:
+    distributed_cfg: dict
+    compile_cfg: dict
+    dist_info: dict
+    device: torch.device
+    out_dir: str
+    logger: Logger
+
+    @property
+    def rank(self) -> int:
+        return int(self.dist_info["rank"])
+
+    @property
+    def local_rank(self) -> int:
+        return int(self.dist_info["local_rank"])
+
+    @property
+    def world_size(self) -> int:
+        return int(self.dist_info["world_size"])
+
+    @property
+    def is_main(self) -> bool:
+        return bool(self.dist_info["is_main"])
+
+    @property
+    def is_distributed(self) -> bool:
+        return bool(self.dist_info["is_distributed"])
+
+
+@dataclass
+class DataContext:
+    dataset: object
+    sampler: DistributedSampler | None
+    loader: DataLoader
+
+
+@dataclass
+class ModelContext:
+    model: torch.nn.Module
+    model_cfg: DiTConfig
+    use_fsdp: bool
+    fsdp_mode: str
+    precision: str
+
+
+@dataclass
+class DualLossConfig:
+    enabled: bool
+    balance_factor: float
+    summary_include_x0: bool
+
+
+@dataclass
+class TrainComponents:
+    schedule: TimeSchedule
+    process: object
+    loss_fn: object
+    augment: object
+    augment_mode: str
+    optimizer: torch.optim.Optimizer
+    scaler: object | None
+    ema: EMA | None
+    dual_loss: DualLossConfig
+
+
+@dataclass
+class ResumeState:
+    start_epoch: int
+    global_step: int
+    run_step: int
+    ckpt_mode: str
+
+
+@dataclass
+class LoopConfig:
+    epochs: int
+    gradient_accumulation_steps: int
+    micro_steps_per_epoch: int
+    optimizer_steps_per_epoch: int
+    total_steps: int
+    lr_for_step: object
+    lr_sched_meta: dict
+    grad_clip: float
+    log_every: int
+    sample_every: int
+    save_every: int
+    sample_rank0_only: bool
+    tbin_count: int
+
+
+@dataclass
+class ForwardBatch:
+    loss: torch.Tensor
+    eps_loss: torch.Tensor
+    x0_loss: torch.Tensor | None
+    batch_size: int
+    cond: torch.Tensor | None
+    fb: object
+    out: torch.Tensor
 
 
 def _maybe_import_vision():
@@ -321,6 +424,74 @@ def format_tbin_summary(
     return " | ".join(parts)
 
 
+class TimeBinAccumulator:
+    def __init__(self, *, num_bins: int, device: torch.device, include_x0: bool):
+        self.num_bins = int(num_bins)
+        self.include_x0 = bool(include_x0)
+        self.edges = torch.linspace(0.0, 1.0, self.num_bins + 1, device=device, dtype=torch.float64)
+        self.counts = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
+        self.sum_alpha = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
+        self.sum_weight = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
+        self.sum_loss = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
+        self.sum_x0_loss = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
+
+    def update(self, *, schedule, process, loss_fn, fb, out) -> None:
+        per_example_unweighted = compute_unweighted_per_example_loss(
+            loss_fn, out.detach(), fb.target.detach(), t=fb.t.detach(), aux=fb.aux
+        )
+        per_example_weight = compute_per_example_weight(loss_fn, t=fb.t.detach(), aux=fb.aux)
+        c, sw, sl = compute_tbin_sums(
+            fb.t.detach(), per_example_unweighted, per_example_weight, num_bins=self.num_bins
+        )
+
+        alpha_t = fb.aux.get("alpha")
+        if alpha_t is None:
+            alpha_t = schedule.alpha(fb.t.detach())
+        alpha_t = alpha_t.detach()
+        if alpha_t.ndim > 1:
+            alpha_t = alpha_t.view(alpha_t.shape[0], -1).mean(dim=1)
+        _, sa = compute_tbin_value_sum(fb.t.detach(), alpha_t, num_bins=self.num_bins)
+
+        self.counts += c
+        self.sum_alpha += sa
+        self.sum_weight += sw
+        self.sum_loss += sl
+        if self.include_x0:
+            per_example_x0_unweighted = compute_per_example_x0_unweighted_loss(process, fb, out)
+            _, _, sl_x0 = compute_tbin_sums(
+                fb.t.detach(), per_example_x0_unweighted, per_example_weight, num_bins=self.num_bins
+            )
+            self.sum_x0_loss += sl_x0
+
+    def summary(self, *, is_distributed: bool) -> str:
+        rc = self.counts.clone()
+        rsa = self.sum_alpha.clone()
+        rsw = self.sum_weight.clone()
+        rsl = self.sum_loss.clone()
+        rsxl = self.sum_x0_loss.clone()
+        if is_distributed and dist.is_available() and dist.is_initialized():
+            dist.all_reduce(rc, op=dist.ReduceOp.SUM)
+            dist.all_reduce(rsa, op=dist.ReduceOp.SUM)
+            dist.all_reduce(rsw, op=dist.ReduceOp.SUM)
+            dist.all_reduce(rsl, op=dist.ReduceOp.SUM)
+            if self.include_x0:
+                dist.all_reduce(rsxl, op=dist.ReduceOp.SUM)
+
+        denom = rc.clamp_min(1.0)
+        avg_a = rsa / denom
+        avg_w = rsw / denom
+        avg_loss = rsl / denom
+        avg_x0_loss = rsxl / denom if self.include_x0 else None
+        return format_tbin_summary(self.edges, rc, avg_a, avg_w, avg_loss, avg_x0_loss)
+
+    def reset(self) -> None:
+        self.counts.zero_()
+        self.sum_alpha.zero_()
+        self.sum_weight.zero_()
+        self.sum_loss.zero_()
+        self.sum_x0_loss.zero_()
+
+
 def maybe_make_scaler(precision: str, use_fsdp: bool):
     # use_fsdp kept for API compatibility; GradScaler is unified in torch.amp.
     del use_fsdp
@@ -520,7 +691,7 @@ def save_trace_large_images(trace: list[dict], out_dir: str, prefix: str):
         canvas.save(out_path)
 
 
-def train(cfg: dict):
+def init_runtime(cfg: dict) -> RuntimeContext:
     distributed_cfg = cfg.get("distributed", {})
     compile_cfg = cfg.get("compile", {})
 
@@ -529,12 +700,8 @@ def train(cfg: dict):
         backend = "gloo"
     dist_info = dist_utils.init_distributed(backend=backend)
 
-    rank = dist_info["rank"]
-    local_rank = dist_info["local_rank"]
-    world_size = dist_info["world_size"]
-    is_main = dist_info["is_main"]
-    is_distributed = dist_info["is_distributed"]
-
+    is_main = bool(dist_info["is_main"])
+    is_distributed = bool(dist_info["is_distributed"])
     run_timestamp = os.environ.get("X0LOOP_RUN_TIMESTAMP", "")
     if is_main and not run_timestamp:
         run_timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
@@ -552,12 +719,31 @@ def train(cfg: dict):
         resolved_config_path = dump_resolved_config(cfg, out_dir)
         logger.log_text(f"resolved_config={resolved_config_path}")
 
+    local_rank = int(dist_info["local_rank"])
     device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
-    dist_utils.seed_everything(int(cfg["train"].get("seed", 42)), rank=rank, deterministic=bool(cfg["train"].get("deterministic", False)))
+    dist_utils.seed_everything(
+        int(cfg["train"].get("seed", 42)),
+        rank=int(dist_info["rank"]),
+        deterministic=bool(cfg["train"].get("deterministic", False)),
+    )
 
+    return RuntimeContext(
+        distributed_cfg=distributed_cfg,
+        compile_cfg=compile_cfg,
+        dist_info=dist_info,
+        device=device,
+        out_dir=out_dir,
+        logger=logger,
+    )
+
+
+def build_data_context(cfg: dict, runtime: RuntimeContext) -> DataContext:
     dataset = build_dataset(cfg)
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True) if is_distributed else None
-
+    sampler = (
+        DistributedSampler(dataset, num_replicas=runtime.world_size, rank=runtime.rank, shuffle=True)
+        if runtime.is_distributed
+        else None
+    )
     loader = DataLoader(
         dataset,
         batch_size=int(cfg["train"]["batch_size"]),
@@ -567,394 +753,544 @@ def train(cfg: dict):
         pin_memory=torch.cuda.is_available(),
         drop_last=True,
     )
+    return DataContext(dataset=dataset, sampler=sampler, loader=loader)
 
+
+def log_model_summary(logger: Logger, model: torch.nn.Module, model_cfg: DiTConfig, device: torch.device) -> None:
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.log_text(f"[model] init: model = DiT(model_cfg).to(device), device={device}")
+    logger.log_text(
+        "[model] config: "
+        f"image_size={model_cfg.image_size}, in_channels={model_cfg.in_channels}, out_channels={model_cfg.out_channels}, "
+        f"patch_size={model_cfg.patch_size}, dim={model_cfg.dim}, depth={model_cfg.depth}, heads={model_cfg.heads}, "
+        f"mlp_ratio={model_cfg.mlp_ratio}, norm_layer={model_cfg.norm_layer}"
+    )
+    logger.log_text(
+        "[model] shapes: "
+        f"input=[B,{model_cfg.in_channels},{model_cfg.image_size},{model_cfg.image_size}], "
+        f"output=[B,{model_cfg.out_channels},{model_cfg.image_size},{model_cfg.image_size}], "
+        f"tokens={model.num_tokens} ({model.h_tokens}x{model.w_tokens}), token_dim={model_cfg.dim}"
+    )
+    logger.log_text(f"[model] params: total={total_params:,}, trainable={trainable_params:,}")
+
+
+def build_model_context(cfg: dict, runtime: RuntimeContext) -> ModelContext:
     model_cfg = DiTConfig(**cfg["model"])
-    model = DiT(model_cfg).to(device)
-    if is_main:
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        logger.log_text(f"[model] init: model = DiT(model_cfg).to(device), device={device}")
-        logger.log_text(
-            "[model] config: "
-            f"image_size={model_cfg.image_size}, in_channels={model_cfg.in_channels}, out_channels={model_cfg.out_channels}, "
-            f"patch_size={model_cfg.patch_size}, dim={model_cfg.dim}, depth={model_cfg.depth}, heads={model_cfg.heads}, "
-            f"mlp_ratio={model_cfg.mlp_ratio}, norm_layer={model_cfg.norm_layer}"
-        )
-        logger.log_text(
-            "[model] shapes: "
-            f"input=[B,{model_cfg.in_channels},{model_cfg.image_size},{model_cfg.image_size}], "
-            f"output=[B,{model_cfg.out_channels},{model_cfg.image_size},{model_cfg.image_size}], "
-            f"tokens={model.num_tokens} ({model.h_tokens}x{model.w_tokens}), token_dim={model_cfg.dim}"
-        )
-        logger.log_text(f"[model] params: total={total_params:,}, trainable={trainable_params:,}")
+    model = DiT(model_cfg).to(runtime.device)
+    if runtime.is_main:
+        log_model_summary(runtime.logger, model, model_cfg, runtime.device)
 
-
-    use_fsdp = bool(distributed_cfg.get("fsdp", False) and is_distributed)
-    compile_enabled = bool(compile_cfg.get("enabled", False))
-    allow_compile_with_fsdp = bool(compile_cfg.get("allow_fsdp", False))
+    use_fsdp = bool(runtime.distributed_cfg.get("fsdp", False) and runtime.is_distributed)
+    compile_enabled = bool(runtime.compile_cfg.get("enabled", False))
+    allow_compile_with_fsdp = bool(runtime.compile_cfg.get("allow_fsdp", False))
 
     if compile_enabled and (not use_fsdp or allow_compile_with_fsdp):
-        model = maybe_compile_model(model, compile_cfg)
-    elif compile_enabled and use_fsdp and (not allow_compile_with_fsdp) and is_main:
-        logger.log_text("compile.enabled=true but skipped because FSDP is on. Set compile.allow_fsdp=true to force it.")
+        model = maybe_compile_model(model, runtime.compile_cfg)
+    elif compile_enabled and use_fsdp and (not allow_compile_with_fsdp) and runtime.is_main:
+        runtime.logger.log_text("compile.enabled=true but skipped because FSDP is on. Set compile.allow_fsdp=true to force it.")
 
     fsdp_mode = "none"
     if use_fsdp:
         model, fsdp_mode = wrap_fsdp2(
             model,
-            mixed_precision=distributed_cfg.get("precision", "bf16") in {"bf16", "fp16"},
-            precision=distributed_cfg.get("precision", "bf16"),
+            mixed_precision=runtime.distributed_cfg.get("precision", "bf16") in {"bf16", "fp16"},
+            precision=runtime.distributed_cfg.get("precision", "bf16"),
             use_compile=compile_enabled,
-            activation_ckpt=bool(distributed_cfg.get("activation_ckpt", False)),
-            device_id=local_rank,
-        )
-    if is_main:
-        logger.log_text(
-            f"[runtime] distributed={is_distributed}, world_size={world_size}, use_fsdp={use_fsdp}, "
-            f"fsdp_mode={fsdp_mode}, compile={compile_enabled}, precision={distributed_cfg.get('precision', 'bf16')}"
+            activation_ckpt=bool(runtime.distributed_cfg.get("activation_ckpt", False)),
+            device_id=runtime.local_rank,
         )
 
+    precision = str(runtime.distributed_cfg.get("precision", "bf16"))
+    if runtime.device.type == "cpu" and precision in {"bf16", "fp16"}:
+        if runtime.is_main:
+            runtime.logger.log_text(f"precision={precision} is not stable on CPU here, fallback to fp32.")
+        precision = "fp32"
+
+    if runtime.is_main:
+        runtime.logger.log_text(
+            f"[runtime] distributed={runtime.is_distributed}, world_size={runtime.world_size}, use_fsdp={use_fsdp}, "
+            f"fsdp_mode={fsdp_mode}, compile={compile_enabled}, precision={precision}"
+        )
+
+    return ModelContext(model=model, model_cfg=model_cfg, use_fsdp=use_fsdp, fsdp_mode=fsdp_mode, precision=precision)
+
+
+def build_train_components(cfg: dict, model_ctx: ModelContext, runtime: RuntimeContext) -> TrainComponents:
     schedule = build_schedule(cfg)
     process = build_process(cfg, schedule)
     loss_fn = build_loss(cfg, schedule)
     augment, augment_mode = build_augment(cfg)
+
     loss_cfg = cfg.get("loss", {})
     dual_x0_enabled = bool(loss_cfg.get("dual_x0", loss_cfg.get("dual_loss", False)))
     dual_balance_factor = float(loss_cfg.get("dual_balance_factor", 0.5))
     if not (0.0 <= dual_balance_factor <= 1.0):
         raise ValueError(f"loss.dual_balance_factor must be in [0,1], got {dual_balance_factor}")
     summary_include_x0 = bool(cfg.get("logging", {}).get("summary_include_x0", dual_x0_enabled))
-    if is_main and dual_x0_enabled:
-        logger.log_text(
+    if runtime.is_main and dual_x0_enabled:
+        runtime.logger.log_text(
             f"[loss] dual_x0 enabled: total=(1-{dual_balance_factor:.4g})*L_eps + {dual_balance_factor:.4g}*L_x0",
         )
 
-    lr = float(cfg["train"].get("lr", 1e-4))
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=float(cfg["train"].get("weight_decay", 0.05)))
+    optimizer = torch.optim.AdamW(
+        model_ctx.model.parameters(),
+        lr=float(cfg["train"].get("lr", 1e-4)),
+        betas=(0.9, 0.95),
+        weight_decay=float(cfg["train"].get("weight_decay", 0.05)),
+    )
+    scaler = maybe_make_scaler(precision=model_ctx.precision, use_fsdp=model_ctx.use_fsdp)
+    ema = EMA(model=model_ctx.model, decay=float(cfg["train"].get("ema_decay", 0.9999))) if bool(cfg["train"].get("use_ema", True)) else None
 
-    precision = str(distributed_cfg.get("precision", "bf16"))
-    if device.type == "cpu" and precision in {"bf16", "fp16"}:
-        if is_main:
-            logger.log_text(f"precision={precision} is not stable on CPU here, fallback to fp32.")
-        precision = "fp32"
-    scaler = maybe_make_scaler(precision=precision, use_fsdp=use_fsdp)
+    return TrainComponents(
+        schedule=schedule,
+        process=process,
+        loss_fn=loss_fn,
+        augment=augment,
+        augment_mode=augment_mode,
+        optimizer=optimizer,
+        scaler=scaler,
+        ema=ema,
+        dual_loss=DualLossConfig(
+            enabled=dual_x0_enabled,
+            balance_factor=dual_balance_factor,
+            summary_include_x0=summary_include_x0,
+        ),
+    )
 
-    ema = None
-    if bool(cfg["train"].get("use_ema", True)):
-        ema = EMA(model=model, decay=float(cfg["train"].get("ema_decay", 0.9999)))
 
+def load_resume_state(cfg: dict, model_ctx: ModelContext, components: TrainComponents, runtime: RuntimeContext) -> ResumeState:
     resume_path = cfg["train"].get("resume")
-    start_epoch = 0
-    global_step = 0
-    run_step = 0
-    ckpt_mode = distributed_cfg.get("checkpoint", {}).get("mode", "full")
+    ckpt_mode = runtime.distributed_cfg.get("checkpoint", {}).get("mode", "full")
     if resume_path:
         ckpt = load_checkpoint(
             resume_path,
-            model=model,
-            optimizer=optimizer,
-            scaler=scaler,
-            ema=ema,
+            model=model_ctx.model,
+            optimizer=components.optimizer,
+            scaler=components.scaler,
+            ema=components.ema,
             map_location="cpu",
             mode=ckpt_mode,
         )
         start_epoch = int(ckpt.get("epoch", 0))
         global_step = int(ckpt.get("step", 0))
-        if is_main:
+        if runtime.is_main:
             ckpt_keys = ",".join(sorted(ckpt.keys()))
-            logger.log_text(
+            runtime.logger.log_text(
                 f"[resume] loaded: path={resume_path}, mode={ckpt_mode}, step={global_step}, epoch={start_epoch}, keys=[{ckpt_keys}]",
             )
-    elif is_main:
-        logger.log_text("[resume] none (start from scratch)")
+        return ResumeState(start_epoch=start_epoch, global_step=global_step, run_step=0, ckpt_mode=ckpt_mode)
 
-    meters = MetricLogger(window_size=int(cfg["logging"].get("window_size", 20)))
+    if runtime.is_main:
+        runtime.logger.log_text("[resume] none (start from scratch)")
+    return ResumeState(start_epoch=0, global_step=0, run_step=0, ckpt_mode=ckpt_mode)
 
+
+def build_loop_config(cfg: dict, loader: DataLoader, distributed_cfg: dict) -> LoopConfig:
     epochs = int(cfg["train"]["epochs"])
     gradient_accumulation_steps = int(cfg["train"].get("gradient_accumulation_steps", 1))
     if gradient_accumulation_steps <= 0:
         raise ValueError(f"train.gradient_accumulation_steps must be > 0, got {gradient_accumulation_steps}")
+
     micro_steps_per_epoch = len(loader)
     optimizer_steps_per_epoch = math.ceil(micro_steps_per_epoch / gradient_accumulation_steps)
     total_steps = epochs * optimizer_steps_per_epoch
     lr_for_step, lr_sched_meta = build_step_lr_schedule(
         cfg["train"], total_steps=total_steps, steps_per_epoch=optimizer_steps_per_epoch
     )
+
     grad_clip_cfg = cfg.get("train", {}).get("max_clip_grad", None)
     if grad_clip_cfg is None:
         grad_clip_cfg = cfg.get("train", {}).get("max_grad_norm", None)
     if grad_clip_cfg is None:
         grad_clip_cfg = distributed_cfg.get("grad_clip_norm", 0.0)
-    grad_clip = float(grad_clip_cfg)
-    if is_main:
-        logger.log_text(
-            f"[train] gradient_accumulation_steps={gradient_accumulation_steps}, "
-            f"micro_steps_per_epoch={micro_steps_per_epoch}, optimizer_steps_per_epoch={optimizer_steps_per_epoch}"
-        )
-        logger.log_text(f"[train] grad_clip={grad_clip}")
-        if lr_sched_meta.get("name") == "cosine_warmup_hold":
-            logger.log_text(
-                "[train] lr_scheduler=cosine(warmup->cosine->hold_min) "
-                f"max_lr={lr_sched_meta['max_lr']:.6g} min_lr={lr_sched_meta['min_lr']:.6g} "
-                f"warmup_steps={lr_sched_meta['warmup_steps']} cosine_steps={lr_sched_meta['cosine_steps']} "
-                f"hold_min_from_step={lr_sched_meta['hold_min_from_step']}"
-            )
-        elif lr_sched_meta.get("name") in {"cosine_legacy", "cosine"}:
-            logger.log_text(
-                "[train] lr_scheduler=cosine(legacy) "
-                f"init_lr={lr_sched_meta['init_lr']:.6g} max_lr={lr_sched_meta['max_lr']:.6g} "
-                f"min_lr={lr_sched_meta['min_lr']:.6g} init_steps={lr_sched_meta['init_steps']} "
-                f"max_steps={lr_sched_meta['max_steps']} min_steps={lr_sched_meta['min_steps']} "
-                f"cosine_steps={lr_sched_meta['cosine_steps']}"
-            )
-        else:
-            logger.log_text(f"[train] lr_scheduler=constant lr={lr_sched_meta.get('base_lr', 0.0):.6g}")
-    log_every = int(cfg["logging"].get("log_every", 50))
-    sample_every = int(cfg["logging"].get("sample_every", 2000))
-    save_every = int(distributed_cfg.get("checkpoint", {}).get("every_steps", 2000))
-    sample_rank0_only = bool(cfg["logging"].get("sample_rank0_only", True))
-    tbin_count = int(cfg["logging"].get("t_bins", 20))
-    tbin_edges = torch.linspace(0.0, 1.0, tbin_count + 1, device=device, dtype=torch.float64)
-    tbin_counts = torch.zeros(tbin_count, device=device, dtype=torch.float64)
-    tbin_sum_alpha = torch.zeros(tbin_count, device=device, dtype=torch.float64)
-    tbin_sum_weight = torch.zeros(tbin_count, device=device, dtype=torch.float64)
-    tbin_sum_loss = torch.zeros(tbin_count, device=device, dtype=torch.float64)
-    tbin_sum_x0_loss = torch.zeros(tbin_count, device=device, dtype=torch.float64)
 
+    return LoopConfig(
+        epochs=epochs,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        micro_steps_per_epoch=micro_steps_per_epoch,
+        optimizer_steps_per_epoch=optimizer_steps_per_epoch,
+        total_steps=total_steps,
+        lr_for_step=lr_for_step,
+        lr_sched_meta=lr_sched_meta,
+        grad_clip=float(grad_clip_cfg),
+        log_every=int(cfg["logging"].get("log_every", 50)),
+        sample_every=int(cfg["logging"].get("sample_every", 2000)),
+        save_every=int(distributed_cfg.get("checkpoint", {}).get("every_steps", 2000)),
+        sample_rank0_only=bool(cfg["logging"].get("sample_rank0_only", True)),
+        tbin_count=int(cfg["logging"].get("t_bins", 20)),
+    )
+
+
+def log_loop_config(logger: Logger, loop_cfg: LoopConfig) -> None:
+    logger.log_text(
+        f"[train] gradient_accumulation_steps={loop_cfg.gradient_accumulation_steps}, "
+        f"micro_steps_per_epoch={loop_cfg.micro_steps_per_epoch}, optimizer_steps_per_epoch={loop_cfg.optimizer_steps_per_epoch}"
+    )
+    logger.log_text(f"[train] grad_clip={loop_cfg.grad_clip}")
+    meta = loop_cfg.lr_sched_meta
+    if meta.get("name") == "cosine_warmup_hold":
+        logger.log_text(
+            "[train] lr_scheduler=cosine(warmup->cosine->hold_min) "
+            f"max_lr={meta['max_lr']:.6g} min_lr={meta['min_lr']:.6g} "
+            f"warmup_steps={meta['warmup_steps']} cosine_steps={meta['cosine_steps']} "
+            f"hold_min_from_step={meta['hold_min_from_step']}"
+        )
+    elif meta.get("name") in {"cosine_legacy", "cosine"}:
+        logger.log_text(
+            "[train] lr_scheduler=cosine(legacy) "
+            f"init_lr={meta['init_lr']:.6g} max_lr={meta['max_lr']:.6g} "
+            f"min_lr={meta['min_lr']:.6g} init_steps={meta['init_steps']} "
+            f"max_steps={meta['max_steps']} min_steps={meta['min_steps']} "
+            f"cosine_steps={meta['cosine_steps']}"
+        )
+    else:
+        logger.log_text(f"[train] lr_scheduler=constant lr={meta.get('base_lr', 0.0):.6g}")
+
+
+def amp_dtype_for_precision(precision: str) -> torch.dtype:
+    if precision == "bf16":
+        return torch.bfloat16
+    if precision == "fp16":
+        return torch.float16
+    return torch.float32
+
+
+def compute_forward_batch(
+    *,
+    model: torch.nn.Module,
+    runtime: RuntimeContext,
+    model_ctx: ModelContext,
+    components: TrainComponents,
+    x0: torch.Tensor,
+    y: object,
+    use_label_cond: bool,
+) -> ForwardBatch:
+    x0 = x0.to(runtime.device, non_blocking=True)
+    bsz = x0.shape[0]
+    t = components.schedule.sample_t(bsz, device=runtime.device)
+    cond = y.to(runtime.device, non_blocking=True) if (use_label_cond and isinstance(y, torch.Tensor)) else None
+
+    if components.augment_mode == "data_only":
+        x0 = components.augment.apply(x0, components.augment.sample_params(bsz, device=runtime.device))
+    fb = components.process.forward_sample(x0=x0, t=t)
+
+    with torch.autocast(
+        device_type=runtime.device.type,
+        dtype=amp_dtype_for_precision(model_ctx.precision),
+        enabled=(model_ctx.precision in {"bf16", "fp16"}),
+    ):
+        out = model(fb.xt, fb.t, cond=cond)
+        eps_loss = components.loss_fn(out, fb.target, t=fb.t, aux=fb.aux)
+        loss = eps_loss
+
+        x0_loss = None
+        if components.dual_loss.enabled and components.dual_loss.balance_factor > 0.0:
+            x0_loss = compute_dual_x0_loss(components.process, fb, out, components.loss_fn)
+            bf = components.dual_loss.balance_factor
+            loss = (1.0 - bf) * eps_loss + bf * x0_loss
+
+    return ForwardBatch(
+        loss=loss,
+        eps_loss=eps_loss,
+        x0_loss=x0_loss,
+        batch_size=bsz,
+        cond=cond,
+        fb=fb,
+        out=out,
+    )
+
+
+def backward_loss(loss: torch.Tensor, *, current_accum_steps: int, scaler) -> None:
+    loss_for_backward = loss / float(current_accum_steps)
+    if scaler is not None:
+        scaler.scale(loss_for_backward).backward()
+    else:
+        loss_for_backward.backward()
+
+
+def should_step_optimizer(micro_step: int, loop_cfg: LoopConfig) -> bool:
+    return ((micro_step + 1) % loop_cfg.gradient_accumulation_steps == 0) or (
+        micro_step + 1 == loop_cfg.micro_steps_per_epoch
+    )
+
+
+def step_optimizer(model: torch.nn.Module, components: TrainComponents, grad_clip: float):
+    if components.scaler is not None:
+        components.scaler.unscale_(components.optimizer)
+        grad_norm = clip_grad_norm(model, grad_clip) if grad_clip > 0 else clip_grad_norm(model, float("inf"))
+        components.scaler.step(components.optimizer)
+        components.scaler.update()
+        return grad_norm
+
+    grad_norm = clip_grad_norm(model, grad_clip) if grad_clip > 0 else clip_grad_norm(model, float("inf"))
+    components.optimizer.step()
+    return grad_norm
+
+
+def update_train_meters(
+    meters: MetricLogger,
+    batch: ForwardBatch,
+    *,
+    lr: float,
+    iter_time: float,
+    world_size: int,
+    grad_norm=None,
+) -> None:
+    throughput = batch.batch_size * world_size / max(iter_time, 1e-6)
+    meters.update(
+        loss=float(batch.loss.detach().item()),
+        loss_eps=float(batch.eps_loss.detach().item()),
+        loss_x0=float(batch.x0_loss.detach().item()) if batch.x0_loss is not None else 0.0,
+        lr=float(lr),
+        iter_s=float(iter_time),
+        img_s=float(throughput),
+    )
+    if grad_norm is not None:
+        grad_norm_value = float(grad_norm.detach().item()) if isinstance(grad_norm, torch.Tensor) else float(grad_norm)
+        meters.update(grad_norm=grad_norm_value)
+
+
+def log_training_step(
+    *,
+    runtime: RuntimeContext,
+    loop_cfg: LoopConfig,
+    resume: ResumeState,
+    meters: MetricLogger,
+    tbin_stats: TimeBinAccumulator,
+    epoch: int,
+    micro_step: int,
+    current_accum_steps: int,
+) -> None:
+    force_log = resume.run_step <= 20
+    if not force_log and (resume.global_step % loop_cfg.log_every != 0):
+        return
+
+    meters.reduce_distributed()
+    kv = meters.get_log_dict()
+    kv["epoch"] = epoch
+    kv["micro_step"] = micro_step + 1
+    kv["accumulation_steps"] = current_accum_steps
+    if loop_cfg.grad_clip > 0:
+        kv["grad_clip"] = loop_cfg.grad_clip
+    if torch.cuda.is_available():
+        kv["gpu_mem_gb"] = torch.cuda.max_memory_allocated(device=runtime.device) / (1024**3)
+
+    kv["summary"] = tbin_stats.summary(is_distributed=runtime.is_distributed)
+    runtime.logger.log_kv(resume.global_step, kv, total_steps=loop_cfg.total_steps)
+    tbin_stats.reset()
+
+
+def run_sampling_if_due(
+    *,
+    cfg: dict,
+    model: torch.nn.Module,
+    runtime: RuntimeContext,
+    model_ctx: ModelContext,
+    components: TrainComponents,
+    loop_cfg: LoopConfig,
+    resume: ResumeState,
+    cond: torch.Tensor | None,
+    use_label_cond: bool,
+) -> None:
+    if loop_cfg.sample_every <= 0 or (resume.global_step % loop_cfg.sample_every != 0):
+        return
+
+    should_run_sample = (not loop_cfg.sample_rank0_only) or runtime.is_main
+    # FSDP forward is collective; run on all ranks when sharded.
+    if model_ctx.use_fsdp and runtime.is_distributed:
+        should_run_sample = True
+
+    if should_run_sample:
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            if components.ema is not None:
+                components.ema.store(model)
+                components.ema.copy_to(model)
+            sample_num = int(cfg["sample"].get("num", 16))
+            sample_cond = build_sample_cond(
+                cfg,
+                sample_num=sample_num,
+                device=runtime.device,
+                batch_cond=cond if use_label_cond else None,
+            )
+            sample_sampler = cfg["sample"].get("sampler", None)
+            if isinstance(sample_sampler, str) and sample_sampler.lower() == "auto":
+                sample_sampler = None
+            result = components.process.sample(
+                model=model,
+                steps=int(cfg["sample"].get("steps", 50)),
+                shape=(sample_num, model_ctx.model_cfg.out_channels, model_ctx.model_cfg.image_size, model_ctx.model_cfg.image_size),
+                device=runtime.device,
+                dtype=torch.float32,
+                return_trace=True,
+                cond=sample_cond,
+                sampler=sample_sampler,
+                posterior_noise_scale=cfg["sample"].get("posterior_noise_scale", None),
+            )
+            if components.ema is not None:
+                components.ema.restore(model)
+
+        if runtime.is_main:
+            sample_dir = os.path.join(runtime.out_dir, "samples")
+            save_trace_large_images(result.get("trace", []), sample_dir, f"step_{resume.global_step:08d}")
+            if bool(cfg["sample"].get("save_trace", False)) and "trace" in result:
+                trace_path = os.path.join(sample_dir, f"step_{resume.global_step:08d}_trace.pt")
+                os.makedirs(os.path.dirname(trace_path), exist_ok=True)
+                torch.save(result["trace"], trace_path)
+
+        if was_training:
+            model.train()
+
+    if runtime.is_distributed:
+        dist_utils.barrier()
+
+
+def save_checkpoint_if_due(
+    *,
+    cfg: dict,
+    model: torch.nn.Module,
+    runtime: RuntimeContext,
+    components: TrainComponents,
+    loop_cfg: LoopConfig,
+    resume: ResumeState,
+    epoch: int,
+) -> None:
+    if loop_cfg.save_every <= 0 or (resume.global_step % loop_cfg.save_every != 0):
+        return
+
+    ckpt_path = os.path.join(runtime.out_dir, "checkpoints", f"ckpt_step_{resume.global_step:08d}.pt")
+    save_checkpoint(
+        path=ckpt_path,
+        model=model,
+        optimizer=components.optimizer,
+        scaler=components.scaler,
+        ema=components.ema,
+        step=resume.global_step,
+        epoch=epoch,
+        config=cfg,
+        is_main=runtime.is_main,
+        mode=resume.ckpt_mode,
+    )
+    if runtime.is_distributed:
+        dist_utils.barrier()
+
+
+def train(cfg: dict):
+    runtime = init_runtime(cfg)
+    data_ctx = build_data_context(cfg, runtime)
+    model_ctx = build_model_context(cfg, runtime)
+    components = build_train_components(cfg, model_ctx, runtime)
+    resume = load_resume_state(cfg, model_ctx, components, runtime)
+    meters = MetricLogger(window_size=int(cfg["logging"].get("window_size", 20)))
+    loop_cfg = build_loop_config(cfg, data_ctx.loader, runtime.distributed_cfg)
+    if runtime.is_main:
+        log_loop_config(runtime.logger, loop_cfg)
+    tbin_stats = TimeBinAccumulator(
+        num_bins=loop_cfg.tbin_count,
+        device=runtime.device,
+        include_x0=components.dual_loss.summary_include_x0,
+    )
+
+    model = model_ctx.model
     model.train()
     iter_start = time.time()
 
-    for epoch in range(start_epoch, epochs):
-        if sampler is not None:
-            sampler.set_epoch(epoch)
+    for epoch in range(resume.start_epoch, loop_cfg.epochs):
+        if data_ctx.sampler is not None:
+            data_ctx.sampler.set_epoch(epoch)
 
         use_label_cond = int(cfg["model"].get("num_classes", 0)) > 0
 
-        for micro_step, (x0, y) in enumerate(loader):
-            accum_index = micro_step % gradient_accumulation_steps
+        for micro_step, (x0, y) in enumerate(data_ctx.loader):
+            accum_index = micro_step % loop_cfg.gradient_accumulation_steps
             update_step = accum_index == 0
-            remaining_micro_steps = micro_steps_per_epoch - micro_step
-            current_accum_steps = min(gradient_accumulation_steps, remaining_micro_steps)
+            remaining_micro_steps = loop_cfg.micro_steps_per_epoch - micro_step
+            current_accum_steps = min(loop_cfg.gradient_accumulation_steps, remaining_micro_steps)
 
             if update_step:
-                step_lr = float(lr_for_step(global_step))
-                for pg in optimizer.param_groups:
+                step_lr = float(loop_cfg.lr_for_step(resume.global_step))
+                for pg in components.optimizer.param_groups:
                     pg["lr"] = step_lr
-                optimizer.zero_grad(set_to_none=True)
+                components.optimizer.zero_grad(set_to_none=True)
 
-            x0 = x0.to(device, non_blocking=True)
-            bsz = x0.shape[0]
-            t = schedule.sample_t(bsz, device=device)
-            cond = y.to(device, non_blocking=True) if (use_label_cond and isinstance(y, torch.Tensor)) else None
+            batch = compute_forward_batch(
+                model=model,
+                runtime=runtime,
+                model_ctx=model_ctx,
+                components=components,
+                x0=x0,
+                y=y,
+                use_label_cond=use_label_cond,
+            )
+            backward_loss(batch.loss, current_accum_steps=current_accum_steps, scaler=components.scaler)
 
-            if augment_mode == "data_only":
-                x0 = augment.apply(x0, augment.sample_params(bsz, device=device))
-            fb = process.forward_sample(x0=x0, t=t)
-
-            amp_dtype = torch.float32
-            if precision == "bf16":
-                amp_dtype = torch.bfloat16
-            elif precision == "fp16":
-                amp_dtype = torch.float16
-
+            did_optimizer_step = should_step_optimizer(micro_step, loop_cfg)
             grad_norm = None
-            x0_loss = None
-            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=(precision in {"bf16", "fp16"})):
-                out = model(fb.xt, fb.t, cond=cond)
-
-                eps_loss = loss_fn(out, fb.target, t=fb.t, aux=fb.aux)
-                loss = eps_loss
-
-                if dual_x0_enabled and dual_balance_factor > 0.0:
-                    x0_loss = compute_dual_x0_loss(process, fb, out, loss_fn)
-                    loss = (1.0 - dual_balance_factor) * eps_loss + dual_balance_factor * x0_loss
-
-                loss_for_backward = loss / float(current_accum_steps)
-
-            if scaler is not None:
-                scaler.scale(loss_for_backward).backward()
-            else:
-                loss_for_backward.backward()
-
-            did_optimizer_step = ((micro_step + 1) % gradient_accumulation_steps == 0) or (
-                micro_step + 1 == micro_steps_per_epoch
-            )
             if did_optimizer_step:
-                if scaler is not None:
-                    scaler.unscale_(optimizer)
-                    if grad_clip > 0:
-                        grad_norm = clip_grad_norm(model, grad_clip)
-                    else:
-                        grad_norm = clip_grad_norm(model, float("inf"))
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    if grad_clip > 0:
-                        grad_norm = clip_grad_norm(model, grad_clip)
-                    else:
-                        grad_norm = clip_grad_norm(model, float("inf"))
-                    optimizer.step()
+                grad_norm = step_optimizer(model, components, loop_cfg.grad_clip)
 
-            if did_optimizer_step and ema is not None:
-                ema.update(model)
+            if did_optimizer_step and components.ema is not None:
+                components.ema.update(model)
 
-            per_example_unweighted = compute_unweighted_per_example_loss(
-                loss_fn, out.detach(), fb.target.detach(), t=fb.t.detach(), aux=fb.aux
+            tbin_stats.update(
+                schedule=components.schedule,
+                process=components.process,
+                loss_fn=components.loss_fn,
+                fb=batch.fb,
+                out=batch.out,
             )
-            per_example_weight = compute_per_example_weight(loss_fn, t=fb.t.detach(), aux=fb.aux)
-            c, sw, sl = compute_tbin_sums(
-                fb.t.detach(), per_example_unweighted, per_example_weight, num_bins=tbin_count
-            )
-            alpha_t = fb.aux.get("alpha")
-            if alpha_t is None:
-                alpha_t = schedule.alpha(fb.t.detach())
-            alpha_t = alpha_t.detach()
-            if alpha_t.ndim > 1:
-                alpha_t = alpha_t.view(alpha_t.shape[0], -1).mean(dim=1)
-            _, sa = compute_tbin_value_sum(fb.t.detach(), alpha_t, num_bins=tbin_count)
-            if summary_include_x0:
-                per_example_x0_unweighted = compute_per_example_x0_unweighted_loss(process, fb, out)
-                _, _, sl_x0 = compute_tbin_sums(
-                    fb.t.detach(), per_example_x0_unweighted, per_example_weight, num_bins=tbin_count
-                )
-                tbin_sum_x0_loss += sl_x0
-            tbin_counts += c
-            tbin_sum_alpha += sa
-            tbin_sum_weight += sw
-            tbin_sum_loss += sl
 
             iter_time = time.time() - iter_start
             iter_start = time.time()
-            throughput = bsz * world_size / max(iter_time, 1e-6)
-
-            meters.update(
-                loss=float(loss.detach().item()),
-                loss_eps=float(eps_loss.detach().item()),
-                loss_x0=float(x0_loss.detach().item()) if x0_loss is not None else 0.0,
-                lr=float(optimizer.param_groups[0]["lr"]),
-                iter_s=float(iter_time),
-                img_s=float(throughput),
+            update_train_meters(
+                meters,
+                batch,
+                lr=float(components.optimizer.param_groups[0]["lr"]),
+                iter_time=iter_time,
+                world_size=runtime.world_size,
+                grad_norm=grad_norm if did_optimizer_step else None,
             )
-            if did_optimizer_step:
-                grad_norm_value = float(grad_norm.detach().item()) if isinstance(grad_norm, torch.Tensor) else float(grad_norm)
-                meters.update(grad_norm=grad_norm_value)
 
             if not did_optimizer_step:
                 continue
 
-            global_step += 1
-            run_step += 1
+            resume.global_step += 1
+            resume.run_step += 1
 
-            force_log = run_step <= 20
-            if force_log or (global_step % log_every == 0):
-                meters.reduce_distributed()
-                kv = meters.get_log_dict()
-                kv["epoch"] = epoch
-                kv["micro_step"] = micro_step + 1
-                kv["accumulation_steps"] = current_accum_steps
-                if grad_clip > 0:
-                    kv["grad_clip"] = grad_clip
-                if torch.cuda.is_available():
-                    kv["gpu_mem_gb"] = torch.cuda.max_memory_allocated(device=device) / (1024**3)
+            log_training_step(
+                runtime=runtime,
+                loop_cfg=loop_cfg,
+                resume=resume,
+                meters=meters,
+                tbin_stats=tbin_stats,
+                epoch=epoch,
+                micro_step=micro_step,
+                current_accum_steps=current_accum_steps,
+            )
+            run_sampling_if_due(
+                cfg=cfg,
+                model=model,
+                runtime=runtime,
+                model_ctx=model_ctx,
+                components=components,
+                loop_cfg=loop_cfg,
+                resume=resume,
+                cond=batch.cond,
+                use_label_cond=use_label_cond,
+            )
+            save_checkpoint_if_due(
+                cfg=cfg,
+                model=model,
+                runtime=runtime,
+                components=components,
+                loop_cfg=loop_cfg,
+                resume=resume,
+                epoch=epoch,
+            )
 
-                # Reduce and print unified t-bin stats: count / mean weight / mean unweighted loss.
-                rc = tbin_counts.clone()
-                rsa = tbin_sum_alpha.clone()
-                rsw = tbin_sum_weight.clone()
-                rsl = tbin_sum_loss.clone()
-                rsxl = tbin_sum_x0_loss.clone()
-                if dist.is_available() and dist.is_initialized():
-                    dist.all_reduce(rc, op=dist.ReduceOp.SUM)
-                    dist.all_reduce(rsa, op=dist.ReduceOp.SUM)
-                    dist.all_reduce(rsw, op=dist.ReduceOp.SUM)
-                    dist.all_reduce(rsl, op=dist.ReduceOp.SUM)
-                    if summary_include_x0:
-                        dist.all_reduce(rsxl, op=dist.ReduceOp.SUM)
-                denom = rc.clamp_min(1.0)
-                avg_a = rsa / denom
-                avg_w = rsw / denom
-                avg_loss = rsl / denom
-                avg_x0_loss = None
-                if summary_include_x0:
-                    avg_x0_loss = rsxl / denom
-                summary = format_tbin_summary(tbin_edges, rc, avg_a, avg_w, avg_loss, avg_x0_loss)
-                kv["summary"] = summary
-                logger.log_kv(global_step, kv, total_steps=total_steps)
-                # reset interval accumulators
-                tbin_counts.zero_()
-                tbin_sum_alpha.zero_()
-                tbin_sum_weight.zero_()
-                tbin_sum_loss.zero_()
-                tbin_sum_x0_loss.zero_()
-
-            do_sample = sample_every > 0 and (global_step % sample_every == 0)
-            if do_sample:
-                should_run_sample = (not sample_rank0_only) or is_main
-                # FSDP forward is collective; run on all ranks when sharded.
-                if use_fsdp and is_distributed:
-                    should_run_sample = True
-                if should_run_sample:
-                    was_training = model.training
-                    model.eval()
-                    with torch.no_grad():
-                        if ema is not None:
-                            ema.store(model)
-                            ema.copy_to(model)
-                        sample_num = int(cfg["sample"].get("num", 16))
-                        sample_cond = build_sample_cond(
-                            cfg,
-                            sample_num=sample_num,
-                            device=device,
-                            batch_cond=cond if use_label_cond else None,
-                        )
-                        sample_sampler = cfg["sample"].get("sampler", None)
-                        if isinstance(sample_sampler, str) and sample_sampler.lower() == "auto":
-                            sample_sampler = None
-                        result = process.sample(
-                            model=model,
-                            steps=int(cfg["sample"].get("steps", 50)),
-                            shape=(sample_num, model_cfg.out_channels, model_cfg.image_size, model_cfg.image_size),
-                            device=device,
-                            dtype=torch.float32,
-                            return_trace=True,
-                            cond=sample_cond,
-                            sampler=sample_sampler,
-                            posterior_noise_scale=cfg["sample"].get("posterior_noise_scale", None),
-                        )
-                        if ema is not None:
-                            ema.restore(model)
-
-                    if is_main:
-                        sample_dir = os.path.join(out_dir, "samples")
-                        save_trace_large_images(result.get("trace", []), sample_dir, f"step_{global_step:08d}")
-                        if bool(cfg["sample"].get("save_trace", False)) and "trace" in result:
-                            trace_path = os.path.join(sample_dir, f"step_{global_step:08d}_trace.pt")
-                            os.makedirs(os.path.dirname(trace_path), exist_ok=True)
-                            torch.save(result["trace"], trace_path)
-
-                    if was_training:
-                        model.train()
-                if is_distributed:
-                    dist_utils.barrier()
-
-            if save_every > 0 and (global_step % save_every == 0):
-                ckpt_path = os.path.join(out_dir, "checkpoints", f"ckpt_step_{global_step:08d}.pt")
-                save_checkpoint(
-                    path=ckpt_path,
-                    model=model,
-                    optimizer=optimizer,
-                    scaler=scaler,
-                    ema=ema,
-                    step=global_step,
-                    epoch=epoch,
-                    config=cfg,
-                    is_main=is_main,
-                    mode=ckpt_mode,
-                )
-                if is_distributed:
-                    dist_utils.barrier()
-
-    logger.close()
+    runtime.logger.close()
 
 
 def parse_args():
