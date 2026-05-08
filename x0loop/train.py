@@ -671,8 +671,15 @@ def train(cfg: dict):
     meters = MetricLogger(window_size=int(cfg["logging"].get("window_size", 20)))
 
     epochs = int(cfg["train"]["epochs"])
-    total_steps = epochs * len(loader)
-    lr_for_step, lr_sched_meta = build_step_lr_schedule(cfg["train"], total_steps=total_steps, steps_per_epoch=len(loader))
+    gradient_accumulation_steps = int(cfg["train"].get("gradient_accumulation_steps", 1))
+    if gradient_accumulation_steps <= 0:
+        raise ValueError(f"train.gradient_accumulation_steps must be > 0, got {gradient_accumulation_steps}")
+    micro_steps_per_epoch = len(loader)
+    optimizer_steps_per_epoch = math.ceil(micro_steps_per_epoch / gradient_accumulation_steps)
+    total_steps = epochs * optimizer_steps_per_epoch
+    lr_for_step, lr_sched_meta = build_step_lr_schedule(
+        cfg["train"], total_steps=total_steps, steps_per_epoch=optimizer_steps_per_epoch
+    )
     grad_clip_cfg = cfg.get("train", {}).get("max_clip_grad", None)
     if grad_clip_cfg is None:
         grad_clip_cfg = cfg.get("train", {}).get("max_grad_norm", None)
@@ -680,6 +687,10 @@ def train(cfg: dict):
         grad_clip_cfg = distributed_cfg.get("grad_clip_norm", 0.0)
     grad_clip = float(grad_clip_cfg)
     if is_main:
+        logger.log_text(
+            f"[train] gradient_accumulation_steps={gradient_accumulation_steps}, "
+            f"micro_steps_per_epoch={micro_steps_per_epoch}, optimizer_steps_per_epoch={optimizer_steps_per_epoch}"
+        )
         logger.log_text(f"[train] grad_clip={grad_clip}")
         if lr_sched_meta.get("name") == "cosine_warmup_hold":
             logger.log_text(
@@ -719,10 +730,17 @@ def train(cfg: dict):
 
         use_label_cond = int(cfg["model"].get("num_classes", 0)) > 0
 
-        for x0, y in loader:
-            step_lr = float(lr_for_step(global_step))
-            for pg in optimizer.param_groups:
-                pg["lr"] = step_lr
+        for micro_step, (x0, y) in enumerate(loader):
+            accum_index = micro_step % gradient_accumulation_steps
+            update_step = accum_index == 0
+            remaining_micro_steps = micro_steps_per_epoch - micro_step
+            current_accum_steps = min(gradient_accumulation_steps, remaining_micro_steps)
+
+            if update_step:
+                step_lr = float(lr_for_step(global_step))
+                for pg in optimizer.param_groups:
+                    pg["lr"] = step_lr
+                optimizer.zero_grad(set_to_none=True)
 
             x0 = x0.to(device, non_blocking=True)
             bsz = x0.shape[0]
@@ -739,7 +757,6 @@ def train(cfg: dict):
             elif precision == "fp16":
                 amp_dtype = torch.float16
 
-            optimizer.zero_grad(set_to_none=True)
             grad_norm = None
             x0_loss = None
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=(precision in {"bf16", "fp16"})):
@@ -752,24 +769,33 @@ def train(cfg: dict):
                     x0_loss = compute_dual_x0_loss(process, fb, out, loss_fn)
                     loss = (1.0 - dual_balance_factor) * eps_loss + dual_balance_factor * x0_loss
 
-            if scaler is not None:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                if grad_clip > 0:
-                    grad_norm = clip_grad_norm(model, grad_clip)
-                else:
-                    grad_norm = clip_grad_norm(model, float("inf"))
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                if grad_clip > 0:
-                    grad_norm = clip_grad_norm(model, grad_clip)
-                else:
-                    grad_norm = clip_grad_norm(model, float("inf"))
-                optimizer.step()
+                loss_for_backward = loss / float(current_accum_steps)
 
-            if ema is not None:
+            if scaler is not None:
+                scaler.scale(loss_for_backward).backward()
+            else:
+                loss_for_backward.backward()
+
+            did_optimizer_step = ((micro_step + 1) % gradient_accumulation_steps == 0) or (
+                micro_step + 1 == micro_steps_per_epoch
+            )
+            if did_optimizer_step:
+                if scaler is not None:
+                    scaler.unscale_(optimizer)
+                    if grad_clip > 0:
+                        grad_norm = clip_grad_norm(model, grad_clip)
+                    else:
+                        grad_norm = clip_grad_norm(model, float("inf"))
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    if grad_clip > 0:
+                        grad_norm = clip_grad_norm(model, grad_clip)
+                    else:
+                        grad_norm = clip_grad_norm(model, float("inf"))
+                    optimizer.step()
+
+            if did_optimizer_step and ema is not None:
                 ema.update(model)
 
             per_example_unweighted = compute_unweighted_per_example_loss(
@@ -801,15 +827,20 @@ def train(cfg: dict):
             iter_start = time.time()
             throughput = bsz * world_size / max(iter_time, 1e-6)
 
-            grad_norm_value = float(grad_norm.detach().item()) if isinstance(grad_norm, torch.Tensor) else float(grad_norm)
             meters.update(
                 loss=float(loss.detach().item()),
                 loss_eps=float(eps_loss.detach().item()),
                 loss_x0=float(x0_loss.detach().item()) if x0_loss is not None else 0.0,
                 lr=float(optimizer.param_groups[0]["lr"]),
-                grad_norm=grad_norm_value,
+                iter_s=float(iter_time),
+                img_s=float(throughput),
             )
-            meters.update(iter_s=float(iter_time), img_s=float(throughput))
+            if did_optimizer_step:
+                grad_norm_value = float(grad_norm.detach().item()) if isinstance(grad_norm, torch.Tensor) else float(grad_norm)
+                meters.update(grad_norm=grad_norm_value)
+
+            if not did_optimizer_step:
+                continue
 
             global_step += 1
             run_step += 1
@@ -819,6 +850,10 @@ def train(cfg: dict):
                 meters.reduce_distributed()
                 kv = meters.get_log_dict()
                 kv["epoch"] = epoch
+                kv["micro_step"] = micro_step + 1
+                kv["accumulation_steps"] = current_accum_steps
+                if grad_clip > 0:
+                    kv["grad_clip"] = grad_clip
                 if torch.cuda.is_available():
                     kv["gpu_mem_gb"] = torch.cuda.max_memory_allocated(device=device) / (1024**3)
 

@@ -31,6 +31,7 @@ train:
   deterministic: false
   epochs: 400
   batch_size: 256
+  gradient_accumulation_steps: 1
   num_workers: 8
   lr: 2.0e-4
   weight_decay: 0.05
