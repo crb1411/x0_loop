@@ -24,6 +24,12 @@ class FlowProcess(BaseProcess):
         a = self._reshape_coeff(alpha, xt)
         return (xt - s * model_out) / a.clamp_min(1e-5)
 
+    def eps_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
+        return model_out
+
+    def v_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
+        return self.eps_from_output(xt, t, model_out, aux) - self.x0_from_output(xt, t, model_out, aux)
+
     def step(
         self,
         xt: torch.Tensor,

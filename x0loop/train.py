@@ -1058,10 +1058,12 @@ def compute_forward_batch(
         enabled=(model_ctx.precision in {"bf16", "fp16"}),
     ):
         out = model(fb.xt, fb.t, cond=cond)
-        eps_loss = components.loss_fn(out, fb.target, t=fb.t, aux=fb.aux)
+        eps_pred = components.process.eps_from_output(fb.xt, fb.t, out, aux=fb.aux)
         x0_pred = components.process.x0_from_output(fb.xt, fb.t, out, aux=fb.aux)
+        v_pred = components.process.v_from_output(fb.xt, fb.t, out, aux=fb.aux)
+        eps_loss = components.loss_fn(eps_pred, fb.target, t=fb.t, aux=fb.aux)
         x0_loss = compute_loss_value(components.loss_fn, x0_pred, fb.x0, fb)
-        v_loss = compute_loss_value(components.loss_fn, out - x0_pred, fb.target - fb.x0, fb)
+        v_loss = compute_loss_value(components.loss_fn, v_pred, fb.target - fb.x0, fb)
         loss = select_training_loss(
             train_mode=components.loss_target.train_mode,
             eps_loss=eps_loss,
