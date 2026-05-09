@@ -6,16 +6,16 @@ from x0loop.core.process_base import BaseProcess, ForwardBatch
 
 
 class FlowProcess(BaseProcess):
-    """Linear interpolation to Gaussian prior with z/eps regression target."""
+    """Linear interpolation to Gaussian prior with eps regression target."""
 
     def forward_sample(self, x0: torch.Tensor, t: torch.Tensor, rng=None) -> ForwardBatch:
-        z = torch.randn_like(x0)
+        eps = torch.randn_like(x0)
         alpha = self.schedule.alpha(t)
         sigma = self.schedule.sigma(t)
         a = self._reshape_coeff(alpha, x0)
         s = self._reshape_coeff(sigma, x0)
-        xt = a * x0 + s * z
-        return ForwardBatch(x0=x0, t=t, xt=xt, target=z, aux={"z": z, "alpha": alpha, "sigma": sigma})
+        xt = a * x0 + s * eps
+        return ForwardBatch(x0=x0, t=t, xt=xt, target=eps, aux={"eps": eps, "alpha": alpha, "sigma": sigma})
 
     def x0_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
         sigma = self.schedule.sigma(t)
@@ -31,7 +31,7 @@ class FlowProcess(BaseProcess):
         return self.eps_from_output(xt, t, model_out, aux) - self.x0_from_output(xt, t, model_out, aux)
 
     def eps_target(self, fb: ForwardBatch) -> torch.Tensor:
-        return fb.aux.get("z", fb.target)
+        return fb.aux.get("eps", fb.target)
 
     def x0_target(self, fb: ForwardBatch) -> torch.Tensor:
         return fb.x0
