@@ -399,7 +399,8 @@ def compute_tbin_value_sum(
 
 def compute_per_example_x0_unweighted_loss(process, fb, out) -> torch.Tensor:
     x0_pred = process.x0_from_output(fb.xt.detach(), fb.t.detach(), out.detach(), aux=fb.aux)
-    return ((x0_pred - fb.x0.detach()) ** 2).view(x0_pred.shape[0], -1).mean(dim=1)
+    x0_target = process.x0_target(fb).detach()
+    return ((x0_pred - x0_target) ** 2).view(x0_pred.shape[0], -1).mean(dim=1)
 
 
 def compute_loss_value(loss_fn, pred: torch.Tensor, target: torch.Tensor, fb) -> torch.Tensor:
@@ -489,8 +490,13 @@ class TimeBinAccumulator:
         self.sum_v_loss = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
 
     def update(self, *, schedule, process, loss_fn, fb, out) -> None:
+        eps_pred = process.eps_from_output(fb.xt, fb.t, out, aux=fb.aux)
         per_example_unweighted = compute_unweighted_per_example_loss(
-            loss_fn, out.detach(), fb.target.detach(), t=fb.t.detach(), aux=fb.aux
+            loss_fn,
+            eps_pred.detach(),
+            process.eps_target(fb).detach(),
+            t=fb.t.detach(),
+            aux=fb.aux,
         )
         per_example_weight = compute_per_example_weight(loss_fn, t=fb.t.detach(), aux=fb.aux)
         c, sw, sl = compute_tbin_sums(
@@ -516,10 +522,9 @@ class TimeBinAccumulator:
             )
             self.sum_x0_loss += sl_x0
         if self.include_v:
-            x0_pred = process.x0_from_output(fb.xt.detach(), fb.t.detach(), out.detach(), aux=fb.aux)
-            per_example_v_unweighted = ((out.detach() - x0_pred - (fb.target.detach() - fb.x0.detach())) ** 2).view(
-                out.shape[0], -1
-            ).mean(dim=1)
+            v_pred = process.v_from_output(fb.xt.detach(), fb.t.detach(), out.detach(), aux=fb.aux)
+            v_target = process.v_target(fb).detach()
+            per_example_v_unweighted = ((v_pred - v_target) ** 2).view(out.shape[0], -1).mean(dim=1)
             _, _, sl_v = compute_tbin_sums(
                 fb.t.detach(), per_example_v_unweighted, per_example_weight, num_bins=self.num_bins
             )
@@ -1061,9 +1066,9 @@ def compute_forward_batch(
         eps_pred = components.process.eps_from_output(fb.xt, fb.t, out, aux=fb.aux)
         x0_pred = components.process.x0_from_output(fb.xt, fb.t, out, aux=fb.aux)
         v_pred = components.process.v_from_output(fb.xt, fb.t, out, aux=fb.aux)
-        eps_loss = components.loss_fn(eps_pred, fb.target, t=fb.t, aux=fb.aux)
-        x0_loss = compute_loss_value(components.loss_fn, x0_pred, fb.x0, fb)
-        v_loss = compute_loss_value(components.loss_fn, v_pred, fb.target - fb.x0, fb)
+        eps_loss = compute_loss_value(components.loss_fn, eps_pred, components.process.eps_target(fb), fb)
+        x0_loss = compute_loss_value(components.loss_fn, x0_pred, components.process.x0_target(fb), fb)
+        v_loss = compute_loss_value(components.loss_fn, v_pred, components.process.v_target(fb), fb)
         loss = select_training_loss(
             train_mode=components.loss_target.train_mode,
             eps_loss=eps_loss,

@@ -60,6 +60,15 @@ class BaseProcess:
         x0 = self.x0_from_output(xt, t, model_out, aux)
         return eps - x0
 
+    def eps_target(self, fb: ForwardBatch) -> torch.Tensor:
+        return fb.target
+
+    def x0_target(self, fb: ForwardBatch) -> torch.Tensor:
+        return fb.x0
+
+    def v_target(self, fb: ForwardBatch) -> torch.Tensor:
+        return self.eps_target(fb) - self.x0_target(fb)
+
     def step(
         self,
         xt: torch.Tensor,

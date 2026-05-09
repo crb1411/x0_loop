@@ -30,6 +30,15 @@ class FlowProcess(BaseProcess):
     def v_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
         return self.eps_from_output(xt, t, model_out, aux) - self.x0_from_output(xt, t, model_out, aux)
 
+    def eps_target(self, fb: ForwardBatch) -> torch.Tensor:
+        return fb.aux.get("z", fb.target)
+
+    def x0_target(self, fb: ForwardBatch) -> torch.Tensor:
+        return fb.x0
+
+    def v_target(self, fb: ForwardBatch) -> torch.Tensor:
+        return self.eps_target(fb) - self.x0_target(fb)
+
     def step(
         self,
         xt: torch.Tensor,
