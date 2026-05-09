@@ -27,9 +27,9 @@ schedule:
   diffusion_lambda: 12.0
 
 loss:
-  name: mse
-  train_mode: x0_dual # eps | x0 | v | x0_dual
-  dual_balance_factor: 0.5 # [0,1], used when train_mode=x0_dual: total=(1-b)*L_eps + b*L_x0
+  terms:
+    - {target: eps, formula: mse, coef: 0.5}
+    - {target: x0,  formula: mse, coef: 0.5}
 
 augment:
   name: strongaugment

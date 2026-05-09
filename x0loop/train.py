@@ -16,9 +16,8 @@ from x0loop.aug.identity import NoAug
 from x0loop.aug.strong_augment import strongAugment
 from x0loop.core.config import DEFAULT_RUNTIME_CONFIG, dump_resolved_config, load_merged_config, resolve_logging_output_dir
 from x0loop.core.schedules import TimeSchedule
-from x0loop.losses.composite import CompositeLoss
-from x0loop.losses.regression import HuberLoss, L1Loss, MSELoss
-from x0loop.losses.weighted import WeightedLoss, make_weight_fn
+from x0loop.losses.spec import build_loss as _build_loss
+from x0loop.losses.atomic import AtomicLoss, CompositeLoss, regress
 from x0loop.models.dit import DiT, DiTConfig
 from x0loop.processes.diffusion_process import DiffusionProcess
 from x0loop.processes.flow_process import FlowProcess
@@ -76,23 +75,15 @@ class ModelContext:
 
 
 @dataclass
-class LossTargetConfig:
-    train_mode: str
-    balance_factor: float
-    summary_include_x0: bool
-
-
-@dataclass
 class TrainComponents:
     schedule: TimeSchedule
     process: object
-    loss_fn: object
+    loss_fn: CompositeLoss
     augment: object
     augment_mode: str
     optimizer: torch.optim.Optimizer
     scaler: object | None
     ema: EMA | None
-    loss_target: LossTargetConfig
 
 
 @dataclass
@@ -123,9 +114,7 @@ class LoopConfig:
 @dataclass
 class ForwardBatch:
     loss: torch.Tensor
-    eps_loss: torch.Tensor
-    x0_loss: torch.Tensor
-    v_loss: torch.Tensor
+    loss_by_target: dict  # {"eps": Tensor, "x0": Tensor, ...}
     batch_size: int
     cond: torch.Tensor | None
     fb: object
@@ -197,36 +186,6 @@ def build_process(cfg: dict, schedule: TimeSchedule):
         return FlowProcess(schedule=schedule)
     raise ValueError(f"Unknown process: {name}")
 
-
-def build_loss(cfg: dict, schedule: TimeSchedule):
-    lc = cfg["loss"]
-    name = lc["name"].lower()
-    if name == "mse":
-        return MSELoss()
-    if name == "l1":
-        return L1Loss()
-    if name == "huber":
-        return HuberLoss(delta=float(lc.get("delta", 1.0)))
-    if name == "weighted":
-        inner_name = lc.get("inner", "mse").lower()
-        inner = {"mse": MSELoss(), "l1": L1Loss(), "huber": HuberLoss(delta=float(lc.get("delta", 1.0)))}[inner_name]
-        weight_fn = make_weight_fn(
-            lc.get("weight", "snr"),
-            schedule=schedule,
-            balance_factor=float(lc.get("balance_factor", 0.5)),
-            balance_time=str(lc.get("balance_time", "auto")),
-            balance_integral_steps=int(lc.get("balance_integral_steps", 4096)),
-        )
-        return WeightedLoss(inner=inner, weight_fn=weight_fn)
-    if name == "composite":
-        losses = []
-        weights = []
-        for item in lc.get("items", []):
-            sub = {"loss": item}
-            losses.append(build_loss({"loss": item}, schedule))
-            weights.append(float(item.get("weight", 1.0)))
-        return CompositeLoss(losses=losses, weights=weights)
-    raise ValueError(f"Unknown loss: {name}")
 
 
 def build_augment(cfg: dict):
@@ -341,25 +300,6 @@ def bucket_losses(t: torch.Tensor, per_example_loss: torch.Tensor) -> dict[str, 
     return out
 
 
-def compute_unweighted_per_example_loss(loss_fn, out, target, *, t, aux) -> torch.Tensor:
-    if isinstance(loss_fn, WeightedLoss):
-        return loss_fn.inner.compute_per_example(out, target, t=t, aux=aux)
-    if hasattr(loss_fn, "compute_per_example"):
-        try:
-            return loss_fn.compute_per_example(out, target, t=t, aux=aux)
-        except NotImplementedError:
-            pass
-    return ((out - target) ** 2).view(out.shape[0], -1).mean(dim=1)
-
-
-def compute_per_example_weight(loss_fn, *, t, aux) -> torch.Tensor:
-    if isinstance(loss_fn, WeightedLoss):
-        w = loss_fn.weight_fn(t, aux)
-        if w.ndim > 1:
-            w = w.view(w.shape[0], -1).mean(dim=1)
-        return w
-    return torch.ones_like(t, dtype=torch.float32)
-
 
 def compute_tbin_sums(
     t: torch.Tensor,
@@ -397,63 +337,15 @@ def compute_tbin_value_sum(
     return counts, sum_value
 
 
-def compute_per_example_x0_unweighted_loss(process, fb, out) -> torch.Tensor:
-    x0_pred = process.x0_from_output(fb.xt.detach(), fb.t.detach(), out.detach(), aux=fb.aux)
-    x0_target = process.x0_target(fb).detach()
-    return ((x0_pred - x0_target) ** 2).view(x0_pred.shape[0], -1).mean(dim=1)
-
-
-def compute_loss_value(loss_fn, pred: torch.Tensor, target: torch.Tensor, fb) -> torch.Tensor:
-    return loss_fn(pred, target, t=fb.t, aux=fb.aux)
-
-
-def normalize_train_loss_mode(cfg: dict) -> str:
-    loss_cfg = cfg.get("loss", {})
-    process_name = str(cfg.get("process", {}).get("name", "diffusion")).lower()
-    default_mode = "v" if process_name == "flow" else "x0_dual"
-    mode = str(loss_cfg.get("train_mode", loss_cfg.get("target", default_mode))).lower()
-    aliases = {
-        "eps_loss": "eps",
-        "target": "eps",
-        "target_loss": "eps",
-        "x0_loss": "x0",
-        "v_loss": "v",
-        "dual_x0": "x0_dual",
-        "x0dual": "x0_dual",
-    }
-    mode = aliases.get(mode, mode)
-    if mode not in {"eps", "x0", "v", "x0_dual"}:
-        raise ValueError(f"loss.train_mode must be one of eps/x0/v/x0_dual, got {mode}")
-    return mode
-
-
-def select_training_loss(
-    *,
-    train_mode: str,
-    eps_loss: torch.Tensor,
-    x0_loss: torch.Tensor,
-    v_loss: torch.Tensor,
-    dual_balance_factor: float,
-) -> torch.Tensor:
-    if train_mode == "eps":
-        return eps_loss
-    if train_mode == "x0":
-        return x0_loss
-    if train_mode == "v":
-        return v_loss
-    if train_mode == "x0_dual":
-        return (1.0 - dual_balance_factor) * eps_loss + dual_balance_factor * x0_loss
-    raise ValueError(f"Unknown train loss mode: {train_mode}")
-
 
 def format_tbin_summary(
     edges: torch.Tensor,
     counts: torch.Tensor,
     avg_a: torch.Tensor,
     avg_w: torch.Tensor,
-    loss_per_bin: torch.Tensor,
-    x0_loss_per_bin: torch.Tensor | None = None,
-    v_loss_per_bin: torch.Tensor | None = None,
+    avg_eps: torch.Tensor,
+    avg_x0: torch.Tensor,
+    avg_v: torch.Tensor,
 ) -> str:
     parts = []
     n = counts.numel()
@@ -462,106 +354,88 @@ def format_tbin_summary(
         right = float(edges[i + 1].item())
         close = "]" if i == n - 1 else ")"
         cnt = int(counts[i].item())
-        av = float(avg_a[i].item())
-        wv = float(avg_w[i].item())
-        leps = float(loss_per_bin[i].item())
-        fields = [f"n={cnt}", f"a={av:.4g}", f"w={wv:.4g}", f"leps={leps:.4g}"]
-        if x0_loss_per_bin is not None:
-            lx0 = float(x0_loss_per_bin[i].item())
-            fields.append(f"lx0={lx0:.4g}")
-        if v_loss_per_bin is not None:
-            lv = float(v_loss_per_bin[i].item())
-            fields.append(f"lv={lv:.4g}")
+        fields = [
+            f"n={cnt}",
+            f"a={float(avg_a[i].item()):.4g}",
+            f"w={float(avg_w[i].item()):.4g}",
+            f"leps={float(avg_eps[i].item()):.4g}",
+            f"lx0={float(avg_x0[i].item()):.4g}",
+            f"lv={float(avg_v[i].item()):.4g}",
+        ]
         parts.append(f"[{left:.2f},{right:.2f}{close}: {', '.join(fields)}")
     return " | ".join(parts)
 
 
 class TimeBinAccumulator:
-    def __init__(self, *, num_bins: int, device: torch.device, include_x0: bool, include_v: bool):
+    def __init__(self, *, num_bins: int, device: torch.device):
         self.num_bins = int(num_bins)
-        self.include_x0 = bool(include_x0)
-        self.include_v = bool(include_v)
         self.edges = torch.linspace(0.0, 1.0, self.num_bins + 1, device=device, dtype=torch.float64)
         self.counts = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
         self.sum_alpha = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
         self.sum_weight = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
-        self.sum_loss = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
-        self.sum_x0_loss = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
-        self.sum_v_loss = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
+        self.sum_eps = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
+        self.sum_x0 = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
+        self.sum_v = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
 
-    def update(self, *, schedule, process, loss_fn, fb, out) -> None:
-        eps_pred = process.eps_from_output(fb.xt, fb.t, out, aux=fb.aux)
-        per_example_unweighted = compute_unweighted_per_example_loss(
-            loss_fn,
-            eps_pred.detach(),
-            process.eps_target(fb).detach(),
-            t=fb.t.detach(),
-            aux=fb.aux,
-        )
-        per_example_weight = compute_per_example_weight(loss_fn, t=fb.t.detach(), aux=fb.aux)
-        c, sw, sl = compute_tbin_sums(
-            fb.t.detach(), per_example_unweighted, per_example_weight, num_bins=self.num_bins
-        )
+    def update(self, *, schedule, process, loss_fn: CompositeLoss, fb, out) -> None:
+        t = fb.t.detach()
+        out_d = out.detach()
+
+        # Per-example unweighted MSE for eps/x0/v (diagnostic, always MSE regardless of training formula).
+        eps_u = regress("mse", process.eps_from_output(fb.xt, t, out_d, aux=fb.aux), process.eps_target(fb).detach())
+        x0_u = regress("mse", process.x0_from_output(fb.xt, t, out_d, aux=fb.aux), process.x0_target(fb).detach())
+        v_u = regress("mse", process.v_from_output(fb.xt, t, out_d, aux=fb.aux), process.v_target(fb).detach())
+
+        # Weight from first atom that has a weight_fn, else uniform.
+        ref_atom = next((a for a in loss_fn.atoms if a.weight_fn is not None), None)
+        if ref_atom is not None:
+            w = ref_atom.weight_fn(t, fb.aux)
+            if w.ndim > 1:
+                w = w.view(w.shape[0], -1).mean(dim=1)
+            w = w.float()
+        else:
+            w = torch.ones(t.shape[0], device=t.device, dtype=torch.float32)
 
         alpha_t = fb.aux.get("alpha")
         if alpha_t is None:
-            alpha_t = schedule.alpha(fb.t.detach())
-        alpha_t = alpha_t.detach()
+            alpha_t = schedule.alpha(t)
+        alpha_t = alpha_t.detach().float()
         if alpha_t.ndim > 1:
             alpha_t = alpha_t.view(alpha_t.shape[0], -1).mean(dim=1)
-        _, sa = compute_tbin_value_sum(fb.t.detach(), alpha_t, num_bins=self.num_bins)
+
+        c, sw, sl_eps = compute_tbin_sums(t, eps_u, w, num_bins=self.num_bins)
+        _, _, sl_x0 = compute_tbin_sums(t, x0_u, w, num_bins=self.num_bins)
+        _, _, sl_v = compute_tbin_sums(t, v_u, w, num_bins=self.num_bins)
+        _, sa = compute_tbin_value_sum(t, alpha_t, num_bins=self.num_bins)
 
         self.counts += c
         self.sum_alpha += sa
         self.sum_weight += sw
-        self.sum_loss += sl
-        if self.include_x0:
-            per_example_x0_unweighted = compute_per_example_x0_unweighted_loss(process, fb, out)
-            _, _, sl_x0 = compute_tbin_sums(
-                fb.t.detach(), per_example_x0_unweighted, per_example_weight, num_bins=self.num_bins
-            )
-            self.sum_x0_loss += sl_x0
-        if self.include_v:
-            v_pred = process.v_from_output(fb.xt.detach(), fb.t.detach(), out.detach(), aux=fb.aux)
-            v_target = process.v_target(fb).detach()
-            per_example_v_unweighted = ((v_pred - v_target) ** 2).view(out.shape[0], -1).mean(dim=1)
-            _, _, sl_v = compute_tbin_sums(
-                fb.t.detach(), per_example_v_unweighted, per_example_weight, num_bins=self.num_bins
-            )
-            self.sum_v_loss += sl_v
+        self.sum_eps += sl_eps
+        self.sum_x0 += sl_x0
+        self.sum_v += sl_v
 
     def summary(self, *, is_distributed: bool) -> str:
         rc = self.counts.clone()
         rsa = self.sum_alpha.clone()
         rsw = self.sum_weight.clone()
-        rsl = self.sum_loss.clone()
-        rsxl = self.sum_x0_loss.clone()
-        rsvl = self.sum_v_loss.clone()
+        rse = self.sum_eps.clone()
+        rsxl = self.sum_x0.clone()
+        rsvl = self.sum_v.clone()
         if is_distributed and dist.is_available() and dist.is_initialized():
-            dist.all_reduce(rc, op=dist.ReduceOp.SUM)
-            dist.all_reduce(rsa, op=dist.ReduceOp.SUM)
-            dist.all_reduce(rsw, op=dist.ReduceOp.SUM)
-            dist.all_reduce(rsl, op=dist.ReduceOp.SUM)
-            if self.include_x0:
-                dist.all_reduce(rsxl, op=dist.ReduceOp.SUM)
-            if self.include_v:
-                dist.all_reduce(rsvl, op=dist.ReduceOp.SUM)
+            for t in (rc, rsa, rsw, rse, rsxl, rsvl):
+                dist.all_reduce(t, op=dist.ReduceOp.SUM)
 
         denom = rc.clamp_min(1.0)
-        avg_a = rsa / denom
-        avg_w = rsw / denom
-        avg_loss = rsl / denom
-        avg_x0_loss = rsxl / denom if self.include_x0 else None
-        avg_v_loss = rsvl / denom if self.include_v else None
-        return format_tbin_summary(self.edges, rc, avg_a, avg_w, avg_loss, avg_x0_loss, avg_v_loss)
+        return format_tbin_summary(
+            self.edges, rc,
+            rsa / denom, rsw / denom,
+            rse / denom, rsxl / denom, rsvl / denom,
+        )
 
     def reset(self) -> None:
-        self.counts.zero_()
-        self.sum_alpha.zero_()
-        self.sum_weight.zero_()
-        self.sum_loss.zero_()
-        self.sum_x0_loss.zero_()
-        self.sum_v_loss.zero_()
+        for t in (self.counts, self.sum_alpha, self.sum_weight, self.sum_eps, self.sum_x0, self.sum_v):
+            t.zero_()
 
 
 def maybe_make_scaler(precision: str, use_fsdp: bool):
@@ -891,22 +765,12 @@ def build_model_context(cfg: dict, runtime: RuntimeContext) -> ModelContext:
 def build_train_components(cfg: dict, model_ctx: ModelContext, runtime: RuntimeContext) -> TrainComponents:
     schedule = build_schedule(cfg)
     process = build_process(cfg, schedule)
-    loss_fn = build_loss(cfg, schedule)
+    loss_fn = _build_loss(cfg["loss"], schedule)
     augment, augment_mode = build_augment(cfg)
 
-    loss_cfg = cfg.get("loss", {})
-    train_mode = normalize_train_loss_mode(cfg)
-    dual_balance_factor = float(loss_cfg.get("dual_balance_factor", 0.5))
-    if not (0.0 <= dual_balance_factor <= 1.0):
-        raise ValueError(f"loss.dual_balance_factor must be in [0,1], got {dual_balance_factor}")
-    summary_include_x0 = bool(cfg.get("logging", {}).get("summary_include_x0", train_mode in {"x0", "v", "x0_dual"}))
     if runtime.is_main:
-        if train_mode == "x0_dual":
-            runtime.logger.log_text(
-                f"[loss] train_mode=x0_dual: total=(1-{dual_balance_factor:.4g})*L_eps + {dual_balance_factor:.4g}*L_x0",
-            )
-        else:
-            runtime.logger.log_text(f"[loss] train_mode={train_mode}")
+        atom_descs = ", ".join(repr(a) for a in loss_fn.atoms)
+        runtime.logger.log_text(f"[loss] {atom_descs}")
 
     optimizer = torch.optim.AdamW(
         model_ctx.model.parameters(),
@@ -926,11 +790,6 @@ def build_train_components(cfg: dict, model_ctx: ModelContext, runtime: RuntimeC
         optimizer=optimizer,
         scaler=scaler,
         ema=ema,
-        loss_target=LossTargetConfig(
-            train_mode=train_mode,
-            balance_factor=dual_balance_factor,
-            summary_include_x0=summary_include_x0,
-        ),
     )
 
 
@@ -1063,25 +922,11 @@ def compute_forward_batch(
         enabled=(model_ctx.precision in {"bf16", "fp16"}),
     ):
         out = model(fb.xt, fb.t, cond=cond)
-        eps_pred = components.process.eps_from_output(fb.xt, fb.t, out, aux=fb.aux)
-        x0_pred = components.process.x0_from_output(fb.xt, fb.t, out, aux=fb.aux)
-        v_pred = components.process.v_from_output(fb.xt, fb.t, out, aux=fb.aux)
-        eps_loss = compute_loss_value(components.loss_fn, eps_pred, components.process.eps_target(fb), fb)
-        x0_loss = compute_loss_value(components.loss_fn, x0_pred, components.process.x0_target(fb), fb)
-        v_loss = compute_loss_value(components.loss_fn, v_pred, components.process.v_target(fb), fb)
-        loss = select_training_loss(
-            train_mode=components.loss_target.train_mode,
-            eps_loss=eps_loss,
-            x0_loss=x0_loss,
-            v_loss=v_loss,
-            dual_balance_factor=components.loss_target.balance_factor,
-        )
+        loss_dict = components.loss_fn(components.process, fb, out)
 
     return ForwardBatch(
-        loss=loss,
-        eps_loss=eps_loss,
-        x0_loss=x0_loss,
-        v_loss=v_loss,
+        loss=loss_dict["total"],
+        loss_by_target={k: v for k, v in loss_dict.items() if k != "total"},
         batch_size=bsz,
         cond=cond,
         fb=fb,
@@ -1128,13 +973,12 @@ def update_train_meters(
     throughput = batch.batch_size * world_size / max(iter_time, 1e-6)
     meters.update(
         loss=float(batch.loss.detach().item()),
-        loss_eps=float(batch.eps_loss.detach().item()),
-        loss_x0=float(batch.x0_loss.detach().item()),
-        loss_v=float(batch.v_loss.detach().item()),
         lr=float(lr),
         iter_s=float(iter_time),
         img_s=float(throughput),
     )
+    for target, val in batch.loss_by_target.items():
+        meters.update(**{f"loss_{target}": float(val.detach().item())})
     if grad_norm is not None:
         grad_norm_value = float(grad_norm.detach().item()) if isinstance(grad_norm, torch.Tensor) else float(grad_norm)
         meters.update(grad_norm=grad_norm_value)
@@ -1283,8 +1127,6 @@ def train(cfg: dict):
     tbin_stats = TimeBinAccumulator(
         num_bins=loop_cfg.tbin_count,
         device=runtime.device,
-        include_x0=components.loss_target.summary_include_x0,
-        include_v=True,
     )
 
     model = model_ctx.model

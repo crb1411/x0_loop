@@ -22,8 +22,8 @@ schedule:
   num_steps: 1000
 
 loss:
-  name: mse
-  train_mode: v # eps | x0 | v | x0_dual
+  target: v
+  formula: mse
 
 augment:
   name: none

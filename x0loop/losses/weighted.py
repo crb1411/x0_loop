@@ -4,25 +4,8 @@ from typing import Callable
 
 import torch
 
-from x0loop.losses.base import BaseLoss
-
 
 WeightFn = Callable[[torch.Tensor, dict | None], torch.Tensor]
-
-
-class WeightedLoss(BaseLoss):
-    def __init__(self, inner: BaseLoss, weight_fn: WeightFn):
-        self.inner = inner
-        self.weight_fn = weight_fn
-
-    def compute_per_example(self, model_out, target, *, t=None, aux=None) -> torch.Tensor:
-        if t is None:
-            raise ValueError("WeightedLoss requires timestep t")
-        per_ex = self.inner.compute_per_example(model_out, target, t=t, aux=aux)
-        w = self.weight_fn(t, aux)
-        if w.ndim > 1:
-            w = w.view(w.shape[0], -1).mean(dim=1)
-        return w * per_ex
 
 
 def make_weight_fn(

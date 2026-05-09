@@ -27,9 +27,9 @@ schedule:
   diffusion_lambda: 12.0
 
 loss:
-  name: mse # mse | l1 | huber | weighted | composite
-  train_mode: x0_dual # eps | x0 | v | x0_dual
-  dual_balance_factor: 0.5 # [0,1], used when train_mode=x0_dual: total=(1-b)*L_eps + b*L_x0
+  terms:
+    - {target: eps, formula: mse, coef: 0.5}
+    - {target: x0,  formula: mse, coef: 0.5}
 
 augment:
   name: geom # none | geom | dit | dit_original | strongaugment | strong
@@ -67,7 +67,7 @@ logging:
   use_tb: true # false | true
   sample_every: 5000
   sample_rank0_only: true # false | true
-  summary_include_x0: false # false | true; include lx0/lx0_avg in t-bin summary
+  summary_include_x0: true # tbin now always shows eps/x0/v
 
 sample:
   steps: 100
