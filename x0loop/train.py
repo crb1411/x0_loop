@@ -923,10 +923,17 @@ def compute_forward_batch(
     ):
         out = model(fb.xt, fb.t, cond=cond)
         loss_dict = components.loss_fn(components.process, fb, out)
+        with torch.no_grad():
+            p = components.process
+            unweighted = {
+                "eps": regress("mse", p.eps_from_output(fb.xt, fb.t, out, aux=fb.aux), p.eps_target(fb)).mean(),
+                "x0":  regress("mse", p.x0_from_output(fb.xt, fb.t, out, aux=fb.aux), p.x0_target(fb)).mean(),
+                "v":   regress("mse", p.v_from_output(fb.xt, fb.t, out, aux=fb.aux), p.v_target(fb)).mean(),
+            }
 
     return ForwardBatch(
         loss=loss_dict["total"],
-        loss_by_target={k: v for k, v in loss_dict.items() if k != "total"},
+        loss_by_target=unweighted,
         batch_size=bsz,
         cond=cond,
         fb=fb,
