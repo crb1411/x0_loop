@@ -963,21 +963,21 @@ def step_optimizer(model: torch.nn.Module, components: TrainComponents, grad_cli
 
 def update_train_meters(
     meters: MetricLogger,
-    batch: ForwardBatch,
+    fwd: ForwardBatch,
     *,
     lr: float,
     iter_time: float,
     world_size: int,
     grad_norm=None,
 ) -> None:
-    throughput = batch.batch_size * world_size / max(iter_time, 1e-6)
+    throughput = fwd.batch_size * world_size / max(iter_time, 1e-6)
     meters.update(
-        loss=float(batch.loss.detach().item()),
+        loss=float(fwd.loss.detach().item()),
         lr=float(lr),
         iter_s=float(iter_time),
         img_s=float(throughput),
     )
-    for target, val in batch.loss_by_target.items():
+    for target, val in fwd.loss_by_target.items():
         meters.update(**{f"loss_{target}": float(val.detach().item())})
     if grad_norm is not None:
         grad_norm_value = float(grad_norm.detach().item()) if isinstance(grad_norm, torch.Tensor) else float(grad_norm)
@@ -1151,7 +1151,7 @@ def train(cfg: dict):
                     pg["lr"] = step_lr
                 components.optimizer.zero_grad(set_to_none=True)
 
-            batch = compute_forward_batch(
+            fwd = compute_forward_batch(
                 cfg=cfg,
                 model=model,
                 runtime=runtime,
@@ -1161,7 +1161,7 @@ def train(cfg: dict):
                 y=y,
                 use_label_cond=use_label_cond,
             )
-            backward_loss(batch.loss, current_accum_steps=current_accum_steps, scaler=components.scaler)
+            backward_loss(fwd.loss, current_accum_steps=current_accum_steps, scaler=components.scaler)
 
             did_optimizer_step = should_step_optimizer(micro_step, loop_cfg)
             grad_norm = None
@@ -1175,15 +1175,15 @@ def train(cfg: dict):
                 schedule=components.schedule,
                 process=components.process,
                 loss_fn=components.loss_fn,
-                fb=batch.fb,
-                out=batch.out,
+                fb=fwd.fb,
+                out=fwd.out,
             )
 
             iter_time = time.time() - iter_start
             iter_start = time.time()
             update_train_meters(
                 meters,
-                batch,
+                fwd,
                 lr=float(components.optimizer.param_groups[0]["lr"]),
                 iter_time=iter_time,
                 world_size=runtime.world_size,
@@ -1214,7 +1214,7 @@ def train(cfg: dict):
                 components=components,
                 loop_cfg=loop_cfg,
                 resume=resume,
-                cond=batch.cond,
+                cond=fwd.cond,
                 use_label_cond=use_label_cond,
             )
             save_checkpoint_if_due(
