@@ -12,6 +12,49 @@ def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch
     return x * (1.0 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
+# ---------------------------------------------------------------------------
+# 2D RoPE helpers
+# ---------------------------------------------------------------------------
+
+def _build_2d_rope_cache(h: int, w: int, head_dim: int, base: float = 10000.0) -> tuple[torch.Tensor, torch.Tensor]:
+    """Precompute 2D RoPE cos/sin tables of shape [h*w, head_dim].
+
+    head_dim is split into quarters: first quarter pairs → y-axis frequencies,
+    second quarter pairs → x-axis frequencies.  Requires head_dim % 4 == 0.
+    """
+    assert head_dim % 4 == 0, "head_dim must be divisible by 4 for 2D RoPE"
+    quarter = head_dim // 4
+    theta = 1.0 / (base ** (torch.arange(0, quarter, dtype=torch.float32) / quarter))  # [quarter]
+
+    y_pos = torch.arange(h, dtype=torch.float32)
+    x_pos = torch.arange(w, dtype=torch.float32)
+
+    y_freqs = torch.outer(y_pos, theta).unsqueeze(1).expand(h, w, quarter)  # [h, w, quarter]
+    x_freqs = torch.outer(x_pos, theta).unsqueeze(0).expand(h, w, quarter)  # [h, w, quarter]
+
+    # [N, head_dim//2]: y freqs then x freqs, row-major over the grid
+    freqs = torch.cat([y_freqs, x_freqs], dim=-1).reshape(h * w, head_dim // 2)
+
+    # Each scalar freq is shared by its (even, odd) pair → repeat_interleave → [N, head_dim]
+    cos = freqs.cos().repeat_interleave(2, dim=-1)
+    sin = freqs.sin().repeat_interleave(2, dim=-1)
+    return cos, sin
+
+
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """Rotate consecutive pairs (2i, 2i+1) by 90°: (a, b) → (−b, a)."""
+    x1 = x[..., ::2]
+    x2 = x[..., 1::2]
+    return torch.stack([-x2, x1], dim=-1).flatten(-2)
+
+
+def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """Apply RoPE to x [B, heads, N, head_dim] using cos/sin [N, head_dim]."""
+    cos = cos.unsqueeze(0).unsqueeze(0)  # [1, 1, N, head_dim]
+    sin = sin.unsqueeze(0).unsqueeze(0)
+    return x * cos + _rotate_half(x) * sin
+
+
 def build_norm(norm_layer: str, hidden_size: int, eps: float, elementwise_affine: bool):
     name = norm_layer.lower()
     if name in {"layernorm", "ln"}:
@@ -40,7 +83,16 @@ class Mlp(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim: int, num_heads: int, qkv_bias: bool = True, attn_drop: float = 0.0, proj_drop: float = 0.0):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        qkv_bias: bool = True,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        rope_grid: tuple[int, int] | None = None,
+        rope_base: float = 10000.0,
+    ):
         super().__init__()
         assert dim % num_heads == 0, "dim must be divisible by num_heads"
         self.num_heads = num_heads
@@ -52,10 +104,22 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
+        if rope_grid is not None:
+            h, w = rope_grid
+            cos, sin = _build_2d_rope_cache(h, w, self.head_dim, base=rope_base)
+            self.register_buffer("rope_cos", cos, persistent=False)  # [N, head_dim]
+            self.register_buffer("rope_sin", sin, persistent=False)
+        else:
+            self.rope_cos = self.rope_sin = None
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, n, c = x.shape
         qkv = self.qkv(x).view(b, n, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)  # [B, heads, N, head_dim]
+
+        if self.rope_cos is not None:
+            q = _apply_rope(q, self.rope_cos, self.rope_sin)
+            k = _apply_rope(k, self.rope_cos, self.rope_sin)
 
         q = q * self.scale
         attn = q @ k.transpose(-2, -1)
@@ -81,10 +145,13 @@ class DiTBlock(nn.Module):
         qkv_bias: bool = True,
         norm_layer: str = "layernorm",
         norm_eps: float = 1e-6,
+        rope_grid: tuple[int, int] | None = None,
+        rope_base: float = 10000.0,
     ):
         super().__init__()
         self.norm1 = build_norm(norm_layer, hidden_size, eps=norm_eps, elementwise_affine=False)
-        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=dropout, proj_drop=dropout)
+        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=dropout, proj_drop=dropout,
+                              rope_grid=rope_grid, rope_base=rope_base)
         self.norm2 = build_norm(norm_layer, hidden_size, eps=norm_eps, elementwise_affine=False)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, drop=dropout)
@@ -140,6 +207,7 @@ class DiTConfig:
     cond_dim: int = 0
     norm_layer: str = "layernorm"
     norm_eps: float = 1e-6
+    rope_base: float = 10000.0
 
 
 class DiT(nn.Module):
@@ -153,11 +221,11 @@ class DiT(nn.Module):
         self.w_tokens = cfg.image_size // cfg.patch_size
         self.num_tokens = self.h_tokens * self.w_tokens
 
-        self.pos = nn.Parameter(torch.zeros(1, self.num_tokens, cfg.dim))
         self.time_mlp = TimeEmbedMLP(dim=cfg.dim)
         self.null_class_id = cfg.num_classes if cfg.num_classes > 0 else None
         self.label_emb = nn.Embedding(cfg.num_classes + 1, cfg.dim) if cfg.num_classes > 0 else None
         self.cond_proj = nn.Linear(cfg.cond_dim, cfg.dim) if cfg.cond_dim > 0 else None
+        rope_grid = (self.h_tokens, self.w_tokens)
         self.blocks = nn.ModuleList(
             [
                 DiTBlock(
@@ -168,6 +236,8 @@ class DiT(nn.Module):
                     qkv_bias=cfg.qkv_bias,
                     norm_layer=cfg.norm_layer,
                     norm_eps=cfg.norm_eps,
+                    rope_grid=rope_grid,
+                    rope_base=cfg.rope_base,
                 )
                 for _ in range(cfg.depth)
             ]
@@ -183,8 +253,6 @@ class DiT(nn.Module):
         self.initialize_weights()
 
     def initialize_weights(self):
-        nn.init.normal_(self.pos, std=0.02)
-
         def _init(m):
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
@@ -251,9 +319,8 @@ class DiT(nn.Module):
         return x
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, cond=None) -> torch.Tensor:
-        tok = self._patchify(x) # [B, N, D]
-        tok = tok + self.pos
-        c = self.time_mlp(t) # [B, D]
+        tok = self._patchify(x)  # [B, N, D]
+        c = self.time_mlp(t)     # [B, D]
         c = c + self._cond_embedding(cond=cond, batch=x.shape[0], device=x.device, dtype=c.dtype)
         for blk in self.blocks:
             tok = blk(tok, c)

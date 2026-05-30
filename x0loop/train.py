@@ -170,7 +170,8 @@ def build_dataset(cfg: dict):
 
 def build_schedule(cfg: dict) -> TimeSchedule:
     sc = cfg["schedule"]
-    return TimeSchedule(mode=sc["mode"], num_steps=int(sc["num_steps"]), diffusion_lambda=float(sc.get("diffusion_lambda", 12.0)))
+    return TimeSchedule(mode=sc["mode"], num_steps=int(sc["num_steps"]),
+                        beta_min=float(sc.get("beta_min", 0.1)), beta_max=float(sc.get("beta_max", 20.0)))
 
 
 def build_process(cfg: dict, schedule: TimeSchedule):
@@ -627,7 +628,7 @@ def save_trace_large_images(trace: list[dict], out_dir: str, prefix: str):
             col = si % cols
             x0_hat = item["x0_hat"][bi]
             arr = _tensor_chw_to_uint8_rgb(x0_hat)
-            img = Image.fromarray(arr, mode="RGB")
+            img = Image.fromarray(arr)
             x0 = col * cell_w + pad
             y0 = row * cell_h + pad
             canvas.paste(img, (x0, y0))
@@ -1238,14 +1239,38 @@ def train(cfg: dict):
     runtime.logger.close()
 
 
+def _apply_set_overrides(cfg: dict, overrides: list[str]) -> dict:
+    def _cast(v: str):
+        if v.lower() == "true":  return True
+        if v.lower() == "false": return False
+        try: return int(v)
+        except ValueError: pass
+        try: return float(v)
+        except ValueError: pass
+        return v
+
+    for item in overrides:
+        if "=" not in item:
+            raise ValueError(f"--set requires key=value format, got: {item!r}")
+        key_path, _, raw_val = item.partition("=")
+        keys = key_path.strip().split(".")
+        node = cfg
+        for k in keys[:-1]:
+            node = node.setdefault(k, {})
+        node[keys[-1]] = _cast(raw_val.strip())
+    return cfg
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="x0loop/configs/default.yaml")
     parser.add_argument("--runtime-config", type=str, default=DEFAULT_RUNTIME_CONFIG)
+    parser.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
     cfg = load_merged_config(args.config, args.runtime_config, resolve_logging=False)
+    _apply_set_overrides(cfg, args.overrides)
     train(cfg)

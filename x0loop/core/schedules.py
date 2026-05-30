@@ -5,20 +5,14 @@ from dataclasses import dataclass
 import torch
 
 
-@dataclass
-class TimeScheduleConfig:
-    mode: str = "diffusion"
-    num_steps: int = 1000
-    diffusion_lambda: float = 12.0
-
-
 class TimeSchedule:
     """Unified schedule for diffusion-like and flow-like processes."""
 
-    def __init__(self, mode: str, num_steps: int, diffusion_lambda: float = 12.0):
+    def __init__(self, mode: str, num_steps: int, beta_min: float = 0.1, beta_max: float = 20.0):
         self.mode = mode
         self.num_steps = num_steps
-        self.diffusion_lambda = diffusion_lambda
+        self.beta_min = beta_min
+        self.beta_max = beta_max
 
     def sample_t(self, batch_size: int, device: torch.device) -> torch.Tensor:
         if self.mode == "diffusion":
@@ -41,8 +35,10 @@ class TimeSchedule:
     def alpha(self, t: torch.Tensor) -> torch.Tensor:
         t = t.float()
         if self.mode == "diffusion":
-            # VP-style closed-form schedule: alpha^2 + sigma^2 = 1.
-            a2 = torch.exp(-self.diffusion_lambda * t)
+            # Standard VP-SDE linear β schedule (DDPM / Song et al. 2020).
+            # β(t) = β_min + (β_max − β_min)·t,  α²(t) = exp(−∫₀ᵗ β(s)ds)
+            integral = self.beta_min * t + 0.5 * (self.beta_max - self.beta_min) * t.square()
+            a2 = torch.exp(-integral)
             return a2.sqrt().clamp_min(1e-5)
         if self.mode == "flow":
             return (1.0 - t).clamp_min(1e-5)

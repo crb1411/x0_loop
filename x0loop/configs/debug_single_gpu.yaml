@@ -24,7 +24,8 @@ process:
 schedule:
   mode: diffusion
   num_steps: 1000
-  diffusion_lambda: 12.0
+  beta_min: 0.1
+  beta_max: 20.0
 
 loss:
   terms:

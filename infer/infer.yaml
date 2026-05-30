@@ -1,0 +1,25 @@
+# Inference config — merged on top of the training config.
+# Only the fields listed here override the training yaml.
+
+sample:
+  steps: 50              # DDIM denoising steps
+  num: 5                 # number of images to generate
+  sampler: ddim           # ddim | posterior
+  guidance_scale: 5.0     # 1.0 = no CFG; >1 = class-conditional guidance
+  posterior_noise_scale: 1.0
+  save_trace: false        # save per-step x0_hat trace images (like training samples)
+  # class_labels: [0,1,2,3,4,5,6,7,8,9,0,1,2,3,4,5]
+  # Uncomment to fix class labels; otherwise cycles through all classes.
+
+  # Class names used to annotate sample_grid.png when guidance_scale > 1
+  class_names:
+    - airplane
+    - automobile
+    - bird
+    - cat
+    - deer
+    - dog
+    - frog
+    - horse
+    - ship
+    - truck

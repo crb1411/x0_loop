@@ -1,3 +1,6 @@
 runs/
 *.pyc
 __pycache__/
+.vscode/
+.codex/
+.agents/
