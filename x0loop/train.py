@@ -1173,7 +1173,8 @@ def train(cfg: dict):
             did_optimizer_step = should_step_optimizer(micro_step, loop_cfg)
             grad_norm = None
             if did_optimizer_step:
-                grad_norm = step_optimizer(model, components, loop_cfg.grad_clip)
+                effective_clip = 0.0 if resume.global_step < 10000 else loop_cfg.grad_clip
+                grad_norm = step_optimizer(model, components, effective_clip)
 
             if did_optimizer_step and components.ema is not None:
                 components.ema.update(model)

@@ -30,15 +30,15 @@ loss:
   terms:
     - target: eps   # eps | x0 | v
       formula: mse  # mse | l1 | huber
-      weight: balance_weights  # none | snr | inv_snr | logsnr | balance_weights
-      balance_factor: 0.3
+      weight: none  # none | snr | inv_snr | logsnr | balance_weights
+      balance_factor: 0.0
       balance_time: auto
       balance_integral_steps: 1000
       coef: 0.5
     - target: x0
       formula: mse
-      weight: balance_weights
-      balance_factor: 0.3
+      weight: none
+      balance_factor: 0.0
       balance_time: auto
       balance_integral_steps: 1000
       coef: 0.5
@@ -69,15 +69,15 @@ train:
   deterministic: false # false | true
   epochs: 1000000
   batch_size: 256
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2
   class_dropout_prob: 0.1 # [0,1], replace class label with CFG null label during training
   num_workers: 8
   lr: 5.0e-5 # used when lr_scheduler.name=constant, and as fallback max/init value
   lr_scheduler:
     name: cosine # none | constant | cosine
-    max_lr: 5.0e-5 # peak lr
+    max_lr: 8.0e-5 # peak lr
     min_lr: 1.0e-6 # floor lr
-    warmup_steps: 80000 # linear warmup: min_lr -> max_lr
+    warmup_steps: 50000 # linear warmup: min_lr -> max_lr
     cosine_steps: 200000 # cosine decay: max_lr -> min_lr, then hold min_lr
   weight_decay: 0.04
   max_clip_grad: 10.0 # overrides distributed.grad_clip_norm when set
@@ -88,7 +88,7 @@ train:
 logging:
   out_dir_base: runs/exp_default
   log_every: 100
-  window_size: 100
+  window_size: 500
   use_tb: true # false | true
   sample_every: 5000
   sample_rank0_only: true # false | true
@@ -98,6 +98,6 @@ sample:
   steps: 100
   num: 4
   sampler: auto # auto | ddim | posterior (auto uses process.sampler)
-  guidance_scale: 1.0 # 1.0 disables CFG; >1 uses conditional + null-label unconditional prediction
+  guidance_scale: 5.0 # 1.0 disables CFG; >1 uses conditional + null-label unconditional prediction
   posterior_noise_scale: 1.0 # used when sampler=posterior
   save_trace: false # false | true
