@@ -6,7 +6,9 @@ from x0loop.core.process_base import BaseProcess, ForwardBatch
 
 
 class FlowProcess(BaseProcess):
-    """Linear interpolation to Gaussian prior with eps regression target."""
+
+    def __init__(self, schedule, prior: str = "gaussian", output_target: str = "eps"):
+        super().__init__(schedule=schedule, prior=prior, output_target=output_target)
 
     def forward_sample(self, x0: torch.Tensor, t: torch.Tensor, rng=None) -> ForwardBatch:
         eps = torch.randn_like(x0)
@@ -15,44 +17,16 @@ class FlowProcess(BaseProcess):
         a = self._reshape_coeff(alpha, x0)
         s = self._reshape_coeff(sigma, x0)
         xt = a * x0 + s * eps
-        return ForwardBatch(x0=x0, t=t, xt=xt, target=eps, aux={"eps": eps, "alpha": alpha, "sigma": sigma})
+        target = self._make_target(x0, eps, t)
+        return ForwardBatch(x0=x0, t=t, xt=xt, target=target, aux={"eps": eps, "alpha": alpha, "sigma": sigma})
 
-    def x0_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
-        sigma = self.schedule.sigma(t)
-        alpha = self.schedule.alpha(t)
-        s = self._reshape_coeff(sigma, xt)
-        a = self._reshape_coeff(alpha, xt)
-        return (xt - s * model_out) / a.clamp_min(1e-5)
-
-    def eps_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
-        return model_out
-
-    def v_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
-        return self.eps_from_output(xt, t, model_out, aux) - self.x0_from_output(xt, t, model_out, aux)
-
-    def eps_target(self, fb: ForwardBatch) -> torch.Tensor:
-        return fb.aux.get("eps", fb.target)
-
-    def x0_target(self, fb: ForwardBatch) -> torch.Tensor:
-        return fb.x0
-
-    def v_target(self, fb: ForwardBatch) -> torch.Tensor:
-        return self.eps_target(fb) - self.x0_target(fb)
-
-    def step(
-        self,
-        xt: torch.Tensor,
-        t: torch.Tensor,
-        s: torch.Tensor,
-        model_out: torch.Tensor,
-        aux: dict,
-        rng=None,
-    ) -> torch.Tensor:
-        x0_hat = self.x0_from_output(xt, t, model_out, aux)
+    def step(self, xt, t, s, model_out, aux, rng=None) -> torch.Tensor:
+        x0_hat  = self.x0_from_output(xt, t, model_out, aux)
+        eps_hat = self.eps_from_output(xt, t, model_out, aux)
         if s.ndim == 0:
             s = torch.full((xt.shape[0],), float(s.item()), device=xt.device)
         alpha_s = self.schedule.alpha(s)
         sigma_s = self.schedule.sigma(s)
         a_s = self._reshape_coeff(alpha_s, xt)
         s_s = self._reshape_coeff(sigma_s, xt)
-        return a_s * x0_hat + s_s * model_out
+        return a_s * x0_hat + s_s * eps_hat

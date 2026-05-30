@@ -170,21 +170,23 @@ def build_dataset(cfg: dict):
 
 def build_schedule(cfg: dict) -> TimeSchedule:
     sc = cfg["schedule"]
-    return TimeSchedule(mode=sc["mode"], num_steps=int(sc["num_steps"]),
+    return TimeSchedule(mode=sc["mode"], num_steps=int(sc.get("num_steps", 1000)),
                         beta_min=float(sc.get("beta_min", 0.1)), beta_max=float(sc.get("beta_max", 20.0)))
 
 
 def build_process(cfg: dict, schedule: TimeSchedule):
-    name = cfg["process"]["name"].lower()
+    pc = cfg.get("process", {})
+    name = str(pc.get("name", "diffusion")).lower()
+    output_target = str(pc.get("output_target", "eps")).lower()
     if name == "diffusion":
-        pc = cfg.get("process", {})
         return DiffusionProcess(
             schedule=schedule,
+            output_target=output_target,
             sampler=str(pc.get("sampler", "ddim")),
             posterior_noise_scale=float(pc.get("posterior_noise_scale", 1.0)),
         )
     if name == "flow":
-        return FlowProcess(schedule=schedule)
+        return FlowProcess(schedule=schedule, output_target=output_target)
     raise ValueError(f"Unknown process: {name}")
 
 

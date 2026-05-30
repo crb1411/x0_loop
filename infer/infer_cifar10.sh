@@ -15,7 +15,7 @@ cd /data/seek/aigc/x0_loop
 export CUDA_VISIBLE_DEVICES=0
 
 # ─── 在这里配置 checkpoint 路径 ───────────────────────────────────────────
-CKPT="/data/seek/aigc/x0_loop/runs/cifar10_diffusion/20260530_141408_train/checkpoints/ckpt_step_00148000.pt"
+CKPT="/data/seek/aigc/x0_loop/runs/cifar10_diffusion/20260530_141408_train/checkpoints/ckpt_step_00192000.pt"
 # ─────────────────────────────────────────────────────────────────────────
 
 # 允许命令行传入覆盖

@@ -4,11 +4,11 @@ distributed:
   fsdp_mode: fsdp2
   sharding: full_shard
   precision: bf16
-  grad_clip_norm: 1.0
+  grad_clip_norm: 3.0
   activation_ckpt: true
   checkpoint:
     mode: sharded
-    every_steps: 4000
+    every_steps: 10000
 
 compile:
   enabled: true

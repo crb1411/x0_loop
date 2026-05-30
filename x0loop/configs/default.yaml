@@ -18,6 +18,7 @@ model:
 
 process:
   name: diffusion # diffusion | flow
+  output_target: eps # eps | x0 | v  — what the model directly predicts
   sampler: ddim # ddim | posterior
   posterior_noise_scale: 1.0 # used when sampler=posterior
 

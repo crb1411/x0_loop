@@ -14,14 +14,111 @@ class ForwardBatch:
     x0: torch.Tensor
     t: torch.Tensor
     xt: torch.Tensor
-    target: torch.Tensor
+    target: torch.Tensor           # what the model should directly predict
     aux: dict[str, Any] = field(default_factory=dict)
 
 
 class BaseProcess:
-    def __init__(self, schedule: TimeSchedule, prior: str = "gaussian"):
+    """
+    output_target controls what the model predicts:
+      "eps" — noise (default, classic DDPM / flow)
+      "x0"  — clean image
+      "v"   — velocity: v = α·ε − σ·x₀  (standard v-parameterization)
+
+    The three from_output methods always return the requested quantity
+    regardless of output_target, enabling any target for the loss config.
+    """
+
+    def __init__(self, schedule: TimeSchedule, prior: str = "gaussian", output_target: str = "eps"):
         self.schedule = schedule
         self.prior = prior
+        self.output_target = str(output_target).lower()
+        assert self.output_target in {"eps", "x0", "v"}, \
+            f"output_target must be eps | x0 | v, got {self.output_target!r}"
+
+    # ------------------------------------------------------------------ #
+    # Internal converters: dispatch on self.output_target                  #
+    # ------------------------------------------------------------------ #
+
+    def _coeff(self, xt: torch.Tensor, t: torch.Tensor):
+        alpha = self.schedule.alpha(t)
+        sigma = self.schedule.sigma(t)
+        a = self._reshape_coeff(alpha, xt)
+        s = self._reshape_coeff(sigma, xt)
+        return a, s, alpha, sigma
+
+    def _to_x0(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor) -> torch.Tensor:
+        a, s, alpha, sigma = self._coeff(xt, t)
+        if self.output_target == "x0":
+            return model_out
+        if self.output_target == "eps":
+            # x0 = (x_t − σ·ε) / α
+            return (xt - s * model_out) / a.clamp_min(1e-5)
+        # v = α·ε − σ·x0  →  x0 = (α·x_t − σ·v) / (α²+σ²)
+        norm2 = self._reshape_coeff((alpha ** 2 + sigma ** 2).clamp_min(1e-10), xt)
+        return (a * xt - s * model_out) / norm2
+
+    def _to_eps(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor) -> torch.Tensor:
+        a, s, alpha, sigma = self._coeff(xt, t)
+        if self.output_target == "eps":
+            return model_out
+        if self.output_target == "x0":
+            # ε = (x_t − α·x0) / σ
+            return (xt - a * model_out) / s.clamp_min(1e-5)
+        # v = α·ε − σ·x0  →  ε = (σ·x_t + α·v) / (α²+σ²)
+        norm2 = self._reshape_coeff((alpha ** 2 + sigma ** 2).clamp_min(1e-10), xt)
+        return (s * xt + a * model_out) / norm2
+
+    def _to_v(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor) -> torch.Tensor:
+        if self.output_target == "v":
+            return model_out
+        a, s, _, _ = self._coeff(xt, t)
+        # standard v = α·ε − σ·x0
+        return a * self._to_eps(xt, t, model_out) - s * self._to_x0(xt, t, model_out)
+
+    # ------------------------------------------------------------------ #
+    # Public API: from_output / targets                                    #
+    # ------------------------------------------------------------------ #
+
+    def x0_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
+        return self._to_x0(xt, t, model_out)
+
+    def eps_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
+        return self._to_eps(xt, t, model_out)
+
+    def v_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
+        return self._to_v(xt, t, model_out)
+
+    def eps_target(self, fb: ForwardBatch) -> torch.Tensor:
+        return fb.aux["eps"]
+
+    def x0_target(self, fb: ForwardBatch) -> torch.Tensor:
+        return fb.x0
+
+    def v_target(self, fb: ForwardBatch) -> torch.Tensor:
+        # standard v = α·ε − σ·x0
+        alpha = self.schedule.alpha(fb.t)
+        sigma = self.schedule.sigma(fb.t)
+        a = self._reshape_coeff(alpha, fb.x0)
+        s = self._reshape_coeff(sigma, fb.x0)
+        return a * fb.aux["eps"] - s * fb.x0
+
+    def _make_target(self, x0: torch.Tensor, eps: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """Compute the direct prediction target matching self.output_target."""
+        if self.output_target == "eps":
+            return eps
+        if self.output_target == "x0":
+            return x0
+        # v = α·ε − σ·x0
+        alpha = self.schedule.alpha(t)
+        sigma = self.schedule.sigma(t)
+        a = self._reshape_coeff(alpha, x0)
+        s = self._reshape_coeff(sigma, x0)
+        return a * eps - s * x0
+
+    # ------------------------------------------------------------------ #
+    # Subclass interface                                                   #
+    # ------------------------------------------------------------------ #
 
     def prior_sample(self, shape, device, dtype) -> torch.Tensor:
         if self.prior != "gaussian":
@@ -31,54 +128,12 @@ class BaseProcess:
     def forward_sample(self, x0: torch.Tensor, t: torch.Tensor, rng=None) -> ForwardBatch:
         raise NotImplementedError
 
-    def x0_from_output(
-        self,
-        xt: torch.Tensor,
-        t: torch.Tensor,
-        model_out: torch.Tensor,
-        aux: dict,
-    ) -> torch.Tensor:
+    def step(self, xt, t, s, model_out, aux, rng=None) -> torch.Tensor:
         raise NotImplementedError
 
-    def eps_from_output(
-        self,
-        xt: torch.Tensor,
-        t: torch.Tensor,
-        model_out: torch.Tensor,
-        aux: dict,
-    ) -> torch.Tensor:
-        return model_out
-
-    def v_from_output(
-        self,
-        xt: torch.Tensor,
-        t: torch.Tensor,
-        model_out: torch.Tensor,
-        aux: dict,
-    ) -> torch.Tensor:
-        eps = self.eps_from_output(xt, t, model_out, aux)
-        x0 = self.x0_from_output(xt, t, model_out, aux)
-        return eps - x0
-
-    def eps_target(self, fb: ForwardBatch) -> torch.Tensor:
-        return fb.target
-
-    def x0_target(self, fb: ForwardBatch) -> torch.Tensor:
-        return fb.x0
-
-    def v_target(self, fb: ForwardBatch) -> torch.Tensor:
-        return self.eps_target(fb) - self.x0_target(fb)
-
-    def step(
-        self,
-        xt: torch.Tensor,
-        t: torch.Tensor,
-        s: torch.Tensor,
-        model_out: torch.Tensor,
-        aux: dict,
-        rng=None,
-    ) -> torch.Tensor:
-        raise NotImplementedError
+    # ------------------------------------------------------------------ #
+    # Sampling loop                                                        #
+    # ------------------------------------------------------------------ #
 
     @torch.no_grad()
     def sample(
