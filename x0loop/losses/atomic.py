@@ -20,7 +20,7 @@ def regress(formula: str, pred: torch.Tensor, target: torch.Tensor, delta: float
 
 
 class AtomicLoss:
-    """One training term: target × formula × t_weight × coef."""
+    """One training term: target × formula × optional per-space t_weight × coef."""
 
     def __init__(self, *, target: str, formula: str, delta: float = 1.0, weight_fn=None, coef: float = 1.0):
         if target not in {"eps", "x0", "v"}:
@@ -41,7 +41,7 @@ class AtomicLoss:
         return process.v_from_output(fb.xt, fb.t, out, aux=fb.aux), process.v_target(fb)
 
     def per_example(self, process, fb, out) -> tuple[torch.Tensor, torch.Tensor]:
-        """Returns (unweighted [B], weight [B])."""
+        """Returns (unweighted [B], per-space weight [B])."""
         pred, tgt = self._pred_and_target(process, fb, out)
         unweighted = regress(self.formula, pred, tgt, self.delta)
         if self.weight_fn is not None:
@@ -63,25 +63,60 @@ class AtomicLoss:
 
 
 class CompositeLoss:
-    """Weighted sum of AtomicLoss terms."""
+    """Weighted sum of AtomicLoss terms.
 
-    def __init__(self, atoms: list[AtomicLoss]):
+    Default semantics are outer timestep weighting:
+
+        loss_t = outer_weight(t) * sum_i coef_i * loss_i(t)
+
+    AtomicLoss.weight_fn remains available only for explicit per-space weighting.
+    """
+
+    def __init__(self, atoms: list[AtomicLoss], *, outer_weight_fn=None):
         if not atoms:
             raise ValueError("CompositeLoss requires at least one atom")
         self.atoms = atoms
+        self.outer_weight_fn = outer_weight_fn
 
-    def __call__(self, process, fb, out) -> dict[str, torch.Tensor]:
-        """Returns {'total': scalar} plus per-target scalars (e.g. 'eps', 'x0', 'v')."""
-        total: torch.Tensor | None = None
+    def outer_weight(self, fb, ref: torch.Tensor) -> torch.Tensor:
+        if self.outer_weight_fn is None:
+            return torch.ones_like(ref)
+        w = self.outer_weight_fn(fb.t, fb.aux)
+        if w.ndim > 1:
+            w = w.view(w.shape[0], -1).mean(dim=1)
+        return w.to(device=ref.device, dtype=ref.dtype)
+
+    def per_example(self, process, fb, out) -> dict[str, torch.Tensor]:
+        """Returns per-example losses after coef and outer weighting."""
+        inner: torch.Tensor | None = None
+        by_target_raw: dict[str, torch.Tensor] = {}
         by_target: dict[str, torch.Tensor] = {}
+
         for atom in self.atoms:
-            term = atom(process, fb, out)
-            prev = by_target.get(atom.target)
-            by_target[atom.target] = (atom.coef * term) if prev is None else (prev + atom.coef * term)
-            total = (atom.coef * term) if total is None else (total + atom.coef * term)
-        result: dict[str, torch.Tensor] = {"total": total}  # type: ignore[assignment]
-        result.update(by_target)
+            raw, per_space_w = atom.per_example(process, fb, out)
+            term = atom.coef * per_space_w * raw
+            by_target_raw[atom.target] = raw if atom.target not in by_target_raw else by_target_raw[atom.target] + raw
+            by_target[atom.target] = term if atom.target not in by_target else by_target[atom.target] + term
+            inner = term if inner is None else inner + term
+
+        assert inner is not None
+        outer_w = self.outer_weight(fb, inner)
+        result: dict[str, torch.Tensor] = {
+            "inner": inner,
+            "weight": outer_w,
+            "total": outer_w * inner,
+        }
+        for k, v in by_target.items():
+            result[k] = outer_w * v
+        for k, v in by_target_raw.items():
+            result[f"{k}_raw"] = v
         return result
 
+    def __call__(self, process, fb, out) -> dict[str, torch.Tensor]:
+        """Returns {'total': scalar} plus per-target scalars."""
+        per_ex = self.per_example(process, fb, out)
+        return {k: v.mean() for k, v in per_ex.items()}
+
     def __repr__(self) -> str:
-        return f"CompositeLoss({self.atoms})"
+        w = "none" if self.outer_weight_fn is None else "weighted"
+        return f"CompositeLoss(outer_weight={w}, atoms={self.atoms})"
