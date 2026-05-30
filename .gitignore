@@ -1,4 +1,5 @@
 runs/
+train_run/
 *.pyc
 __pycache__/
 .vscode/
