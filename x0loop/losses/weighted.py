@@ -15,7 +15,23 @@ def make_weight_fn(
     balance_factor: float = 0.5,
     balance_time: str = "auto",
     balance_integral_steps: int = 2000,
+    target: str | None = None,
+    floor: float = 0.1,
+    power: float = 1.0,
+    gamma: float = 5.0,
 ) -> WeightFn:
+    name = str(name).lower()
+    target = None if target is None else str(target).lower()
+    floor = float(floor)
+    power = float(power)
+    gamma = float(gamma)
+    if floor < 0.0:
+        raise ValueError(f"floor must be >= 0, got {floor}")
+    if power <= 0.0:
+        raise ValueError(f"power must be > 0, got {power}")
+    if gamma <= 0.0:
+        raise ValueError(f"gamma must be > 0, got {gamma}")
+
     balance_factor = float(balance_factor)
     if not (0.0 <= balance_factor <= 1.0):
         raise ValueError(f"balance_factor must be in [0, 1], got {balance_factor}")
@@ -34,6 +50,33 @@ def make_weight_fn(
 
     def _logsnr(t, aux=None):
         return torch.log(schedule.snr(t).clamp_min(eps))
+
+    def _min_snr(t, aux=None):
+        snr = schedule.snr(t).clamp_min(eps)
+        return torch.minimum(snr, torch.full_like(snr, gamma)) / snr
+
+    def _t_x0(t, aux=None):
+        del aux
+        return floor + (1.0 - floor) * (1.0 - t.float()).clamp(0.0, 1.0).pow(power)
+
+    def _t_eps(t, aux=None):
+        del aux
+        return floor + (1.0 - floor) * t.float().clamp(0.0, 1.0).pow(power)
+
+    def _t_mid(t, aux=None):
+        del aux
+        # Peak at t=0.5, floor at both endpoints.
+        mid = 1.0 - (2.0 * t.float().clamp(0.0, 1.0) - 1.0).abs()
+        return floor + (1.0 - floor) * mid.clamp(0.0, 1.0).pow(power)
+
+    def _target_default(t, aux=None):
+        if target == "x0":
+            return _t_x0(t, aux)
+        if target == "eps":
+            return _t_eps(t, aux)
+        if target == "v":
+            return _t_mid(t, aux)
+        return torch.ones_like(t, dtype=torch.float32)
 
     inv_alpha_avg_discrete_cache: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
     inv_alpha_avg_continuous_cache: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
@@ -92,6 +135,16 @@ def make_weight_fn(
         return _inv_snr
     if name == "logsnr":
         return _logsnr
+    if name == "min_snr":
+        return _min_snr
+    if name in {"t_x0", "x0", "x0_t"}:
+        return _t_x0
+    if name in {"t_eps", "eps", "eps_t"}:
+        return _t_eps
+    if name in {"t_mid", "v", "v_t"}:
+        return _t_mid
+    if name in {"target", "target_default", "auto_target"}:
+        return _target_default
     if name == "balance_weights":
         return _balance_weights
     raise ValueError(f"Unknown weight fn: {name}")
