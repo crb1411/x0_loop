@@ -16,6 +16,6 @@ torchrun \
   --master_addr="${MASTER_ADDR}" \
   --master_port="${MASTER_PORT}" \
   -m x0loop.train \
-  --config train_run/configs/cifar10/cifar10_dit_flow_train_x0_weighted.yaml \
+  --config train_run/configs/cifar10/cifar10_dit_flow_train_x0_weighted_min.yaml \
   --runtime-config x0loop/configs/runtime/fsdp_checkpoint_compile.yaml \
   $RESUME_ARGS
