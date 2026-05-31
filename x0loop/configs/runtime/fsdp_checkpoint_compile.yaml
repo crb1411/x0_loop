@@ -8,7 +8,7 @@ distributed:
   activation_ckpt: true
   checkpoint:
     mode: sharded
-    every_steps: 10000
+    every_steps: 50000
 
 compile:
   enabled: true

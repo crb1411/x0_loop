@@ -17,8 +17,8 @@ torchrun \
   --node_rank=0 \
   --nproc_per_node=1 \
   --master_addr=127.0.0.1 \
-  --master_port=40030 \
+  --master_port=40032 \
   -m x0loop.train \
-  --config train_run/configs/cifar10/cifar10_dit_flow_train.yaml \
+  --config train_run/configs/cifar10/cifar10_dit_flow_train_x0.yaml \
   --runtime-config x0loop/configs/runtime/fsdp_checkpoint_compile.yaml \
   $RESUME_ARGS
