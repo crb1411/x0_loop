@@ -17,7 +17,7 @@ def make_weight_fn(
     balance_integral_steps: int = 2000,
     target: str | None = None,
     floor: float = 0.0,
-    power: float = 0.5,
+    power: float = 2.0,
     gamma: float = 5.0,
 ) -> WeightFn:
     name = str(name).lower()
@@ -58,7 +58,7 @@ def make_weight_fn(
     def _t_x0(t, aux=None):
         del aux
         # x0 is easy near t=0 and hard/noisy near t=1.
-        # Default: w(t)=sqrt(1-t). `floor` can keep a non-zero tail if needed.
+        # Default: w(t)=(1-t)^2. `power` is configurable.
         return floor + (1.0 - floor) * (1.0 - t.float()).clamp(0.0, 1.0).pow(power)
 
     def _t_eps(t, aux=None):
