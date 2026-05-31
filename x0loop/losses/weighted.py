@@ -19,12 +19,16 @@ def make_weight_fn(
     floor: float = 0.0,
     power: float = 2.0,
     gamma: float = 5.0,
+    normalize: str = "mean",
 ) -> WeightFn:
     name = str(name).lower()
     target = None if target is None else str(target).lower()
     floor = float(floor)
     power = float(power)
     gamma = float(gamma)
+    normalize = str(normalize).lower()
+    if normalize not in {"none", "mean"}:
+        raise ValueError(f"normalize must be none | mean, got {normalize}")
     if floor < 0.0:
         raise ValueError(f"floor must be >= 0, got {floor}")
     if power <= 0.0:
@@ -42,6 +46,14 @@ def make_weight_fn(
     if balance_integral_steps <= 0:
         raise ValueError("balance_integral_steps must be > 0")
 
+    def _normalize_poly(w: torch.Tensor) -> torch.Tensor:
+        if normalize == "none":
+            return w
+        # For t ~ Uniform(0,1): E[(1-t)^p] = E[t^p] = E[(1-|2t-1|)^p] = 1/(p+1).
+        # With floor: E[floor + (1-floor)*base^p] = floor + (1-floor)/(p+1).
+        mean = floor + (1.0 - floor) / (power + 1.0)
+        return w / max(mean, eps)
+
     def _snr(t, aux=None):
         return schedule.snr(t).clamp_min(eps)
 
@@ -57,19 +69,19 @@ def make_weight_fn(
 
     def _t_x0(t, aux=None):
         del aux
-        # x0 is easy near t=0 and hard/noisy near t=1.
-        # Default: w(t)=(1-t)^2. `power` is configurable.
-        return floor + (1.0 - floor) * (1.0 - t.float()).clamp(0.0, 1.0).pow(power)
+        raw = floor + (1.0 - floor) * (1.0 - t.float()).clamp(0.0, 1.0).pow(power)
+        return _normalize_poly(raw)
 
     def _t_eps(t, aux=None):
         del aux
-        return floor + (1.0 - floor) * t.float().clamp(0.0, 1.0).pow(power)
+        raw = floor + (1.0 - floor) * t.float().clamp(0.0, 1.0).pow(power)
+        return _normalize_poly(raw)
 
     def _t_mid(t, aux=None):
         del aux
-        # Peak at t=0.5, floor at both endpoints.
         mid = 1.0 - (2.0 * t.float().clamp(0.0, 1.0) - 1.0).abs()
-        return floor + (1.0 - floor) * mid.clamp(0.0, 1.0).pow(power)
+        raw = floor + (1.0 - floor) * mid.clamp(0.0, 1.0).pow(power)
+        return _normalize_poly(raw)
 
     def _target_default(t, aux=None):
         if target == "x0":
