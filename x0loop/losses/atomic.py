@@ -30,7 +30,7 @@ class AtomicLoss:
         self.target = target
         self.formula = formula
         self.delta = float(delta)
-        self.weight_fn = weight_fn  # callable(t, aux) -> Tensor[B], or None for uniform
+        self.weight_fn = weight_fn
         self.coef = float(coef)
 
     def _pred_and_target(self, process, fb, out):
@@ -65,11 +65,16 @@ class AtomicLoss:
 class CompositeLoss:
     """Weighted sum of AtomicLoss terms.
 
-    Default semantics are outer timestep weighting:
+    Main optimization objective:
 
-        loss_t = outer_weight(t) * sum_i coef_i * loss_i(t)
+        loss_weighted(t) = outer_weight(t) * loss_no_weight(t)
 
-    AtomicLoss.weight_fn remains available only for explicit per-space weighting.
+    where:
+
+        loss_no_weight(t) = sum_i coef_i * per_space_weight_i(t) * raw_loss_i(t)
+
+    The default path uses no per-space weight, so loss_no_weight is just the
+    coefficient-weighted target-space loss before the outer timestep weight.
     """
 
     def __init__(self, atoms: list[AtomicLoss], *, outer_weight_fn=None):
@@ -87,33 +92,43 @@ class CompositeLoss:
         return w.to(device=ref.device, dtype=ref.dtype)
 
     def per_example(self, process, fb, out) -> dict[str, torch.Tensor]:
-        """Returns per-example losses after coef and outer weighting."""
+        """Returns per-example weighted and unweighted objective values."""
         inner: torch.Tensor | None = None
         by_target_raw: dict[str, torch.Tensor] = {}
-        by_target: dict[str, torch.Tensor] = {}
+        by_target_no_weight: dict[str, torch.Tensor] = {}
 
         for atom in self.atoms:
             raw, per_space_w = atom.per_example(process, fb, out)
-            term = atom.coef * per_space_w * raw
+            term_no_outer_weight = atom.coef * per_space_w * raw
             by_target_raw[atom.target] = raw if atom.target not in by_target_raw else by_target_raw[atom.target] + raw
-            by_target[atom.target] = term if atom.target not in by_target else by_target[atom.target] + term
-            inner = term if inner is None else inner + term
+            by_target_no_weight[atom.target] = (
+                term_no_outer_weight
+                if atom.target not in by_target_no_weight
+                else by_target_no_weight[atom.target] + term_no_outer_weight
+            )
+            inner = term_no_outer_weight if inner is None else inner + term_no_outer_weight
 
         assert inner is not None
         outer_w = self.outer_weight(fb, inner)
+        total = outer_w * inner
+
         result: dict[str, torch.Tensor] = {
+            "loss_no_weight": inner,
+            "loss_weighted": total,
             "inner": inner,
             "weight": outer_w,
-            "total": outer_w * inner,
+            "total": total,
         }
-        for k, v in by_target.items():
+        for k, v in by_target_no_weight.items():
             result[k] = outer_w * v
+            result[f"{k}_no_weight"] = v
+            result[f"{k}_weighted"] = outer_w * v
         for k, v in by_target_raw.items():
             result[f"{k}_raw"] = v
         return result
 
     def __call__(self, process, fb, out) -> dict[str, torch.Tensor]:
-        """Returns {'total': scalar} plus per-target scalars."""
+        """Returns scalar total plus weighted/unweighted logging scalars."""
         per_ex = self.per_example(process, fb, out)
         return {k: v.mean() for k, v in per_ex.items()}
 
