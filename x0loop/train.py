@@ -16,6 +16,7 @@ from x0loop.aug.identity import NoAug
 from x0loop.aug.strong_augment import strongAugment
 from x0loop.core.config import DEFAULT_RUNTIME_CONFIG, dump_resolved_config, load_merged_config, resolve_logging_output_dir
 from x0loop.core.schedules import TimeSchedule
+from x0loop.core.time_sampling import build_time_sampler
 from x0loop.losses.spec import build_loss as _build_loss
 from x0loop.losses.atomic import AtomicLoss, CompositeLoss, regress
 from x0loop.models.dit import DiT, DiTConfig
@@ -77,6 +78,7 @@ class ModelContext:
 @dataclass
 class TrainComponents:
     schedule: TimeSchedule
+    time_sampler: object
     process: object
     loss_fn: CompositeLoss
     augment: object
@@ -767,6 +769,7 @@ def build_model_context(cfg: dict, runtime: RuntimeContext) -> ModelContext:
 
 def build_train_components(cfg: dict, model_ctx: ModelContext, runtime: RuntimeContext) -> TrainComponents:
     schedule = build_schedule(cfg)
+    time_sampler = build_time_sampler(cfg, schedule)
     process = build_process(cfg, schedule)
     loss_fn = _build_loss(cfg["loss"], schedule)
     augment, augment_mode = build_augment(cfg)
@@ -774,6 +777,7 @@ def build_train_components(cfg: dict, model_ctx: ModelContext, runtime: RuntimeC
     if runtime.is_main:
         atom_descs = ", ".join(repr(a) for a in loss_fn.atoms)
         runtime.logger.log_text(f"[loss] {atom_descs}")
+        runtime.logger.log_text(f"[time_sampler] {cfg.get('time_sampler', {'name': 'legacy'})}")
 
     optimizer = torch.optim.AdamW(
         model_ctx.model.parameters(),
@@ -786,6 +790,7 @@ def build_train_components(cfg: dict, model_ctx: ModelContext, runtime: RuntimeC
 
     return TrainComponents(
         schedule=schedule,
+        time_sampler=time_sampler,
         process=process,
         loss_fn=loss_fn,
         augment=augment,
@@ -906,7 +911,7 @@ def compute_forward_batch(
 ) -> ForwardBatch:
     x0 = x0.to(runtime.device, non_blocking=True)
     bsz = x0.shape[0]
-    t = components.schedule.sample_t(bsz, device=runtime.device)
+    t = components.time_sampler.sample(bsz, device=runtime.device)
     cond = y.to(runtime.device, non_blocking=True) if (use_label_cond and isinstance(y, torch.Tensor)) else None
     if cond is not None:
         cond = apply_classifier_free_label_dropout(

@@ -25,6 +25,9 @@ process:
 schedule:
   mode: flow
 
+time_sampler:
+  name: uniform_continuous
+
 loss:
   outer_weight: target
   outer_weight_power: 2.0
