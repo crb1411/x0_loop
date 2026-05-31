@@ -392,15 +392,18 @@ class TimeBinAccumulator:
         x0_u = regress("mse", process.x0_from_output(fb.xt, t, out_d, aux=fb.aux), process.x0_target(fb).detach())
         v_u = regress("mse", process.v_from_output(fb.xt, t, out_d, aux=fb.aux), process.v_target(fb).detach())
 
-        # Weight from first atom that has a weight_fn, else uniform.
-        ref_atom = next((a for a in loss_fn.atoms if a.weight_fn is not None), None)
-        if ref_atom is not None:
-            w = ref_atom.weight_fn(t, fb.aux)
-            if w.ndim > 1:
-                w = w.view(w.shape[0], -1).mean(dim=1)
-            w = w.float()
+        # Prefer the actual outer objective weight; fall back to explicit per-space atom weight.
+        if getattr(loss_fn, "outer_weight_fn", None) is not None:
+            w = loss_fn.outer_weight(fb, x0_u).float()
         else:
-            w = torch.ones(t.shape[0], device=t.device, dtype=torch.float32)
+            ref_atom = next((a for a in loss_fn.atoms if a.weight_fn is not None), None)
+            if ref_atom is not None:
+                w = ref_atom.weight_fn(t, fb.aux)
+                if w.ndim > 1:
+                    w = w.view(w.shape[0], -1).mean(dim=1)
+                w = w.float()
+            else:
+                w = torch.ones(t.shape[0], device=t.device, dtype=torch.float32)
 
         alpha_t = fb.aux.get("alpha")
         if alpha_t is None:
