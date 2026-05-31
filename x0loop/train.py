@@ -20,6 +20,7 @@ from x0loop.core.time_sampling import build_time_sampler
 from x0loop.losses.spec import build_loss as _build_loss
 from x0loop.losses.atomic import AtomicLoss, CompositeLoss, regress
 from x0loop.models.dit import DiT, DiTConfig
+from x0loop.models.unet import UNet, UNetConfig
 from x0loop.processes.diffusion_process import DiffusionProcess
 from x0loop.processes.flow_process import FlowProcess
 from x0loop.utils import dist as dist_utils
@@ -70,7 +71,7 @@ class DataContext:
 @dataclass
 class ModelContext:
     model: torch.nn.Module
-    model_cfg: DiTConfig
+    model_cfg: object
     use_fsdp: bool
     fsdp_mode: str
     precision: str
@@ -730,28 +731,37 @@ def build_data_context(cfg: dict, runtime: RuntimeContext) -> DataContext:
     return DataContext(dataset=dataset, sampler=sampler, loader=loader, eval_loader=eval_loader)
 
 
-def log_model_summary(logger: Logger, model: torch.nn.Module, model_cfg: DiTConfig, device: torch.device) -> None:
+def log_model_summary(logger: Logger, model: torch.nn.Module, model_cfg: object, device: torch.device) -> None:
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.log_text(f"[model] init: model = DiT(model_cfg).to(device), device={device}")
-    logger.log_text(
-        "[model] config: "
-        f"image_size={model_cfg.image_size}, in_channels={model_cfg.in_channels}, out_channels={model_cfg.out_channels}, "
-        f"patch_size={model_cfg.patch_size}, dim={model_cfg.dim}, depth={model_cfg.depth}, heads={model_cfg.heads}, "
-        f"mlp_ratio={model_cfg.mlp_ratio}, norm_layer={model_cfg.norm_layer}"
-    )
-    logger.log_text(
+    logger.log_text(f"[model] init: model = {type(model).__name__}(model_cfg).to(device), device={device}")
+    logger.log_text(f"[model] config: {model_cfg}")
+    shape_desc = (
         "[model] shapes: "
         f"input=[B,{model_cfg.in_channels},{model_cfg.image_size},{model_cfg.image_size}], "
-        f"output=[B,{model_cfg.out_channels},{model_cfg.image_size},{model_cfg.image_size}], "
-        f"tokens={model.num_tokens} ({model.h_tokens}x{model.w_tokens}), token_dim={model_cfg.dim}"
+        f"output=[B,{model_cfg.out_channels},{model_cfg.image_size},{model_cfg.image_size}]"
     )
+    if all(hasattr(model, k) for k in ("num_tokens", "h_tokens", "w_tokens")):
+        token_dim = getattr(model_cfg, "dim", getattr(model_cfg, "base_channels", "n/a"))
+        shape_desc += f", tokens={model.num_tokens} ({model.h_tokens}x{model.w_tokens}), token_dim={token_dim}"
+    logger.log_text(shape_desc)
     logger.log_text(f"[model] params: total={total_params:,}, trainable={trainable_params:,}")
 
 
 def build_model_context(cfg: dict, runtime: RuntimeContext) -> ModelContext:
-    model_cfg = DiTConfig(**cfg["model"])
-    model = DiT(model_cfg).to(runtime.device)
+    model_name = str(cfg["model"].get("name", "dit")).lower()
+    model_cfg_dict = dict(cfg["model"])
+    model_cfg_dict.pop("name", None)
+
+    if model_name == "dit":
+        model_cfg = DiTConfig(**model_cfg_dict)
+        model = DiT(model_cfg).to(runtime.device)
+    elif model_name == "unet":
+        model_cfg = UNetConfig(**model_cfg_dict)
+        model = UNet(model_cfg).to(runtime.device)
+    else:
+        raise ValueError(f"Unknown model.name={model_name!r}; use dit | unet")
+
     if runtime.is_main:
         log_model_summary(runtime.logger, model, model_cfg, runtime.device)
 
