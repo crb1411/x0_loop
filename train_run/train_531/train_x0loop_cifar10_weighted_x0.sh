@@ -1,20 +1,8 @@
 #!/usr/bin/env bash
 cd /data/seek/aigc/x0_loop
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-export X0LOOP_RUN_TIMESTAMP="$(date +"%Y%m%d_%H%M%S")"
-
-MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
-MASTER_PORT="${MASTER_PORT:-$(python - <<'PY'
-import socket
-s = socket.socket()
-s.bind(("", 0))
-print(s.getsockname()[1])
-s.close()
-PY
-)}"
-
-echo "[torchrun] MASTER_ADDR=${MASTER_ADDR} MASTER_PORT=${MASTER_PORT} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+source train_run/common_torchrun.sh
+setup_torchrun_env
 
 RESUME_ARGS=""
 if [ -n "$1" ]; then
