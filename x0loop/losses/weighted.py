@@ -16,8 +16,8 @@ def make_weight_fn(
     balance_time: str = "auto",
     balance_integral_steps: int = 2000,
     target: str | None = None,
-    floor: float = 0.1,
-    power: float = 1.0,
+    floor: float = 0.0,
+    power: float = 0.5,
     gamma: float = 5.0,
 ) -> WeightFn:
     name = str(name).lower()
@@ -57,6 +57,8 @@ def make_weight_fn(
 
     def _t_x0(t, aux=None):
         del aux
+        # x0 is easy near t=0 and hard/noisy near t=1.
+        # Default: w(t)=sqrt(1-t). `floor` can keep a non-zero tail if needed.
         return floor + (1.0 - floor) * (1.0 - t.float()).clamp(0.0, 1.0).pow(power)
 
     def _t_eps(t, aux=None):
@@ -96,7 +98,6 @@ def make_weight_fn(
         key = (device, dtype)
         if key in inv_alpha_avg_continuous_cache:
             return inv_alpha_avg_continuous_cache[key]
-        # Midpoint rule on [0,1] for E_t[1/alpha(t)] with t~Uniform(0,1).
         m = balance_integral_steps
         t_mid = (torch.arange(m, device=device, dtype=torch.float32) + 0.5) / float(m)
         inv_alpha = 1.0 / schedule.alpha(t_mid).clamp_min(eps)
@@ -106,12 +107,6 @@ def make_weight_fn(
 
     def _balance_weights(t, aux=None):
         del aux
-        # Base definition:
-        #   let S = sum_i 1/alpha_i (or continuous analog T*E[1/alpha])
-        #   w_raw = (1-bf) * 1/S + bf * 1/(T*(1/alpha(t)))
-        #         = (1-bf) * 1/S + bf * alpha(t)/T
-        #   w = w_raw * S = (1-bf) + bf * alpha(t) * (S/T)
-        # where S/T = E[1/alpha].
         alpha_t = schedule.alpha(t).clamp_min(eps)
 
         if balance_time == "discrete":
