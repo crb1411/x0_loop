@@ -74,6 +74,13 @@ logging:
   sample_rank0_only: true
   summary_include_x0: true
 
+eval:
+  enabled: true
+  every_steps: 1000
+  max_batches: 8
+  batch_size: 256
+  num_workers: 4
+
 sample:
   steps: 50
   num: 5
