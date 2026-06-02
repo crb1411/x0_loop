@@ -19,8 +19,20 @@ PY
 setup_x0loop_repo() {
   local script_path="${1:-$0}"
   local script_dir
+  local candidate
   script_dir="$(cd "$(dirname "${script_path}")" && pwd)"
-  export X0LOOP_ROOT="${X0LOOP_ROOT:-$(cd "${script_dir}/.." && pwd)}"
+  candidate="${script_dir}"
+  while [ "${candidate}" != "/" ]; do
+    if [ -d "${candidate}/x0loop" ] && [ -d "${candidate}/train_run" ]; then
+      break
+    fi
+    candidate="$(dirname "${candidate}")"
+  done
+  if [ ! -d "${candidate}/x0loop" ] || [ ! -d "${candidate}/train_run" ]; then
+    echo "[x0loop] failed to locate repository root from ${script_path}" >&2
+    return 1
+  fi
+  export X0LOOP_ROOT="${X0LOOP_ROOT:-${candidate}}"
   cd "${X0LOOP_ROOT}"
   export PYTHONPATH="${X0LOOP_ROOT}:${PYTHONPATH:-}"
   echo "[x0loop] root=${X0LOOP_ROOT}"
