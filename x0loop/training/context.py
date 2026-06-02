@@ -11,6 +11,7 @@ from x0loop.losses.atomic import CompositeLoss
 from x0loop.utils.ema import EMA
 from x0loop.utils.logger import Logger
 
+
 @dataclass
 class RuntimeContext:
     distributed_cfg: dict
@@ -64,6 +65,7 @@ class TrainComponents:
     time_sampler: object
     process: object
     loss_fn: CompositeLoss
+    denoiser: torch.nn.Module
     augment: object
     augment_mode: str
     optimizer: torch.optim.Optimizer
@@ -99,7 +101,7 @@ class LoopConfig:
 @dataclass
 class ForwardBatch:
     loss: torch.Tensor
-    loss_by_target: dict  # {"eps": Tensor, "x0": Tensor, ...}
+    loss_by_target: dict
     batch_size: int
     cond: torch.Tensor | None
     fb: object
