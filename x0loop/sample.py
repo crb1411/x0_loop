@@ -20,7 +20,7 @@ def parse_args():
     p.add_argument("--ckpt", type=str, required=True)
     p.add_argument("--steps", type=int, default=None)
     p.add_argument("--out", type=str, default=None)
-    p.add_argument("--sampler", type=str, default="auto", choices=["auto", "ddim", "posterior"])
+    p.add_argument("--sampler", type=str, default="auto", choices=["auto", "ddim", "posterior", "euler", "heun"])
     p.add_argument("--posterior-noise-scale", type=float, default=None)
     p.add_argument("--guidance-scale", type=float, default=None)
     return p.parse_args()

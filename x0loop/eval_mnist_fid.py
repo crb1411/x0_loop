@@ -39,7 +39,7 @@ def parse_args():
     p.add_argument("--feature-layer-fid", type=str, default="2048")
     p.add_argument("--cache-root", type=str, default="", help="torch-fidelity cache root.")
     p.add_argument("--cache-name-prefix", type=str, default="mnist")
-    p.add_argument("--sampler", type=str, default="auto", choices=["auto", "ddim", "posterior"])
+    p.add_argument("--sampler", type=str, default="auto", choices=["auto", "ddim", "posterior", "euler", "heun"])
     p.add_argument("--posterior-noise-scale", type=float, default=None)
     return p.parse_args()
 

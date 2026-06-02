@@ -190,7 +190,11 @@ def build_process(cfg: dict, schedule: TimeSchedule):
             posterior_noise_scale=float(pc.get("posterior_noise_scale", 1.0)),
         )
     if name == "flow":
-        return FlowProcess(schedule=schedule, output_target=output_target)
+        return FlowProcess(
+            schedule=schedule,
+            output_target=output_target,
+            sampler=str(pc.get("sampler", "euler")),
+        )
     raise ValueError(f"Unknown process: {name}")
 
 
