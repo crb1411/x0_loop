@@ -4,6 +4,18 @@ import torch
 import torch.nn.functional as F
 
 
+VALID_LOSS_TARGETS = {"eps", "x0", "v", "velocity"}
+
+
+def normalize_loss_target(target: str) -> str:
+    target = str(target).lower()
+    if target in {"u", "flow", "flow_velocity"}:
+        target = "velocity"
+    if target not in VALID_LOSS_TARGETS:
+        raise ValueError(f"target must be eps | x0 | v | velocity, got {target!r}")
+    return target
+
+
 def _flatten(x: torch.Tensor) -> torch.Tensor:
     return x.view(x.shape[0], -1).mean(dim=1)
 
@@ -23,11 +35,9 @@ class AtomicLoss:
     """One training term: target × formula × optional per-space t_weight × coef."""
 
     def __init__(self, *, target: str, formula: str, delta: float = 1.0, weight_fn=None, coef: float = 1.0):
-        if target not in {"eps", "x0", "v"}:
-            raise ValueError(f"target must be eps | x0 | v, got {target!r}")
+        self.target = normalize_loss_target(target)
         if formula not in {"mse", "l1", "huber"}:
             raise ValueError(f"formula must be mse | l1 | huber, got {formula!r}")
-        self.target = target
         self.formula = formula
         self.delta = float(delta)
         self.weight_fn = weight_fn
@@ -38,7 +48,9 @@ class AtomicLoss:
             return process.eps_from_output(fb.xt, fb.t, out, aux=fb.aux), process.eps_target(fb)
         if self.target == "x0":
             return process.x0_from_output(fb.xt, fb.t, out, aux=fb.aux), process.x0_target(fb)
-        return process.v_from_output(fb.xt, fb.t, out, aux=fb.aux), process.v_target(fb)
+        if self.target == "v":
+            return process.v_from_output(fb.xt, fb.t, out, aux=fb.aux), process.v_target(fb)
+        return process.velocity_from_output(fb.xt, fb.t, out, aux=fb.aux), process.velocity_target(fb)
 
     def per_example(self, process, fb, out) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns (unweighted [B], per-space weight [B])."""
@@ -63,19 +75,7 @@ class AtomicLoss:
 
 
 class CompositeLoss:
-    """Weighted sum of AtomicLoss terms.
-
-    Main optimization objective:
-
-        loss_weighted(t) = outer_weight(t) * loss_no_weight(t)
-
-    where:
-
-        loss_no_weight(t) = sum_i coef_i * per_space_weight_i(t) * raw_loss_i(t)
-
-    The default path uses no per-space weight, so loss_no_weight is just the
-    coefficient-weighted target-space loss before the outer timestep weight.
-    """
+    """Weighted sum of AtomicLoss terms."""
 
     def __init__(self, atoms: list[AtomicLoss], *, outer_weight_fn=None):
         if not atoms:
@@ -92,11 +92,9 @@ class CompositeLoss:
         return w.to(device=ref.device, dtype=ref.dtype)
 
     def per_example(self, process, fb, out) -> dict[str, torch.Tensor]:
-        """Returns per-example weighted and unweighted objective values."""
         inner: torch.Tensor | None = None
         by_target_raw: dict[str, torch.Tensor] = {}
         by_target_no_weight: dict[str, torch.Tensor] = {}
-
         for atom in self.atoms:
             raw, per_space_w = atom.per_example(process, fb, out)
             term_no_outer_weight = atom.coef * per_space_w * raw
@@ -107,11 +105,9 @@ class CompositeLoss:
                 else by_target_no_weight[atom.target] + term_no_outer_weight
             )
             inner = term_no_outer_weight if inner is None else inner + term_no_outer_weight
-
         assert inner is not None
         outer_w = self.outer_weight(fb, inner)
         total = outer_w * inner
-
         result: dict[str, torch.Tensor] = {
             "loss_no_weight": inner,
             "loss_weighted": total,
@@ -128,7 +124,6 @@ class CompositeLoss:
         return result
 
     def __call__(self, process, fb, out) -> dict[str, torch.Tensor]:
-        """Returns scalar total plus weighted/unweighted logging scalars."""
         per_ex = self.per_example(process, fb, out)
         return {k: v.mean() for k, v in per_ex.items()}
 
