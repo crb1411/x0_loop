@@ -13,8 +13,7 @@ from x0loop.aug.identity import NoAug
 from x0loop.aug.strong_augment import strongAugment
 from x0loop.core.config import dump_resolved_config, resolve_logging_output_dir
 from x0loop.core.schedules import TimeSchedule
-from x0loop.models.dit import DiT, DiTConfig
-from x0loop.models.unet import UNet, UNetConfig
+from x0loop.models.factory import build_model
 from x0loop.processes.diffusion_process import DiffusionProcess
 from x0loop.processes.flow_process import FlowProcess
 from x0loop.training.context import DataContext, ModelContext, ResumeState, RuntimeContext
@@ -141,17 +140,8 @@ def log_model_summary(logger: Logger, model: torch.nn.Module, model_cfg: object,
 
 
 def build_model_context(cfg: dict, runtime: RuntimeContext) -> ModelContext:
-    model_name = str(cfg["model"].get("name", "dit")).lower()
-    model_cfg_dict = dict(cfg["model"])
-    model_cfg_dict.pop("name", None)
-    if model_name == "dit":
-        model_cfg = DiTConfig(**model_cfg_dict)
-        model = DiT(model_cfg).to(runtime.device)
-    elif model_name == "unet":
-        model_cfg = UNetConfig(**model_cfg_dict)
-        model = UNet(model_cfg).to(runtime.device)
-    else:
-        raise ValueError(f"Unknown model.name={model_name!r}; use dit | unet")
+    model, model_cfg = build_model(cfg["model"])
+    model = model.to(runtime.device)
     if runtime.is_main:
         log_model_summary(runtime.logger, model, model_cfg, runtime.device)
     use_fsdp = bool(runtime.distributed_cfg.get("fsdp", False) and runtime.is_distributed)

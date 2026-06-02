@@ -6,7 +6,7 @@ import os
 import torch
 
 from x0loop.core.config import DEFAULT_RUNTIME_CONFIG, load_merged_config
-from x0loop.models.dit import DiT, DiTConfig
+from x0loop.models.factory import build_model
 from x0loop.train import build_null_class_cond, build_process, build_sample_cond, build_schedule, save_sample_grid
 from x0loop.utils.checkpoint import load_checkpoint
 from x0loop.utils.dist import init_distributed, is_main_process
@@ -38,8 +38,8 @@ def main():
     local_rank = dist_info["local_rank"]
     device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
 
-    model_cfg = DiTConfig(**cfg["model"])
-    model = DiT(model_cfg).to(device)
+    model, model_cfg = build_model(cfg["model"])
+    model = model.to(device)
 
     ema = EMA(model, decay=float(cfg["train"].get("ema_decay", 0.9999))) if bool(cfg["train"].get("use_ema", True)) else None
     ckpt_mode = cfg.get("distributed", {}).get("checkpoint", {}).get("mode", "full")

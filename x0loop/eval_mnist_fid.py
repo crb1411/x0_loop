@@ -15,7 +15,7 @@ from PIL import Image
 from torchvision.datasets import MNIST
 
 from x0loop.core.config import dump_resolved_config, load_merged_config
-from x0loop.models.dit import DiT, DiTConfig
+from x0loop.models.factory import build_model
 from x0loop.train import build_process, build_schedule
 from x0loop.utils.checkpoint import load_checkpoint
 from x0loop.utils.ema import EMA
@@ -180,8 +180,8 @@ def main():
     set_seed(args.seed)
     device = torch.device("cuda", 0) if torch.cuda.is_available() else torch.device("cpu")
 
-    model_cfg = DiTConfig(**cfg["model"])
-    model = DiT(model_cfg).to(device)
+    model, model_cfg = build_model(cfg["model"])
+    model = model.to(device)
 
     use_ema = bool(cfg.get("train", {}).get("use_ema", True) and args.use_ema)
     ema = EMA(model, decay=float(cfg.get("train", {}).get("ema_decay", 0.9999))) if use_ema else None

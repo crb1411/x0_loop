@@ -22,7 +22,7 @@ import numpy as np
 import torch
 import yaml
 
-from x0loop.models.dit import DiT, DiTConfig
+from x0loop.models.factory import build_model
 from x0loop.train import (
     build_null_class_cond,
     build_process,
@@ -133,8 +133,8 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 
 def _load_model(cfg: dict, ckpt_path: str, device: torch.device):
-    model_cfg = DiTConfig(**cfg["model"])
-    model = DiT(model_cfg).to(device)
+    model, model_cfg = build_model(cfg["model"])
+    model = model.to(device)
     use_ema = bool(cfg["train"].get("use_ema", True))
     ema = EMA(model, decay=float(cfg["train"].get("ema_decay", 0.9999))) if use_ema else None
     ckpt_mode = cfg.get("distributed", {}).get("checkpoint", {}).get("mode", "full")
