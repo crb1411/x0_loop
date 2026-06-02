@@ -13,18 +13,14 @@ from x0loop.aug.identity import NoAug
 from x0loop.aug.strong_augment import strongAugment
 from x0loop.core.config import dump_resolved_config, resolve_logging_output_dir
 from x0loop.core.schedules import TimeSchedule
-from x0loop.core.time_sampling import build_time_sampler
-from x0loop.losses.spec import build_loss as _build_loss
-from x0loop.models.denoiser import Denoiser
 from x0loop.models.dit import DiT, DiTConfig
 from x0loop.models.unet import UNet, UNetConfig
 from x0loop.processes.diffusion_process import DiffusionProcess
 from x0loop.processes.flow_process import FlowProcess
-from x0loop.training.context import DataContext, ModelContext, ResumeState, RuntimeContext, TrainComponents
-from x0loop.training.optimization import maybe_compile_model, maybe_make_scaler
+from x0loop.training.context import DataContext, ModelContext, ResumeState, RuntimeContext
+from x0loop.training.optimization import maybe_compile_model
 from x0loop.utils import dist as dist_utils
 from x0loop.utils.checkpoint import load_checkpoint
-from x0loop.utils.ema import EMA
 from x0loop.utils.fsdp import wrap_fsdp2
 from x0loop.utils.logger import Logger
 
@@ -178,29 +174,11 @@ def build_model_context(cfg: dict, runtime: RuntimeContext) -> ModelContext:
     return ModelContext(model=model, model_cfg=model_cfg, use_fsdp=use_fsdp, fsdp_mode=fsdp_mode, precision=precision)
 
 
-def build_train_components(cfg: dict, model_ctx: ModelContext, runtime: RuntimeContext) -> TrainComponents:
-    schedule = build_schedule(cfg)
-    time_sampler = build_time_sampler(cfg, schedule)
-    process = build_process(cfg, schedule)
-    loss_fn = _build_loss(cfg["loss"], schedule)
-    denoiser = Denoiser(model_ctx.model, process=process, loss_fn=loss_fn, time_sampler=time_sampler)
-    augment, augment_mode = build_augment(cfg)
-    if runtime.is_main:
-        atom_descs = ", ".join(repr(a) for a in loss_fn.atoms)
-        runtime.logger.log_text(f"[process] name={cfg.get('process', {}).get('name')} output_target={process.output_target} schedule={schedule.mode}")
-        runtime.logger.log_text(f"[loss] {atom_descs}")
-        runtime.logger.log_text(f"[time_sampler] {cfg.get('time_sampler', {'name': 'legacy'})}")
-    optimizer = torch.optim.AdamW(denoiser.parameters(), lr=float(cfg["train"].get("lr", 1e-4)), betas=(0.9, 0.95), weight_decay=float(cfg["train"].get("weight_decay", 0.05)))
-    scaler = maybe_make_scaler(precision=model_ctx.precision, use_fsdp=model_ctx.use_fsdp)
-    ema = EMA(model=denoiser, decay=float(cfg["train"].get("ema_decay", 0.9999))) if bool(cfg["train"].get("use_ema", True)) else None
-    return TrainComponents(schedule=schedule, time_sampler=time_sampler, process=process, loss_fn=loss_fn, denoiser=denoiser, augment=augment, augment_mode=augment_mode, optimizer=optimizer, scaler=scaler, ema=ema)
-
-
-def load_resume_state(cfg: dict, model_ctx: ModelContext, components: TrainComponents, runtime: RuntimeContext) -> ResumeState:
+def load_resume_state(cfg: dict, *, denoiser, optimizer, scaler, ema, runtime: RuntimeContext) -> ResumeState:
     resume_path = cfg["train"].get("resume")
     ckpt_mode = runtime.distributed_cfg.get("checkpoint", {}).get("mode", "full")
     if resume_path:
-        ckpt = load_checkpoint(resume_path, model=components.denoiser, optimizer=components.optimizer, scaler=components.scaler, ema=components.ema, map_location="cpu", mode=ckpt_mode)
+        ckpt = load_checkpoint(resume_path, model=denoiser, optimizer=optimizer, scaler=scaler, ema=ema, map_location="cpu", mode=ckpt_mode)
         start_epoch = int(ckpt.get("epoch", 0))
         global_step = int(ckpt.get("step", 0))
         if runtime.is_main:

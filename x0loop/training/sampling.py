@@ -6,7 +6,7 @@ import os
 import torch
 from PIL import Image, ImageDraw
 
-from x0loop.training.context import LoopConfig, ModelContext, ResumeState, RuntimeContext, TrainComponents
+from x0loop.training.context import LoopConfig, ModelContext, ResumeState, RuntimeContext
 from x0loop.utils import dist as dist_utils
 
 
@@ -128,7 +128,8 @@ def run_sampling_if_due(
     model: torch.nn.Module,
     runtime: RuntimeContext,
     model_ctx: ModelContext,
-    components: TrainComponents,
+    process,
+    ema,
     loop_cfg: LoopConfig,
     resume: ResumeState,
     cond: torch.Tensor | None,
@@ -146,9 +147,9 @@ def run_sampling_if_due(
         was_training = model.training
         model.eval()
         with torch.no_grad():
-            if components.ema is not None:
-                components.ema.store(model)
-                components.ema.copy_to(model)
+            if ema is not None:
+                ema.store(model)
+                ema.copy_to(model)
             sample_num = int(cfg["sample"].get("num", 16))
             sample_cond = build_sample_cond(
                 cfg,
@@ -161,7 +162,7 @@ def run_sampling_if_due(
             sample_sampler = cfg["sample"].get("sampler", None)
             if isinstance(sample_sampler, str) and sample_sampler.lower() == "auto":
                 sample_sampler = None
-            result = components.process.sample(
+            result = process.sample(
                 model=model,
                 steps=int(cfg["sample"].get("steps", 50)),
                 shape=(sample_num, model_ctx.model_cfg.out_channels, model_ctx.model_cfg.image_size, model_ctx.model_cfg.image_size),
@@ -174,8 +175,8 @@ def run_sampling_if_due(
                 sampler=sample_sampler,
                 posterior_noise_scale=cfg["sample"].get("posterior_noise_scale", None),
             )
-            if components.ema is not None:
-                components.ema.restore(model)
+            if ema is not None:
+                ema.restore(model)
 
         if runtime.is_main:
             sample_dir = os.path.join(runtime.out_dir, "samples")

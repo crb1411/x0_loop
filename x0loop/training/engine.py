@@ -6,14 +6,18 @@ import time
 import torch
 from torch.utils.data import DataLoader
 
+from x0loop.core.time_sampling import build_time_sampler
+from x0loop.losses.spec import build_loss
 from x0loop.losses.atomic import regress
-from x0loop.training.context import ForwardBatch, LoopConfig, ResumeState, RuntimeContext, TrainComponents
-from x0loop.training.factories import build_data_context, build_model_context, build_train_components, init_runtime, load_resume_state
+from x0loop.models.denoiser import Denoiser
+from x0loop.training.context import ForwardBatch, LoopConfig, ResumeState, RuntimeContext
+from x0loop.training.factories import build_augment, build_data_context, build_model_context, build_process, build_schedule, init_runtime, load_resume_state
 from x0loop.training.metrics import TimeBinAccumulator
-from x0loop.training.optimization import amp_dtype_for_precision, build_step_lr_schedule
+from x0loop.training.optimization import amp_dtype_for_precision, build_step_lr_schedule, maybe_make_scaler
 from x0loop.training.evaluation import run_eval_if_due
 from x0loop.training.checkpointing import save_checkpoint_if_due
 from x0loop.training.sampling import apply_classifier_free_label_dropout, run_sampling_if_due
+from x0loop.utils.ema import EMA
 from x0loop.utils.fsdp import clip_grad_norm
 from x0loop.utils.logger import Logger, MetricLogger
 
@@ -53,18 +57,18 @@ def _diagnostic_losses(process, fb, out) -> dict[str, torch.Tensor]:
     return diag
 
 
-def compute_forward_batch(*, cfg: dict, runtime: RuntimeContext, model_ctx, components: TrainComponents, x0: torch.Tensor, y: object, use_label_cond: bool) -> ForwardBatch:
+def compute_forward_batch(*, cfg: dict, runtime: RuntimeContext, model_ctx, denoiser, process, augment, augment_mode: str, x0: torch.Tensor, y: object, use_label_cond: bool) -> ForwardBatch:
     x0 = x0.to(runtime.device, non_blocking=True)
     bsz = x0.shape[0]
     cond = y.to(runtime.device, non_blocking=True) if (use_label_cond and isinstance(y, torch.Tensor)) else None
     if cond is not None:
         cond = apply_classifier_free_label_dropout(cond, null_class_id=int(model_ctx.model_cfg.num_classes), drop_prob=float(cfg["train"].get("class_dropout_prob", 0.0)))
-    if components.augment_mode == "data_only":
-        x0 = components.augment.apply(x0, components.augment.sample_params(bsz, device=runtime.device))
+    if augment_mode == "data_only":
+        x0 = augment.apply(x0, augment.sample_params(bsz, device=runtime.device))
     with torch.autocast(device_type=runtime.device.type, dtype=amp_dtype_for_precision(model_ctx.precision), enabled=(model_ctx.precision in {"bf16", "fp16"})):
-        batch = components.denoiser.compute_loss(x0, cond=cond)
+        batch = denoiser.compute_loss(x0, cond=cond)
         with torch.no_grad():
-            unweighted = _diagnostic_losses(components.process, batch.fb, batch.out)
+            unweighted = _diagnostic_losses(process, batch.fb, batch.out)
     return ForwardBatch(loss=batch.loss_dict["total"], loss_by_target=unweighted, batch_size=bsz, cond=cond, fb=batch.fb, out=batch.out)
 
 
@@ -80,15 +84,15 @@ def should_step_optimizer(micro_step: int, loop_cfg: LoopConfig) -> bool:
     return ((micro_step + 1) % loop_cfg.gradient_accumulation_steps == 0) or (micro_step + 1 == loop_cfg.micro_steps_per_epoch)
 
 
-def step_optimizer(model: torch.nn.Module, components: TrainComponents, grad_clip: float):
-    if components.scaler is not None:
-        components.scaler.unscale_(components.optimizer)
+def step_optimizer(model: torch.nn.Module, optimizer, scaler, grad_clip: float):
+    if scaler is not None:
+        scaler.unscale_(optimizer)
         grad_norm = clip_grad_norm(model, grad_clip) if grad_clip > 0 else clip_grad_norm(model, float("inf"))
-        components.scaler.step(components.optimizer)
-        components.scaler.update()
+        scaler.step(optimizer)
+        scaler.update()
         return grad_norm
     grad_norm = clip_grad_norm(model, grad_clip) if grad_clip > 0 else clip_grad_norm(model, float("inf"))
-    components.optimizer.step()
+    optimizer.step()
     return grad_norm
 
 
@@ -123,14 +127,26 @@ def train(cfg: dict):
     runtime = init_runtime(cfg)
     data_ctx = build_data_context(cfg, runtime)
     model_ctx = build_model_context(cfg, runtime)
-    components = build_train_components(cfg, model_ctx, runtime)
-    resume = load_resume_state(cfg, model_ctx, components, runtime)
+    schedule = build_schedule(cfg)
+    time_sampler = build_time_sampler(cfg, schedule)
+    process = build_process(cfg, schedule)
+    loss_fn = build_loss(cfg["loss"], schedule)
+    denoiser = Denoiser(model_ctx.model, process=process, loss_fn=loss_fn, time_sampler=time_sampler)
+    augment, augment_mode = build_augment(cfg)
+    if runtime.is_main:
+        atom_descs = ", ".join(repr(atom) for atom in loss_fn.atoms)
+        runtime.logger.log_text(f"[process] name={cfg.get('process', {}).get('name')} output_target={process.output_target} schedule={schedule.mode}")
+        runtime.logger.log_text(f"[loss] {atom_descs}")
+        runtime.logger.log_text(f"[time_sampler] {cfg.get('time_sampler', {'name': 'legacy'})}")
+    optimizer = torch.optim.AdamW(denoiser.parameters(), lr=float(cfg["train"].get("lr", 1e-4)), betas=(0.9, 0.95), weight_decay=float(cfg["train"].get("weight_decay", 0.05)))
+    scaler = maybe_make_scaler(precision=model_ctx.precision, use_fsdp=model_ctx.use_fsdp)
+    ema = EMA(model=denoiser, decay=float(cfg["train"].get("ema_decay", 0.9999))) if bool(cfg["train"].get("use_ema", True)) else None
+    resume = load_resume_state(cfg, denoiser=denoiser, optimizer=optimizer, scaler=scaler, ema=ema, runtime=runtime)
     meters = MetricLogger(window_size=int(cfg["logging"].get("window_size", 20)))
     loop_cfg = build_loop_config(cfg, data_ctx.loader, runtime.distributed_cfg)
     if runtime.is_main:
         log_loop_config(runtime.logger, loop_cfg)
     tbin_stats = TimeBinAccumulator(num_bins=loop_cfg.tbin_count, device=runtime.device)
-    denoiser = components.denoiser
     denoiser.train()
     iter_start = time.time()
     for epoch in range(resume.start_epoch, loop_cfg.epochs):
@@ -144,28 +160,28 @@ def train(cfg: dict):
             current_accum_steps = min(loop_cfg.gradient_accumulation_steps, remaining_micro_steps)
             if update_step:
                 step_lr = float(loop_cfg.lr_for_step(resume.global_step))
-                for pg in components.optimizer.param_groups:
+                for pg in optimizer.param_groups:
                     pg["lr"] = step_lr
-                components.optimizer.zero_grad(set_to_none=True)
-            fwd = compute_forward_batch(cfg=cfg, runtime=runtime, model_ctx=model_ctx, components=components, x0=x0, y=y, use_label_cond=use_label_cond)
-            backward_loss(fwd.loss, current_accum_steps=current_accum_steps, scaler=components.scaler)
+                optimizer.zero_grad(set_to_none=True)
+            fwd = compute_forward_batch(cfg=cfg, runtime=runtime, model_ctx=model_ctx, denoiser=denoiser, process=process, augment=augment, augment_mode=augment_mode, x0=x0, y=y, use_label_cond=use_label_cond)
+            backward_loss(fwd.loss, current_accum_steps=current_accum_steps, scaler=scaler)
             did_optimizer_step = should_step_optimizer(micro_step, loop_cfg)
             grad_norm = None
             if did_optimizer_step:
                 effective_clip = 0.0 if resume.global_step < 10000 else loop_cfg.grad_clip
-                grad_norm = step_optimizer(denoiser, components, effective_clip)
-            if did_optimizer_step and components.ema is not None:
-                components.ema.update(denoiser)
-            tbin_stats.update(schedule=components.schedule, process=components.process, loss_fn=components.loss_fn, fb=fwd.fb, out=fwd.out)
+                grad_norm = step_optimizer(denoiser, optimizer, scaler, effective_clip)
+            if did_optimizer_step and ema is not None:
+                ema.update(denoiser)
+            tbin_stats.update(schedule=schedule, process=process, loss_fn=loss_fn, fb=fwd.fb, out=fwd.out)
             iter_time = time.time() - iter_start
             iter_start = time.time()
-            update_train_meters(meters, fwd, lr=float(components.optimizer.param_groups[0]["lr"]), iter_time=iter_time, world_size=runtime.world_size, grad_norm=grad_norm if did_optimizer_step else None)
+            update_train_meters(meters, fwd, lr=float(optimizer.param_groups[0]["lr"]), iter_time=iter_time, world_size=runtime.world_size, grad_norm=grad_norm if did_optimizer_step else None)
             if not did_optimizer_step:
                 continue
             resume.global_step += 1
             resume.run_step += 1
             log_training_step(runtime=runtime, loop_cfg=loop_cfg, resume=resume, meters=meters, tbin_stats=tbin_stats, epoch=epoch, micro_step=micro_step, current_accum_steps=current_accum_steps)
-            run_eval_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, components=components, data_ctx=data_ctx, resume=resume, use_label_cond=use_label_cond)
-            run_sampling_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, components=components, loop_cfg=loop_cfg, resume=resume, cond=fwd.cond, use_label_cond=use_label_cond)
-            save_checkpoint_if_due(cfg=cfg, model=denoiser, runtime=runtime, components=components, loop_cfg=loop_cfg, resume=resume, epoch=epoch)
+            run_eval_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, schedule=schedule, time_sampler=time_sampler, process=process, loss_fn=loss_fn, data_ctx=data_ctx, resume=resume, use_label_cond=use_label_cond)
+            run_sampling_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, loop_cfg=loop_cfg, resume=resume, cond=fwd.cond, use_label_cond=use_label_cond)
+            save_checkpoint_if_due(cfg=cfg, denoiser=denoiser, runtime=runtime, optimizer=optimizer, scaler=scaler, ema=ema, loop_cfg=loop_cfg, resume=resume, epoch=epoch)
     runtime.logger.close()

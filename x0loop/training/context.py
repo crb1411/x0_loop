@@ -6,9 +6,6 @@ import torch
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from x0loop.core.schedules import TimeSchedule
-from x0loop.losses.atomic import CompositeLoss
-from x0loop.utils.ema import EMA
 from x0loop.utils.logger import Logger
 
 
@@ -57,20 +54,6 @@ class ModelContext:
     use_fsdp: bool
     fsdp_mode: str
     precision: str
-
-
-@dataclass
-class TrainComponents:
-    schedule: TimeSchedule
-    time_sampler: object
-    process: object
-    loss_fn: CompositeLoss
-    denoiser: torch.nn.Module
-    augment: object
-    augment_mode: str
-    optimizer: torch.optim.Optimizer
-    scaler: object | None
-    ema: EMA | None
 
 
 @dataclass

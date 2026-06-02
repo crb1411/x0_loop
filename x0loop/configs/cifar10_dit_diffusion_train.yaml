@@ -18,7 +18,7 @@ model:
 
 process:
   name: diffusion # diffusion | flow
-  output_target: eps # eps | x0 | v  — what the model directly predicts
+  output_target: x0 # eps | x0 | v  — what the model directly predicts
   sampler: ddim # ddim | posterior
   posterior_noise_scale: 1.0 # used when sampler=posterior
 
@@ -30,16 +30,15 @@ schedule:
 
 loss:
   terms:
-    - {target: eps, formula: mse, coef: 0.5}
-    - {target: x0,  formula: mse, coef: 0.5}
+    - {target: v, formula: mse, coef: 1.0}
 
 augment:
   name: geom # none | geom | dit | dit_original | strongaugment | strong
   mode: data_only # data_only
-  hflip_prob: 0.2
+  hflip_prob: 0.5
   max_translation: 0
-  crop_min_scale: 0.8
-  enable_crop_resize: true # false | true
+  crop_min_scale: 1.0
+  enable_crop_resize: false # false | true
 
 train:
   seed: 42

@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 
 from x0loop.losses.atomic import regress
-from x0loop.training.context import DataContext, ModelContext, ResumeState, RuntimeContext, TrainComponents
+from x0loop.training.context import DataContext, ModelContext, ResumeState, RuntimeContext
 from x0loop.training.metrics import TimeBinAccumulator
 from x0loop.training.optimization import amp_dtype_for_precision
 
@@ -14,16 +14,18 @@ def compute_eval_forward(
     model: torch.nn.Module,
     runtime: RuntimeContext,
     model_ctx: ModelContext,
-    components: TrainComponents,
+    time_sampler,
+    process,
+    loss_fn,
     x0: torch.Tensor,
     y: object,
     use_label_cond: bool,
 ) -> dict[str, torch.Tensor | object]:
     x0 = x0.to(runtime.device, non_blocking=True)
     bsz = x0.shape[0]
-    t = components.time_sampler.sample(bsz, device=runtime.device)
+    t = time_sampler.sample(bsz, device=runtime.device)
     cond = y.to(runtime.device, non_blocking=True) if (use_label_cond and isinstance(y, torch.Tensor)) else None
-    fb = components.process.forward_sample(x0=x0, t=t)
+    fb = process.forward_sample(x0=x0, t=t)
 
     with torch.autocast(
         device_type=runtime.device.type,
@@ -31,8 +33,8 @@ def compute_eval_forward(
         enabled=(model_ctx.precision in {"bf16", "fp16"}),
     ):
         out = model(fb.xt, fb.t, cond=cond)
-        loss_dict = components.loss_fn(components.process, fb, out)
-        p = components.process
+        loss_dict = loss_fn(process, fb, out)
+        p = process
         diag = {
             "loss_weighted": loss_dict["loss_weighted"].detach(),
             "loss_no_weight": loss_dict["loss_no_weight"].detach(),
@@ -50,7 +52,10 @@ def run_eval_if_due(
     model: torch.nn.Module,
     runtime: RuntimeContext,
     model_ctx: ModelContext,
-    components: TrainComponents,
+    schedule,
+    time_sampler,
+    process,
+    loss_fn,
     data_ctx: DataContext,
     resume: ResumeState,
     use_label_cond: bool,
@@ -84,7 +89,9 @@ def run_eval_if_due(
                 model=model,
                 runtime=runtime,
                 model_ctx=model_ctx,
-                components=components,
+                time_sampler=time_sampler,
+                process=process,
+                loss_fn=loss_fn,
                 x0=x0,
                 y=y,
                 use_label_cond=use_label_cond,
@@ -98,7 +105,7 @@ def run_eval_if_due(
                         vv = vv.mean()
                     sums[k] = sums.get(k, 0.0) + float(vv.item()) * bsz
             total += bsz
-            tbin.update(schedule=components.schedule, process=components.process, loss_fn=components.loss_fn, fb=fwd["fb"], out=fwd["out"])
+            tbin.update(schedule=schedule, process=process, loss_fn=loss_fn, fb=fwd["fb"], out=fwd["out"])
 
     if was_training:
         model.train()
