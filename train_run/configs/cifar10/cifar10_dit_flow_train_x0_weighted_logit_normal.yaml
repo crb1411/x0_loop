@@ -68,7 +68,6 @@ train:
   resume: null
 
 logging:
-  out_dir_base: runs/cifar10_flow_weighted_target_logit_normal
   log_every: 100
   window_size: 100
   use_tb: true

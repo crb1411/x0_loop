@@ -70,7 +70,6 @@ train:
   resume: null
 
 logging:
-  out_dir_base: runs/mnist_diffusion
   log_every: 500
   window_size: 500
   use_tb: true

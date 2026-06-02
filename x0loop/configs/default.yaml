@@ -88,7 +88,6 @@ train:
   resume: null
 
 logging:
-  out_dir_base: runs/exp_default
   log_every: 100
   window_size: 500
   use_tb: true # false | true

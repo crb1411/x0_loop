@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import os
 from pathlib import Path
+import re
 import time
 
 import yaml
@@ -30,16 +31,49 @@ def _load_yaml(path: str) -> dict:
     return data
 
 
+def _path_component(value: object) -> str:
+    text = str(value).strip().lower()
+    return re.sub(r"[^a-z0-9._-]+", "-", text).strip("-") or "unknown"
+
+
+def _loss_name(cfg: dict) -> str:
+    loss_cfg = cfg.get("loss", {}) or {}
+    terms = loss_cfg.get("terms")
+    if isinstance(terms, list):
+        targets = [term.get("target", "unknown") for term in terms if isinstance(term, dict)]
+    else:
+        targets = [loss_cfg.get("target", "unknown")]
+    return "-".join(dict.fromkeys(_path_component(target) for target in targets)) or "unknown"
+
+
+def _sampler_name(cfg: dict) -> str:
+    process_cfg = cfg.get("process", {}) or {}
+    sample_cfg = cfg.get("sample", {}) or {}
+    process_name = _path_component(process_cfg.get("name", "diffusion"))
+    sampler = str(sample_cfg.get("sampler", "auto")).lower()
+    if sampler in {"", "auto"}:
+        sampler = str(process_cfg.get("sampler", "euler" if process_name == "flow" else "ddim")).lower()
+    if process_name == "flow" and sampler == "ddim":
+        sampler = "euler"
+    return _path_component(sampler)
+
+
+def _automatic_run_base(cfg: dict) -> Path:
+    dataset = _path_component((cfg.get("dataset", {}) or {}).get("name", "unknown"))
+    process_cfg = cfg.get("process", {}) or {}
+    process = _path_component(process_cfg.get("name", "diffusion"))
+    model = _path_component((cfg.get("model", {}) or {}).get("name", "dit"))
+    output_target = _path_component(process_cfg.get("output_target", "eps"))
+    experiment = f"{output_target}target_{_loss_name(cfg)}loss_{_sampler_name(cfg)}"
+    return Path("runs") / dataset / process / model / experiment
+
+
 def resolve_logging_output_dir(cfg: dict, timestamp: str | None = None) -> None:
     logging_cfg = cfg.get("logging")
     if not isinstance(logging_cfg, dict):
         return
 
     if logging_cfg.get("out_dir"):
-        return
-
-    out_dir_base = logging_cfg.get("out_dir_base")
-    if not out_dir_base:
         return
 
     if not timestamp:
@@ -50,8 +84,7 @@ def resolve_logging_output_dir(cfg: dict, timestamp: str | None = None) -> None:
     else:
         os.environ["X0LOOP_RUN_TIMESTAMP"] = timestamp
 
-    stage = str(logging_cfg.get("stage", "train"))
-    logging_cfg["out_dir"] = str(Path(out_dir_base) / f"{timestamp}_{stage}")
+    logging_cfg["out_dir"] = str(_automatic_run_base(cfg) / timestamp)
 
 
 def load_merged_config(config_path: str, runtime_config_path: str | None = None, *, resolve_logging: bool = True) -> dict:

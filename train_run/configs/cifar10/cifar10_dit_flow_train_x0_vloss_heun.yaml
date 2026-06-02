@@ -65,7 +65,6 @@ train:
   resume: null
 
 logging:
-  out_dir_base: runs/cifar10_dit_flow_x0_vloss_heun
   log_every: 100
   window_size: 100
   use_tb: true
