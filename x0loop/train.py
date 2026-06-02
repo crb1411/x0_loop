@@ -5,12 +5,13 @@ import argparse
 from x0loop.core.config import DEFAULT_RUNTIME_CONFIG, load_merged_config
 from x0loop.training.engine import train
 from x0loop.training.factories import build_process, build_schedule
-from x0loop.training.sampling import build_null_class_cond, build_sample_cond, save_sample_grid, save_trace_large_images
+from x0loop.training.sampling import build_null_class_cond, build_sample_cond, build_sample_label_names, save_sample_grid, save_trace_large_images
 
 __all__ = [
     "build_null_class_cond",
     "build_process",
     "build_sample_cond",
+    "build_sample_label_names",
     "build_schedule",
     "save_sample_grid",
     "save_trace_large_images",

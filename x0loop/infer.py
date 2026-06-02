@@ -5,7 +5,7 @@ Config resolution order:
   2. infer/infer.yaml                      (overlaid on top, overrides anything)
 
 Outputs (under <ckpt_dir>/infer_step_XXXXXXXX/ by default):
-  step_XXXXXXXX_sample_NNN_x0loop.png   — per-sample denoising trace
+  step_XXXXXXXX_sample_NNN_yY_x0loop.png   — per-sample denoising trace
   sample_grid.png                        — flat grid of all samples
   infer_config.yaml                      — full resolved config for this run
 """
@@ -27,6 +27,7 @@ from x0loop.train import (
     build_null_class_cond,
     build_process,
     build_sample_cond,
+    build_sample_label_names,
     build_schedule,
     save_sample_grid,
     save_trace_large_images,
@@ -253,7 +254,13 @@ def main():
 
     # ── Save ───────────────────────────────────────────────────────────────
     if return_trace and result.get("trace"):
-        save_trace_large_images(result["trace"], out_dir, prefix=step_tag)
+        save_trace_large_images(
+            result["trace"],
+            out_dir,
+            prefix=step_tag,
+            labels=sample_cond,
+            label_names=build_sample_label_names(cfg),
+        )
         print(f"[infer] trace PNGs  → {out_dir}/{step_tag}_sample_*.png", flush=True)
 
     grid_path = os.path.join(out_dir, "sample_grid.png")

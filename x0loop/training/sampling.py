@@ -2,12 +2,46 @@ from __future__ import annotations
 
 import math
 import os
+import re
 
 import torch
 from PIL import Image, ImageDraw
 
 from x0loop.training.context import LoopConfig, ModelContext, ResumeState, RuntimeContext
 from x0loop.utils import dist as dist_utils
+
+
+CIFAR10_CLASS_NAMES = (
+    "airplane",
+    "automobile",
+    "bird",
+    "cat",
+    "deer",
+    "dog",
+    "frog",
+    "horse",
+    "ship",
+    "truck",
+)
+
+
+def build_sample_label_names(cfg: dict) -> tuple[str, ...] | None:
+    sample_cfg = cfg.get("sample", {}) or {}
+    configured = sample_cfg.get("class_names")
+    if configured is not None:
+        return tuple(str(name) for name in configured)
+    dataset_name = str((cfg.get("dataset", {}) or {}).get("name", "")).lower()
+    if dataset_name == "cifar10":
+        return CIFAR10_CLASS_NAMES
+    return None
+
+
+def _label_tag(label_id: int, label_names: tuple[str, ...] | None) -> str:
+    label = str(label_id)
+    if label_names is not None and 0 <= label_id < len(label_names):
+        label = label_names[label_id]
+    label = re.sub(r"[^a-zA-Z0-9._-]+", "-", label).strip("-") or str(label_id)
+    return f"_y{label}"
 
 
 def build_sample_cond(
@@ -82,7 +116,13 @@ def _tensor_chw_to_uint8_rgb(x: torch.Tensor):
     return x.permute(1, 2, 0).contiguous().numpy()
 
 
-def save_trace_large_images(trace: list[dict], out_dir: str, prefix: str):
+def save_trace_large_images(
+    trace: list[dict],
+    out_dir: str,
+    prefix: str,
+    labels: torch.Tensor | None = None,
+    label_names: tuple[str, ...] | None = None,
+):
     if not trace:
         return
     try:
@@ -93,6 +133,9 @@ def save_trace_large_images(trace: list[dict], out_dir: str, prefix: str):
     os.makedirs(out_dir, exist_ok=True)
     steps = len(trace)
     bsz = int(trace[0]["x0_hat"].shape[0])
+    label_ids = labels.detach().cpu().flatten().tolist() if labels is not None else None
+    if label_ids is not None and len(label_ids) != bsz:
+        raise ValueError(f"Expected {bsz} sample labels, got {len(label_ids)}.")
     _, h, w = trace[0]["x0_hat"][0].shape
     cols = int(math.ceil(math.sqrt(steps)))
     rows = int(math.ceil(steps / cols))
@@ -118,7 +161,8 @@ def save_trace_large_images(trace: list[dict], out_dir: str, prefix: str):
             canvas.paste(img, (x0, y0))
             draw.text((x0, y0 + h + 1), f"t={t_values[si]:.3f}", fill=(0, 0, 0))
 
-        out_path = os.path.join(out_dir, f"{prefix}_sample_{bi:03d}_x0loop.png")
+        label_tag = _label_tag(label_ids[bi], label_names) if label_ids is not None else ""
+        out_path = os.path.join(out_dir, f"{prefix}_sample_{bi:03d}{label_tag}_x0loop.png")
         canvas.save(out_path)
 
 
@@ -180,7 +224,13 @@ def run_sampling_if_due(
 
         if runtime.is_main:
             sample_dir = os.path.join(runtime.out_dir, "samples")
-            save_trace_large_images(result.get("trace", []), sample_dir, f"step_{resume.global_step:08d}")
+            save_trace_large_images(
+                result.get("trace", []),
+                sample_dir,
+                f"step_{resume.global_step:08d}",
+                labels=sample_cond,
+                label_names=build_sample_label_names(cfg),
+            )
             if bool(cfg["sample"].get("save_trace", False)) and "trace" in result:
                 trace_path = os.path.join(sample_dir, f"step_{resume.global_step:08d}_trace.pt")
                 os.makedirs(os.path.dirname(trace_path), exist_ok=True)
