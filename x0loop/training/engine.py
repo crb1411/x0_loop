@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from x0loop.losses.atomic import regress
-from x0loop.training.context import DataContext, ForwardBatch, LoopConfig, ModelContext, ResumeState, RuntimeContext, TrainComponents
+from x0loop.training.context import ForwardBatch, LoopConfig, ResumeState, RuntimeContext, TrainComponents
 from x0loop.training.factories import build_data_context, build_model_context, build_train_components, init_runtime, load_resume_state
 from x0loop.training.metrics import TimeBinAccumulator
 from x0loop.training.optimization import amp_dtype_for_precision, build_step_lr_schedule
@@ -23,112 +23,49 @@ def build_loop_config(cfg: dict, loader: DataLoader, distributed_cfg: dict) -> L
     gradient_accumulation_steps = int(cfg["train"].get("gradient_accumulation_steps", 1))
     if gradient_accumulation_steps <= 0:
         raise ValueError(f"train.gradient_accumulation_steps must be > 0, got {gradient_accumulation_steps}")
-
     micro_steps_per_epoch = len(loader)
     optimizer_steps_per_epoch = math.ceil(micro_steps_per_epoch / gradient_accumulation_steps)
     total_steps = epochs * optimizer_steps_per_epoch
-    lr_for_step, lr_sched_meta = build_step_lr_schedule(
-        cfg["train"], total_steps=total_steps, steps_per_epoch=optimizer_steps_per_epoch
-    )
-
+    lr_for_step, lr_sched_meta = build_step_lr_schedule(cfg["train"], total_steps=total_steps, steps_per_epoch=optimizer_steps_per_epoch)
     grad_clip_cfg = cfg.get("train", {}).get("max_clip_grad", None)
     if grad_clip_cfg is None:
         grad_clip_cfg = cfg.get("train", {}).get("max_grad_norm", None)
     if grad_clip_cfg is None:
         grad_clip_cfg = distributed_cfg.get("grad_clip_norm", 0.0)
-
-    return LoopConfig(
-        epochs=epochs,
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        micro_steps_per_epoch=micro_steps_per_epoch,
-        optimizer_steps_per_epoch=optimizer_steps_per_epoch,
-        total_steps=total_steps,
-        lr_for_step=lr_for_step,
-        lr_sched_meta=lr_sched_meta,
-        grad_clip=float(grad_clip_cfg),
-        log_every=int(cfg["logging"].get("log_every", 50)),
-        sample_every=int(cfg["logging"].get("sample_every", 2000)),
-        save_every=int(distributed_cfg.get("checkpoint", {}).get("every_steps", 2000)),
-        sample_rank0_only=bool(cfg["logging"].get("sample_rank0_only", True)),
-        tbin_count=int(cfg["logging"].get("t_bins", 20)),
-    )
+    return LoopConfig(epochs=epochs, gradient_accumulation_steps=gradient_accumulation_steps, micro_steps_per_epoch=micro_steps_per_epoch, optimizer_steps_per_epoch=optimizer_steps_per_epoch, total_steps=total_steps, lr_for_step=lr_for_step, lr_sched_meta=lr_sched_meta, grad_clip=float(grad_clip_cfg), log_every=int(cfg["logging"].get("log_every", 50)), sample_every=int(cfg["logging"].get("sample_every", 2000)), save_every=int(distributed_cfg.get("checkpoint", {}).get("every_steps", 2000)), sample_rank0_only=bool(cfg["logging"].get("sample_rank0_only", True)), tbin_count=int(cfg["logging"].get("t_bins", 20)))
 
 
 def log_loop_config(logger: Logger, loop_cfg: LoopConfig) -> None:
-    logger.log_text(
-        f"[train] gradient_accumulation_steps={loop_cfg.gradient_accumulation_steps}, "
-        f"micro_steps_per_epoch={loop_cfg.micro_steps_per_epoch}, optimizer_steps_per_epoch={loop_cfg.optimizer_steps_per_epoch}"
-    )
+    logger.log_text(f"[train] gradient_accumulation_steps={loop_cfg.gradient_accumulation_steps}, micro_steps_per_epoch={loop_cfg.micro_steps_per_epoch}, optimizer_steps_per_epoch={loop_cfg.optimizer_steps_per_epoch}")
     logger.log_text(f"[train] grad_clip={loop_cfg.grad_clip}")
     meta = loop_cfg.lr_sched_meta
-    if meta.get("name") == "cosine_warmup_hold":
-        logger.log_text(
-            "[train] lr_scheduler=cosine(warmup->cosine->hold_min) "
-            f"max_lr={meta['max_lr']:.6g} min_lr={meta['min_lr']:.6g} "
-            f"warmup_steps={meta['warmup_steps']} cosine_steps={meta['cosine_steps']} "
-            f"hold_min_from_step={meta['hold_min_from_step']}"
-        )
-    elif meta.get("name") in {"cosine_legacy", "cosine"}:
-        logger.log_text(
-            "[train] lr_scheduler=cosine(legacy) "
-            f"init_lr={meta['init_lr']:.6g} max_lr={meta['max_lr']:.6g} "
-            f"min_lr={meta['min_lr']:.6g} init_steps={meta['init_steps']} "
-            f"max_steps={meta['max_steps']} min_steps={meta['min_steps']} "
-            f"cosine_steps={meta['cosine_steps']}"
-        )
-    else:
-        logger.log_text(f"[train] lr_scheduler=constant lr={meta.get('base_lr', 0.0):.6g}")
+    logger.log_text(f"[train] lr_scheduler={meta.get('name', 'constant')} meta={meta}")
 
 
-def compute_forward_batch(
-    *,
-    cfg: dict,
-    model: torch.nn.Module,
-    runtime: RuntimeContext,
-    model_ctx: ModelContext,
-    components: TrainComponents,
-    x0: torch.Tensor,
-    y: object,
-    use_label_cond: bool,
-) -> ForwardBatch:
+def _diagnostic_losses(process, fb, out) -> dict[str, torch.Tensor]:
+    diag = {
+        "eps": regress("mse", process.eps_from_output(fb.xt, fb.t, out, aux=fb.aux), process.eps_target(fb)).mean(),
+        "x0": regress("mse", process.x0_from_output(fb.xt, fb.t, out, aux=fb.aux), process.x0_target(fb)).mean(),
+        "v": regress("mse", process.v_from_output(fb.xt, fb.t, out, aux=fb.aux), process.v_target(fb)).mean(),
+    }
+    if hasattr(process, "velocity_from_output"):
+        diag["velocity"] = regress("mse", process.velocity_from_output(fb.xt, fb.t, out, aux=fb.aux), process.velocity_target(fb)).mean()
+    return diag
+
+
+def compute_forward_batch(*, cfg: dict, runtime: RuntimeContext, model_ctx, components: TrainComponents, x0: torch.Tensor, y: object, use_label_cond: bool) -> ForwardBatch:
     x0 = x0.to(runtime.device, non_blocking=True)
     bsz = x0.shape[0]
-    t = components.time_sampler.sample(bsz, device=runtime.device)
     cond = y.to(runtime.device, non_blocking=True) if (use_label_cond and isinstance(y, torch.Tensor)) else None
     if cond is not None:
-        cond = apply_classifier_free_label_dropout(
-            cond,
-            null_class_id=int(model_ctx.model_cfg.num_classes),
-            drop_prob=float(cfg["train"].get("class_dropout_prob", 0.0)),
-        )
-
+        cond = apply_classifier_free_label_dropout(cond, null_class_id=int(model_ctx.model_cfg.num_classes), drop_prob=float(cfg["train"].get("class_dropout_prob", 0.0)))
     if components.augment_mode == "data_only":
         x0 = components.augment.apply(x0, components.augment.sample_params(bsz, device=runtime.device))
-    fb = components.process.forward_sample(x0=x0, t=t)
-
-    with torch.autocast(
-        device_type=runtime.device.type,
-        dtype=amp_dtype_for_precision(model_ctx.precision),
-        enabled=(model_ctx.precision in {"bf16", "fp16"}),
-    ):
-        out = model(fb.xt, fb.t, cond=cond)
-        loss_dict = components.loss_fn(components.process, fb, out)
+    with torch.autocast(device_type=runtime.device.type, dtype=amp_dtype_for_precision(model_ctx.precision), enabled=(model_ctx.precision in {"bf16", "fp16"})):
+        batch = components.denoiser.compute_loss(x0, cond=cond)
         with torch.no_grad():
-            p = components.process
-            unweighted = {
-                "eps": regress("mse", p.eps_from_output(fb.xt, fb.t, out, aux=fb.aux), p.eps_target(fb)).mean(),
-                "x0":  regress("mse", p.x0_from_output(fb.xt, fb.t, out, aux=fb.aux), p.x0_target(fb)).mean(),
-                "v":   regress("mse", p.v_from_output(fb.xt, fb.t, out, aux=fb.aux), p.v_target(fb)).mean(),
-            }
-
-    return ForwardBatch(
-        loss=loss_dict["total"],
-        loss_by_target=unweighted,
-        batch_size=bsz,
-        cond=cond,
-        fb=fb,
-        out=out,
-    )
+            unweighted = _diagnostic_losses(components.process, batch.fb, batch.out)
+    return ForwardBatch(loss=batch.loss_dict["total"], loss_by_target=unweighted, batch_size=bsz, cond=cond, fb=batch.fb, out=batch.out)
 
 
 def backward_loss(loss: torch.Tensor, *, current_accum_steps: int, scaler) -> None:
@@ -140,9 +77,7 @@ def backward_loss(loss: torch.Tensor, *, current_accum_steps: int, scaler) -> No
 
 
 def should_step_optimizer(micro_step: int, loop_cfg: LoopConfig) -> bool:
-    return ((micro_step + 1) % loop_cfg.gradient_accumulation_steps == 0) or (
-        micro_step + 1 == loop_cfg.micro_steps_per_epoch
-    )
+    return ((micro_step + 1) % loop_cfg.gradient_accumulation_steps == 0) or (micro_step + 1 == loop_cfg.micro_steps_per_epoch)
 
 
 def step_optimizer(model: torch.nn.Module, components: TrainComponents, grad_clip: float):
@@ -152,28 +87,13 @@ def step_optimizer(model: torch.nn.Module, components: TrainComponents, grad_cli
         components.scaler.step(components.optimizer)
         components.scaler.update()
         return grad_norm
-
     grad_norm = clip_grad_norm(model, grad_clip) if grad_clip > 0 else clip_grad_norm(model, float("inf"))
     components.optimizer.step()
     return grad_norm
 
 
-def update_train_meters(
-    meters: MetricLogger,
-    fwd: ForwardBatch,
-    *,
-    lr: float,
-    iter_time: float,
-    world_size: int,
-    grad_norm=None,
-) -> None:
-    throughput = fwd.batch_size * world_size / max(iter_time, 1e-6)
-    meters.update(
-        loss=float(fwd.loss.detach().item()),
-        lr=float(lr),
-        iter_s=float(iter_time),
-        img_s=float(throughput),
-    )
+def update_train_meters(meters: MetricLogger, fwd: ForwardBatch, *, lr: float, iter_time: float, world_size: int, grad_norm=None) -> None:
+    meters.update(loss=float(fwd.loss.detach().item()), lr=float(lr), iter_s=float(iter_time), img_s=fwd.batch_size * world_size / max(iter_time, 1e-6))
     for target, val in fwd.loss_by_target.items():
         meters.update(**{f"loss_{target}": float(val.detach().item())})
     if grad_norm is not None:
@@ -181,21 +101,10 @@ def update_train_meters(
         meters.update(grad_norm=grad_norm_value)
 
 
-def log_training_step(
-    *,
-    runtime: RuntimeContext,
-    loop_cfg: LoopConfig,
-    resume: ResumeState,
-    meters: MetricLogger,
-    tbin_stats: TimeBinAccumulator,
-    epoch: int,
-    micro_step: int,
-    current_accum_steps: int,
-) -> None:
+def log_training_step(*, runtime: RuntimeContext, loop_cfg: LoopConfig, resume: ResumeState, meters: MetricLogger, tbin_stats: TimeBinAccumulator, epoch: int, micro_step: int, current_accum_steps: int) -> None:
     force_log = resume.run_step <= 20
     if not force_log and (resume.global_step % loop_cfg.log_every != 0):
         return
-
     meters.reduce_distributed()
     kv = meters.get_log_dict()
     kv["epoch"] = epoch
@@ -205,7 +114,6 @@ def log_training_step(
         kv["grad_clip"] = loop_cfg.grad_clip
     if torch.cuda.is_available():
         kv["gpu_mem_gb"] = torch.cuda.max_memory_allocated(device=runtime.device) / (1024**3)
-
     kv["summary"] = tbin_stats.summary(is_distributed=runtime.is_distributed)
     runtime.logger.log_kv(resume.global_step, kv, total_steps=loop_cfg.total_steps)
     tbin_stats.reset()
@@ -221,118 +129,43 @@ def train(cfg: dict):
     loop_cfg = build_loop_config(cfg, data_ctx.loader, runtime.distributed_cfg)
     if runtime.is_main:
         log_loop_config(runtime.logger, loop_cfg)
-    tbin_stats = TimeBinAccumulator(
-        num_bins=loop_cfg.tbin_count,
-        device=runtime.device,
-    )
-
-    model = model_ctx.model
-    model.train()
+    tbin_stats = TimeBinAccumulator(num_bins=loop_cfg.tbin_count, device=runtime.device)
+    denoiser = components.denoiser
+    denoiser.train()
     iter_start = time.time()
-
     for epoch in range(resume.start_epoch, loop_cfg.epochs):
         if data_ctx.sampler is not None:
             data_ctx.sampler.set_epoch(epoch)
-
         use_label_cond = int(cfg["model"].get("num_classes", 0)) > 0
-
         for micro_step, (x0, y) in enumerate(data_ctx.loader):
             accum_index = micro_step % loop_cfg.gradient_accumulation_steps
             update_step = accum_index == 0
             remaining_micro_steps = loop_cfg.micro_steps_per_epoch - micro_step
             current_accum_steps = min(loop_cfg.gradient_accumulation_steps, remaining_micro_steps)
-
             if update_step:
                 step_lr = float(loop_cfg.lr_for_step(resume.global_step))
                 for pg in components.optimizer.param_groups:
                     pg["lr"] = step_lr
                 components.optimizer.zero_grad(set_to_none=True)
-
-            fwd = compute_forward_batch(
-                cfg=cfg,
-                model=model,
-                runtime=runtime,
-                model_ctx=model_ctx,
-                components=components,
-                x0=x0,
-                y=y,
-                use_label_cond=use_label_cond,
-            )
+            fwd = compute_forward_batch(cfg=cfg, runtime=runtime, model_ctx=model_ctx, components=components, x0=x0, y=y, use_label_cond=use_label_cond)
             backward_loss(fwd.loss, current_accum_steps=current_accum_steps, scaler=components.scaler)
-
             did_optimizer_step = should_step_optimizer(micro_step, loop_cfg)
             grad_norm = None
             if did_optimizer_step:
                 effective_clip = 0.0 if resume.global_step < 10000 else loop_cfg.grad_clip
-                grad_norm = step_optimizer(model, components, effective_clip)
-
+                grad_norm = step_optimizer(denoiser, components, effective_clip)
             if did_optimizer_step and components.ema is not None:
-                components.ema.update(model)
-
-            tbin_stats.update(
-                schedule=components.schedule,
-                process=components.process,
-                loss_fn=components.loss_fn,
-                fb=fwd.fb,
-                out=fwd.out,
-            )
-
+                components.ema.update(denoiser)
+            tbin_stats.update(schedule=components.schedule, process=components.process, loss_fn=components.loss_fn, fb=fwd.fb, out=fwd.out)
             iter_time = time.time() - iter_start
             iter_start = time.time()
-            update_train_meters(
-                meters,
-                fwd,
-                lr=float(components.optimizer.param_groups[0]["lr"]),
-                iter_time=iter_time,
-                world_size=runtime.world_size,
-                grad_norm=grad_norm if did_optimizer_step else None,
-            )
-
+            update_train_meters(meters, fwd, lr=float(components.optimizer.param_groups[0]["lr"]), iter_time=iter_time, world_size=runtime.world_size, grad_norm=grad_norm if did_optimizer_step else None)
             if not did_optimizer_step:
                 continue
-
             resume.global_step += 1
             resume.run_step += 1
-
-            log_training_step(
-                runtime=runtime,
-                loop_cfg=loop_cfg,
-                resume=resume,
-                meters=meters,
-                tbin_stats=tbin_stats,
-                epoch=epoch,
-                micro_step=micro_step,
-                current_accum_steps=current_accum_steps,
-            )
-            run_eval_if_due(
-                cfg=cfg,
-                model=model_ctx.model,
-                runtime=runtime,
-                model_ctx=model_ctx,
-                components=components,
-                data_ctx=data_ctx,
-                resume=resume,
-                use_label_cond=use_label_cond,
-            )
-            run_sampling_if_due(
-                cfg=cfg,
-                model=model,
-                runtime=runtime,
-                model_ctx=model_ctx,
-                components=components,
-                loop_cfg=loop_cfg,
-                resume=resume,
-                cond=fwd.cond,
-                use_label_cond=use_label_cond,
-            )
-            save_checkpoint_if_due(
-                cfg=cfg,
-                model=model,
-                runtime=runtime,
-                components=components,
-                loop_cfg=loop_cfg,
-                resume=resume,
-                epoch=epoch,
-            )
-
+            log_training_step(runtime=runtime, loop_cfg=loop_cfg, resume=resume, meters=meters, tbin_stats=tbin_stats, epoch=epoch, micro_step=micro_step, current_accum_steps=current_accum_steps)
+            run_eval_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, components=components, data_ctx=data_ctx, resume=resume, use_label_cond=use_label_cond)
+            run_sampling_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, components=components, loop_cfg=loop_cfg, resume=resume, cond=fwd.cond, use_label_cond=use_label_cond)
+            save_checkpoint_if_due(cfg=cfg, model=denoiser, runtime=runtime, components=components, loop_cfg=loop_cfg, resume=resume, epoch=epoch)
     runtime.logger.close()
