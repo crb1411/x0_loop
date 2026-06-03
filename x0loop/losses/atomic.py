@@ -45,11 +45,11 @@ class AtomicLoss:
 
     def _pred_and_target(self, process, fb, out):
         if self.target == "eps":
-            return process.eps_from_output(fb.xt, fb.t, out, aux=fb.aux), process.eps_target(fb)
+            return process.eps_from_output(fb.xt, fb.t, out, aux={}), process.eps_target(fb)
         if self.target == "x0":
-            return process.x0_from_output(fb.xt, fb.t, out, aux=fb.aux), process.x0_target(fb)
+            return process.x0_from_output(fb.xt, fb.t, out, aux={}), process.x0_target(fb)
         if self.target == "v":
-            return process.v_from_output(fb.xt, fb.t, out, aux=fb.aux), process.v_target(fb)
+            return process.v_from_output(fb.xt, fb.t, out, aux={}), process.v_target(fb)
         raise AssertionError(f"Unexpected loss target={self.target!r}")
 
     def per_example(self, process, fb, out) -> tuple[torch.Tensor, torch.Tensor]:
@@ -57,7 +57,7 @@ class AtomicLoss:
         pred, tgt = self._pred_and_target(process, fb, out)
         unweighted = regress(self.formula, pred, tgt, self.delta)
         if self.weight_fn is not None:
-            w = self.weight_fn(fb.t, fb.aux)
+            w = self.weight_fn(fb.t, None)
             if w.ndim > 1:
                 w = w.view(w.shape[0], -1).mean(dim=1)
             w = w.to(dtype=unweighted.dtype)
@@ -86,7 +86,7 @@ class CompositeLoss:
     def outer_weight(self, fb, ref: torch.Tensor) -> torch.Tensor:
         if self.outer_weight_fn is None:
             return torch.ones_like(ref)
-        w = self.outer_weight_fn(fb.t, fb.aux)
+        w = self.outer_weight_fn(fb.t, None)
         if w.ndim > 1:
             w = w.view(w.shape[0], -1).mean(dim=1)
         return w.to(device=ref.device, dtype=ref.dtype)

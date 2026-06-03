@@ -12,8 +12,8 @@ def _check_process(proc):
     t = torch.rand(b).clamp(1e-3, 0.999)
 
     fb = proc.forward_sample(x0=x0, t=t)
-    perfect_out = fb.target
-    x0_hat = proc.x0_from_output(fb.xt, fb.t, perfect_out, fb.aux)
+    perfect_out = proc.direct_target(fb)
+    x0_hat = proc.x0_from_output(fb.xt, fb.t, perfect_out, aux={})
 
     err = (x0_hat - x0).abs().mean().item()
     assert err < 1e-5, f"decode consistency error too high: {err}"
@@ -31,7 +31,7 @@ def test_decode_consistency_flow():
         _check_process(FlowProcess(sched, output_target=target))
 
 
-def test_v_target_is_xt_minus_x0_over_t():
+def test_v_target_is_eps_minus_x0():
     for proc in (
         DiffusionProcess(TimeSchedule(mode="diffusion", num_steps=1000)),
         FlowProcess(TimeSchedule(mode="flow", num_steps=1000)),
@@ -39,13 +39,14 @@ def test_v_target_is_xt_minus_x0_over_t():
         x0 = torch.randn(4, 3, 8, 8)
         t = torch.rand(4).clamp(0.05, 0.999)
         fb = proc.forward_sample(x0=x0, t=t)
-        expected = (fb.xt - fb.x0) / t.view(-1, 1, 1, 1)
+        expected = fb.eps - fb.x0
         assert torch.allclose(proc.v_target(fb), expected, atol=1e-5, rtol=1e-5)
 
 
-def test_flow_v_matches_eps_minus_x0():
+def test_flow_v_matches_xt_minus_x0_over_t():
     proc = FlowProcess(TimeSchedule(mode="flow", num_steps=1000))
     x0 = torch.randn(4, 3, 8, 8)
     t = torch.rand(4).clamp(0.05, 0.999)
     fb = proc.forward_sample(x0=x0, t=t)
-    assert torch.allclose(proc.v_target(fb), fb.aux["eps"] - fb.x0, atol=1e-5, rtol=1e-5)
+    expected = (fb.xt - fb.x0) / t.view(-1, 1, 1, 1)
+    assert torch.allclose(proc.v_target(fb), expected, atol=1e-5, rtol=1e-5)

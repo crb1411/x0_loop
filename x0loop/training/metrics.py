@@ -114,9 +114,9 @@ class TimeBinAccumulator:
         out_d = out.detach()
 
         # Per-example unweighted MSE for eps/x0/v (diagnostic, always MSE regardless of training formula).
-        eps_u = regress("mse", process.eps_from_output(fb.xt, t, out_d, aux=fb.aux), process.eps_target(fb).detach())
-        x0_u = regress("mse", process.x0_from_output(fb.xt, t, out_d, aux=fb.aux), process.x0_target(fb).detach())
-        v_u = regress("mse", process.v_from_output(fb.xt, t, out_d, aux=fb.aux), process.v_target(fb).detach())
+        eps_u = regress("mse", process.eps_from_output(fb.xt, t, out_d, aux={}), process.eps_target(fb).detach())
+        x0_u = regress("mse", process.x0_from_output(fb.xt, t, out_d, aux={}), process.x0_target(fb).detach())
+        v_u = regress("mse", process.v_from_output(fb.xt, t, out_d, aux={}), process.v_target(fb).detach())
 
         # Prefer the actual outer objective weight; fall back to explicit per-space atom weight.
         if getattr(loss_fn, "outer_weight_fn", None) is not None:
@@ -124,16 +124,14 @@ class TimeBinAccumulator:
         else:
             ref_atom = next((a for a in loss_fn.atoms if a.weight_fn is not None), None)
             if ref_atom is not None:
-                w = ref_atom.weight_fn(t, fb.aux)
+                w = ref_atom.weight_fn(t, None)
                 if w.ndim > 1:
                     w = w.view(w.shape[0], -1).mean(dim=1)
                 w = w.float()
             else:
                 w = torch.ones(t.shape[0], device=t.device, dtype=torch.float32)
 
-        alpha_t = fb.aux.get("alpha")
-        if alpha_t is None:
-            alpha_t = schedule.alpha(t)
+        alpha_t = schedule.alpha(t)
         alpha_t = alpha_t.detach().float()
         if alpha_t.ndim > 1:
             alpha_t = alpha_t.view(alpha_t.shape[0], -1).mean(dim=1)

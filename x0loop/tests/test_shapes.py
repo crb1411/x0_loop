@@ -19,18 +19,18 @@ def _run_shape_test(mode: str):
     t = schedule.sample_t(b, device=x0.device)
     fb = process.forward_sample(x0=x0, t=t)
     out = model(fb.xt, fb.t)
-    x0_pred = process.x0_from_output(fb.xt, fb.t, out, aux=fb.aux)
-    eps_pred = process.eps_from_output(fb.xt, fb.t, out, aux=fb.aux)
-    v_pred = process.v_from_output(fb.xt, fb.t, out, aux=fb.aux)
+    x0_pred = process.x0_from_output(fb.xt, fb.t, out, aux={})
+    eps_pred = process.eps_from_output(fb.xt, fb.t, out, aux={})
+    v_pred = process.v_from_output(fb.xt, fb.t, out, aux={})
     x0_target = process.x0_target(fb)
     eps_target = process.eps_target(fb)
     v_target = process.v_target(fb)
-    assert out.shape == fb.target.shape == x0.shape
+    assert out.shape == process.direct_target(fb).shape == x0.shape
     assert x0_pred.shape == eps_pred.shape == v_pred.shape == x0.shape
     assert x0_target.shape == eps_target.shape == v_target.shape == x0.shape
 
     s = torch.zeros((), dtype=torch.float32)
-    x_next = process.step(fb.xt, fb.t, s=s, model_out=out, aux=fb.aux)
+    x_next = process.step(fb.xt, fb.t, s=s, model_out=out, aux={})
     assert x_next.shape == x0.shape
 
 

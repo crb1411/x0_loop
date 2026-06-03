@@ -42,9 +42,9 @@ def compute_eval_forward(
             "loss_weighted": loss_dict["loss_weighted"].detach(),
             "loss_no_weight": loss_dict["loss_no_weight"].detach(),
             "loss_outer_weight": loss_dict["weight"].detach(),
-            "loss_eps": regress("mse", p.eps_from_output(fb.xt, fb.t, out, aux=fb.aux), p.eps_target(fb)).detach(),
-            "loss_x0": regress("mse", p.x0_from_output(fb.xt, fb.t, out, aux=fb.aux), p.x0_target(fb)).detach(),
-            "loss_v": regress("mse", p.v_from_output(fb.xt, fb.t, out, aux=fb.aux), p.v_target(fb)).detach(),
+            "loss_eps": regress("mse", p.eps_from_output(fb.xt, fb.t, out, aux={}), p.eps_target(fb)).detach(),
+            "loss_x0": regress("mse", p.x0_from_output(fb.xt, fb.t, out, aux={}), p.x0_target(fb)).detach(),
+            "loss_v": regress("mse", p.v_from_output(fb.xt, fb.t, out, aux={}), p.v_target(fb)).detach(),
         }
     return {"diag": diag, "fb": fb, "out": out, "batch_size": bsz}
 

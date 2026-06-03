@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -14,8 +14,7 @@ class ForwardBatch:
     x0: torch.Tensor
     t: torch.Tensor
     xt: torch.Tensor
-    target: torch.Tensor
-    aux: dict[str, Any] = field(default_factory=dict)
+    eps: torch.Tensor
 
 
 class BaseProcess:
@@ -24,7 +23,7 @@ class BaseProcess:
     output_target controls what the model directly predicts:
       eps       — noise endpoint
       x0        — clean image endpoint
-      v         — residual velocity v = (x_t - x0) / t
+      v         — velocity v = eps - x0
       velocity  — backward-compatible alias for v
     """
 
@@ -58,7 +57,7 @@ class BaseProcess:
         if self.output_target == "eps":
             return (xt - s * model_out) / a.clamp_min(1e-5)
         if self.output_target == "v":
-            return xt - self._reshape_coeff(t, xt).clamp_min(1e-5) * model_out
+            return (xt - s * model_out) / (a + s).clamp_min(1e-5)
         raise AssertionError(f"Unexpected output_target={self.output_target!r}")
 
     def _to_eps(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor) -> torch.Tensor:
@@ -68,14 +67,13 @@ class BaseProcess:
         if self.output_target == "x0":
             return (xt - a * model_out) / s.clamp_min(1e-5)
         if self.output_target == "v":
-            x0 = self._to_x0(xt, t, model_out)
-            return (xt - a * x0) / s.clamp_min(1e-5)
+            return (xt + a * model_out) / (a + s).clamp_min(1e-5)
         raise AssertionError(f"Unexpected output_target={self.output_target!r}")
 
     def _to_v(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor) -> torch.Tensor:
         if self.output_target == "v":
             return model_out
-        return (xt - self._to_x0(xt, t, model_out)) / self._reshape_coeff(t, xt).clamp_min(1e-5)
+        return self._to_eps(xt, t, model_out) - self._to_x0(xt, t, model_out)
 
     def _to_velocity(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor) -> torch.Tensor:
         return self._to_v(xt, t, model_out)
@@ -92,27 +90,24 @@ class BaseProcess:
     def velocity_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
         return self._to_velocity(xt, t, model_out)
 
-    def eps_target(self, fb: ForwardBatch) -> torch.Tensor:
-        return fb.aux["eps"]
-
     def x0_target(self, fb: ForwardBatch) -> torch.Tensor:
         return fb.x0
 
+    def eps_target(self, fb: ForwardBatch) -> torch.Tensor:
+        return fb.eps
+
     def v_target(self, fb: ForwardBatch) -> torch.Tensor:
-        return (fb.xt - fb.x0) / self._reshape_coeff(fb.t, fb.x0).clamp_min(1e-5)
+        return fb.eps - fb.x0
 
     def velocity_target(self, fb: ForwardBatch) -> torch.Tensor:
         return self.v_target(fb)
 
-    def _make_target(self, x0: torch.Tensor, eps: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    def direct_target(self, fb: ForwardBatch) -> torch.Tensor:
         if self.output_target == "eps":
-            return eps
+            return self.eps_target(fb)
         if self.output_target == "x0":
-            return x0
-        a = self._reshape_coeff(self.schedule.alpha(t), x0)
-        s = self._reshape_coeff(self.schedule.sigma(t), x0)
-        xt = a * x0 + s * eps
-        return (xt - x0) / self._reshape_coeff(t, x0).clamp_min(1e-5)
+            return self.x0_target(fb)
+        return self.v_target(fb)
 
     def prior_sample(self, shape, device, dtype) -> torch.Tensor:
         if self.prior != "gaussian":

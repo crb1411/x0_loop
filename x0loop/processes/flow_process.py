@@ -26,8 +26,7 @@ class FlowProcess(BaseProcess):
         a = self._reshape_coeff(alpha, x0)
         s = self._reshape_coeff(sigma, x0)
         xt = a * x0 + s * eps
-        target = self._make_target(x0, eps, t)
-        return ForwardBatch(x0=x0, t=t, xt=xt, target=target, aux={"eps": eps, "alpha": alpha, "sigma": sigma})
+        return ForwardBatch(x0=x0, t=t, xt=xt, eps=eps)
 
     def step(self, xt, t, s, model_out, aux, rng=None) -> torch.Tensor:
         # Freeze the predicted endpoints and reconstruct the same path at time s.

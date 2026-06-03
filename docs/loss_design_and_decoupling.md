@@ -230,15 +230,15 @@ model_out = model(fb.xt, fb.t, cond=cond)
 loss_terms = {}
 
 if coef_eps != 0:
-    eps_hat = process.eps_from_output(fb.xt, fb.t, model_out, fb.aux)
+    eps_hat = process.eps_from_output(fb.xt, fb.t, model_out, aux={})
     loss_terms["eps"] = mse_per_sample(eps_hat, process.eps_target(fb))
 
 if coef_x0 != 0:
-    x0_hat = process.x0_from_output(fb.xt, fb.t, model_out, fb.aux)
+    x0_hat = process.x0_from_output(fb.xt, fb.t, model_out, aux={})
     loss_terms["x0"] = mse_per_sample(x0_hat, process.x0_target(fb))
 
 if coef_v != 0:
-    v_hat = process.v_from_output(fb.xt, fb.t, model_out, fb.aux)
+    v_hat = process.v_from_output(fb.xt, fb.t, model_out, aux={})
     loss_terms["v"] = mse_per_sample(v_hat, process.v_target(fb))
 
 inner = coef_eps * loss_terms.get("eps", 0) \
