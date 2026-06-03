@@ -4,19 +4,21 @@ import os
 
 import torch
 
+from x0loop.models.denoiser import Denoiser
 from x0loop.training.context import LoopConfig, ResumeState, RuntimeContext
 from x0loop.utils import dist as dist_utils
 from x0loop.utils.checkpoint import save_checkpoint
+from x0loop.utils.ema import EMA
 
 
 def save_checkpoint_if_due(
     *,
     cfg: dict,
-    denoiser: torch.nn.Module,
+    denoiser: Denoiser,
     runtime: RuntimeContext,
-    optimizer,
-    scaler,
-    ema,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler | None,
+    ema: EMA | None,
     loop_cfg: LoopConfig,
     resume: ResumeState,
     epoch: int,

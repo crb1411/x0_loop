@@ -1,21 +1,59 @@
 #!/usr/bin/env bash
-cd /data/seek/aigc/x0_loop
+# Usage:
+#   bash train_run/train_531/train_x0loop_cifar10_weighted_x0.sh [ckpt.pt] [extra x0loop.train args...]
+# Logs:
+#   runs/launcher_logs/train_531_cifar10_weighted_x0/<timestamp>/logs/launcher.log
+# Starts in background and prints the log path plus the command to stop it.
+set -euo pipefail
 
-source train_run/common_torchrun.sh
-setup_torchrun_env
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "${ROOT}"
+export PYTHONPATH="${ROOT}:${PYTHONPATH:-}"
 
-RESUME_ARGS=""
-if [ -n "$1" ]; then
-  RESUME_ARGS="--set train.resume=$1"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export X0LOOP_RUN_TIMESTAMP="${X0LOOP_RUN_TIMESTAMP:-$(date +"%Y%m%d_%H%M%S")}"
+export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
+export NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
+
+LOG_DIR="runs/launcher_logs/train_531_cifar10_weighted_x0/${X0LOOP_RUN_TIMESTAMP}/logs"
+mkdir -p "${LOG_DIR}"
+LOG_FILE="${LOG_DIR}/launcher.log"
+
+export MASTER_PORT="${MASTER_PORT:-$(python - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)}"
+
+{
+  echo "[x0loop] root=${ROOT}"
+  echo "[torchrun] MASTER_ADDR=${MASTER_ADDR} MASTER_PORT=${MASTER_PORT} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} NPROC_PER_NODE=${NPROC_PER_NODE}"
+} >> "${LOG_FILE}" 2>&1
+
+RESUME_ARGS=()
+if [ "$#" -gt 0 ] && [[ "${1}" != --* ]]; then
+  RESUME_ARGS+=(--set "train.resume=${1}")
+  shift
 fi
 
-torchrun \
+setsid torchrun \
   --nnodes=1 \
   --node_rank=0 \
-  --nproc_per_node=1 \
+  --nproc_per_node="${NPROC_PER_NODE}" \
   --master_addr="${MASTER_ADDR}" \
   --master_port="${MASTER_PORT}" \
   -m x0loop.train \
   --config train_run/configs/cifar10/cifar10_dit_flow_train_x0_weighted_min.yaml \
-  --runtime-config x0loop/configs/runtime/fsdp_checkpoint_compile.yaml \
-  $RESUME_ARGS
+  --runtime-config "${RUNTIME_CONFIG:-x0loop/configs/runtime/fsdp_checkpoint_compile.yaml}" \
+  "${RESUME_ARGS[@]}" \
+  "$@" >> "${LOG_FILE}" 2>&1 &
+RUN_PID=$!
+
+echo "[x0loop] started in background"
+echo "[x0loop] log: ${ROOT}/${LOG_FILE}"
+echo "[x0loop] pid: ${RUN_PID}"
+echo "[x0loop] stop: kill -- -${RUN_PID}"
+echo "[x0loop] watch: tail -f ${ROOT}/${LOG_FILE}"

@@ -24,11 +24,11 @@ class BaseProcess:
     output_target controls what the model directly predicts:
       eps       — noise endpoint
       x0        — clean image endpoint
-      v         — diffusion-style v = alpha eps - sigma x0
-      velocity  — flow velocity u = eps - x0
+      v         — residual velocity v = (x_t - x0) / t
+      velocity  — backward-compatible alias for v
     """
 
-    VALID_TARGETS = {"eps", "x0", "v", "velocity"}
+    VALID_TARGETS = {"eps", "x0", "v"}
 
     def __init__(self, schedule: TimeSchedule, prior: str = "gaussian", output_target: str = "eps"):
         self.schedule = schedule
@@ -38,10 +38,10 @@ class BaseProcess:
     @classmethod
     def normalize_target(cls, target: str) -> str:
         target = str(target).lower()
-        if target in {"u", "flow", "flow_velocity"}:
-            target = "velocity"
+        if target in {"u", "flow", "flow_velocity", "velocity"}:
+            target = "v"
         if target not in cls.VALID_TARGETS:
-            raise ValueError(f"target must be eps | x0 | v | velocity, got {target!r}")
+            raise ValueError(f"target must be eps | x0 | v, got {target!r}")
         return target
 
     def _coeff(self, xt: torch.Tensor, t: torch.Tensor):
@@ -58,11 +58,8 @@ class BaseProcess:
         if self.output_target == "eps":
             return (xt - s * model_out) / a.clamp_min(1e-5)
         if self.output_target == "v":
-            norm2 = self._reshape_coeff((alpha ** 2 + sigma ** 2).clamp_min(1e-10), xt)
-            return (a * xt - s * model_out) / norm2
-        # velocity u = eps - x0, xt = (a + s) x0 + s u.
-        denom = (a + s).clamp_min(1e-5)
-        return (xt - s * model_out) / denom
+            return xt - self._reshape_coeff(t, xt).clamp_min(1e-5) * model_out
+        raise AssertionError(f"Unexpected output_target={self.output_target!r}")
 
     def _to_eps(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor) -> torch.Tensor:
         a, s, alpha, sigma = self._coeff(xt, t)
@@ -71,22 +68,17 @@ class BaseProcess:
         if self.output_target == "x0":
             return (xt - a * model_out) / s.clamp_min(1e-5)
         if self.output_target == "v":
-            norm2 = self._reshape_coeff((alpha ** 2 + sigma ** 2).clamp_min(1e-10), xt)
-            return (s * xt + a * model_out) / norm2
-        # velocity u = eps - x0, xt = a eps - a u + s eps = (a + s) eps - a u.
-        denom = (a + s).clamp_min(1e-5)
-        return (xt + a * model_out) / denom
+            x0 = self._to_x0(xt, t, model_out)
+            return (xt - a * x0) / s.clamp_min(1e-5)
+        raise AssertionError(f"Unexpected output_target={self.output_target!r}")
 
     def _to_v(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor) -> torch.Tensor:
         if self.output_target == "v":
             return model_out
-        a, s, _, _ = self._coeff(xt, t)
-        return a * self._to_eps(xt, t, model_out) - s * self._to_x0(xt, t, model_out)
+        return (xt - self._to_x0(xt, t, model_out)) / self._reshape_coeff(t, xt).clamp_min(1e-5)
 
     def _to_velocity(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor) -> torch.Tensor:
-        if self.output_target == "velocity":
-            return model_out
-        return self._to_eps(xt, t, model_out) - self._to_x0(xt, t, model_out)
+        return self._to_v(xt, t, model_out)
 
     def x0_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
         return self._to_x0(xt, t, model_out)
@@ -107,27 +99,20 @@ class BaseProcess:
         return fb.x0
 
     def v_target(self, fb: ForwardBatch) -> torch.Tensor:
-        alpha = self.schedule.alpha(fb.t)
-        sigma = self.schedule.sigma(fb.t)
-        a = self._reshape_coeff(alpha, fb.x0)
-        s = self._reshape_coeff(sigma, fb.x0)
-        return a * fb.aux["eps"] - s * fb.x0
+        return (fb.xt - fb.x0) / self._reshape_coeff(fb.t, fb.x0).clamp_min(1e-5)
 
     def velocity_target(self, fb: ForwardBatch) -> torch.Tensor:
-        return fb.aux["eps"] - fb.x0
+        return self.v_target(fb)
 
     def _make_target(self, x0: torch.Tensor, eps: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         if self.output_target == "eps":
             return eps
         if self.output_target == "x0":
             return x0
-        if self.output_target == "velocity":
-            return eps - x0
-        alpha = self.schedule.alpha(t)
-        sigma = self.schedule.sigma(t)
-        a = self._reshape_coeff(alpha, x0)
-        s = self._reshape_coeff(sigma, x0)
-        return a * eps - s * x0
+        a = self._reshape_coeff(self.schedule.alpha(t), x0)
+        s = self._reshape_coeff(self.schedule.sigma(t), x0)
+        xt = a * x0 + s * eps
+        return (xt - x0) / self._reshape_coeff(t, x0).clamp_min(1e-5)
 
     def prior_sample(self, shape, device, dtype) -> torch.Tensor:
         if self.prior != "gaussian":

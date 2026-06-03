@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import torch
 
-from x0loop.losses.atomic import regress
+from x0loop.core.process_base import BaseProcess
+from x0loop.core.schedules import TimeSchedule
+from x0loop.core.time_sampling import TimeSampler
+from x0loop.losses.atomic import CompositeLoss, regress
 from x0loop.training.context import DataContext, ModelContext, ResumeState, RuntimeContext
 from x0loop.training.metrics import TimeBinAccumulator
 from x0loop.training.optimization import amp_dtype_for_precision
@@ -14,9 +17,9 @@ def compute_eval_forward(
     model: torch.nn.Module,
     runtime: RuntimeContext,
     model_ctx: ModelContext,
-    time_sampler,
-    process,
-    loss_fn,
+    time_sampler: TimeSampler,
+    process: BaseProcess,
+    loss_fn: CompositeLoss,
     x0: torch.Tensor,
     y: object,
     use_label_cond: bool,
@@ -52,10 +55,10 @@ def run_eval_if_due(
     model: torch.nn.Module,
     runtime: RuntimeContext,
     model_ctx: ModelContext,
-    schedule,
-    time_sampler,
-    process,
-    loss_fn,
+    schedule: TimeSchedule,
+    time_sampler: TimeSampler,
+    process: BaseProcess,
+    loss_fn: CompositeLoss,
     data_ctx: DataContext,
     resume: ResumeState,
     use_label_cond: bool,

@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# Usage:
+#   bash train_run/train_534/train_x0loop_cifar10_dit_flow_x0_vloss_heun.sh [ckpt.pt] [extra x0loop.train args...]
+# Logs:
+#   runs/cifar10/flow/dit/x0target_vloss_heun/<timestamp>/logs/launcher.log
+# Starts in background and prints the log path plus the command to stop it.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -12,7 +17,7 @@ export NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
 
 LOG_DIR="runs/cifar10/flow/dit/x0target_vloss_heun/${X0LOOP_RUN_TIMESTAMP}/logs"
 mkdir -p "${LOG_DIR}"
-exec >> "${LOG_DIR}/launcher.log" 2>&1
+LOG_FILE="${LOG_DIR}/launcher.log"
 
 export MASTER_PORT="${MASTER_PORT:-$(python - <<'PY'
 import socket
@@ -23,8 +28,10 @@ s.close()
 PY
 )}"
 
-echo "[x0loop] root=${ROOT}"
-echo "[torchrun] MASTER_ADDR=${MASTER_ADDR} MASTER_PORT=${MASTER_PORT} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} NPROC_PER_NODE=${NPROC_PER_NODE}"
+{
+  echo "[x0loop] root=${ROOT}"
+  echo "[torchrun] MASTER_ADDR=${MASTER_ADDR} MASTER_PORT=${MASTER_PORT} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} NPROC_PER_NODE=${NPROC_PER_NODE}"
+} >> "${LOG_FILE}" 2>&1
 
 RESUME_ARGS=()
 if [ "$#" -gt 0 ] && [[ "${1}" != --* ]]; then
@@ -32,7 +39,7 @@ if [ "$#" -gt 0 ] && [[ "${1}" != --* ]]; then
   shift
 fi
 
-torchrun \
+setsid torchrun \
   --nnodes=1 \
   --node_rank=0 \
   --nproc_per_node="${NPROC_PER_NODE}" \
@@ -42,4 +49,11 @@ torchrun \
   --config train_run/configs/cifar10/cifar10_dit_flow_train_x0_vloss_heun.yaml \
   --runtime-config "${RUNTIME_CONFIG:-x0loop/configs/runtime/fsdp_checkpoint_compile.yaml}" \
   "${RESUME_ARGS[@]}" \
-  "$@"
+  "$@" >> "${LOG_FILE}" 2>&1 &
+RUN_PID=$!
+
+echo "[x0loop] started in background"
+echo "[x0loop] log: ${ROOT}/${LOG_FILE}"
+echo "[x0loop] pid: ${RUN_PID}"
+echo "[x0loop] stop: kill -- -${RUN_PID}"
+echo "[x0loop] watch: tail -f ${ROOT}/${LOG_FILE}"

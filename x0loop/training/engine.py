@@ -6,11 +6,14 @@ import time
 import torch
 from torch.utils.data import DataLoader
 
+from x0loop.aug.base import BaseAugment
+from x0loop.core.process_base import BaseProcess, ForwardBatch as ProcessForwardBatch
 from x0loop.core.time_sampling import build_time_sampler
-from x0loop.losses.spec import build_loss
 from x0loop.losses.atomic import regress
+from x0loop.losses.spec import build_loss
 from x0loop.models.denoiser import Denoiser
-from x0loop.training.context import ForwardBatch, LoopConfig, ResumeState, RuntimeContext
+from x0loop.training.context import ForwardBatch as TrainForwardBatch
+from x0loop.training.context import LoopConfig, ModelContext, ResumeState, RuntimeContext
 from x0loop.training.factories import build_augment, build_data_context, build_model_context, build_process, build_schedule, init_runtime, load_resume_state
 from x0loop.training.metrics import TimeBinAccumulator
 from x0loop.training.optimization import amp_dtype_for_precision, build_step_lr_schedule, maybe_make_scaler
@@ -46,18 +49,28 @@ def log_loop_config(logger: Logger, loop_cfg: LoopConfig) -> None:
     logger.log_text(f"[train] lr_scheduler={meta.get('name', 'constant')} meta={meta}")
 
 
-def _diagnostic_losses(process, fb, out) -> dict[str, torch.Tensor]:
+def _diagnostic_losses(process: BaseProcess, fb: ProcessForwardBatch, out: torch.Tensor) -> dict[str, torch.Tensor]:
     diag = {
         "eps": regress("mse", process.eps_from_output(fb.xt, fb.t, out, aux=fb.aux), process.eps_target(fb)).mean(),
         "x0": regress("mse", process.x0_from_output(fb.xt, fb.t, out, aux=fb.aux), process.x0_target(fb)).mean(),
         "v": regress("mse", process.v_from_output(fb.xt, fb.t, out, aux=fb.aux), process.v_target(fb)).mean(),
     }
-    if hasattr(process, "velocity_from_output"):
-        diag["velocity"] = regress("mse", process.velocity_from_output(fb.xt, fb.t, out, aux=fb.aux), process.velocity_target(fb)).mean()
     return diag
 
 
-def compute_forward_batch(*, cfg: dict, runtime: RuntimeContext, model_ctx, denoiser, process, augment, augment_mode: str, x0: torch.Tensor, y: object, use_label_cond: bool) -> ForwardBatch:
+def compute_forward_batch(
+    *,
+    cfg: dict,
+    runtime: RuntimeContext,
+    model_ctx: ModelContext,
+    denoiser: Denoiser,
+    process: BaseProcess,
+    augment: BaseAugment,
+    augment_mode: str,
+    x0: torch.Tensor,
+    y: object,
+    use_label_cond: bool,
+) -> TrainForwardBatch:
     x0 = x0.to(runtime.device, non_blocking=True)
     bsz = x0.shape[0]
     cond = y.to(runtime.device, non_blocking=True) if (use_label_cond and isinstance(y, torch.Tensor)) else None
@@ -69,10 +82,10 @@ def compute_forward_batch(*, cfg: dict, runtime: RuntimeContext, model_ctx, deno
         batch = denoiser.compute_loss(x0, cond=cond)
         with torch.no_grad():
             unweighted = _diagnostic_losses(process, batch.fb, batch.out)
-    return ForwardBatch(loss=batch.loss_dict["total"], loss_by_target=unweighted, batch_size=bsz, cond=cond, fb=batch.fb, out=batch.out)
+    return TrainForwardBatch(loss=batch.loss_dict["total"], loss_by_target=unweighted, batch_size=bsz, cond=cond, fb=batch.fb, out=batch.out)
 
 
-def backward_loss(loss: torch.Tensor, *, current_accum_steps: int, scaler) -> None:
+def backward_loss(loss: torch.Tensor, *, current_accum_steps: int, scaler: torch.amp.GradScaler | None) -> None:
     loss_for_backward = loss / float(current_accum_steps)
     if scaler is not None:
         scaler.scale(loss_for_backward).backward()
@@ -84,7 +97,12 @@ def should_step_optimizer(micro_step: int, loop_cfg: LoopConfig) -> bool:
     return ((micro_step + 1) % loop_cfg.gradient_accumulation_steps == 0) or (micro_step + 1 == loop_cfg.micro_steps_per_epoch)
 
 
-def step_optimizer(model: torch.nn.Module, optimizer, scaler, grad_clip: float):
+def step_optimizer(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler | None,
+    grad_clip: float,
+) -> torch.Tensor:
     if scaler is not None:
         scaler.unscale_(optimizer)
         grad_norm = clip_grad_norm(model, grad_clip) if grad_clip > 0 else clip_grad_norm(model, float("inf"))
@@ -96,7 +114,15 @@ def step_optimizer(model: torch.nn.Module, optimizer, scaler, grad_clip: float):
     return grad_norm
 
 
-def update_train_meters(meters: MetricLogger, fwd: ForwardBatch, *, lr: float, iter_time: float, world_size: int, grad_norm=None) -> None:
+def update_train_meters(
+    meters: MetricLogger,
+    fwd: TrainForwardBatch,
+    *,
+    lr: float,
+    iter_time: float,
+    world_size: int,
+    grad_norm: torch.Tensor | float | None = None,
+) -> None:
     meters.update(loss=float(fwd.loss.detach().item()), lr=float(lr), iter_s=float(iter_time), img_s=fwd.batch_size * world_size / max(iter_time, 1e-6))
     for target, val in fwd.loss_by_target.items():
         meters.update(**{f"loss_{target}": float(val.detach().item())})
@@ -123,7 +149,7 @@ def log_training_step(*, runtime: RuntimeContext, loop_cfg: LoopConfig, resume: 
     tbin_stats.reset()
 
 
-def train(cfg: dict):
+def train(cfg: dict) -> None:
     runtime = init_runtime(cfg)
     data_ctx = build_data_context(cfg, runtime)
     model_ctx = build_model_context(cfg, runtime)

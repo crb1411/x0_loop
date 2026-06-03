@@ -4,15 +4,15 @@ import torch
 import torch.nn.functional as F
 
 
-VALID_LOSS_TARGETS = {"eps", "x0", "v", "velocity"}
+VALID_LOSS_TARGETS = {"eps", "x0", "v"}
 
 
 def normalize_loss_target(target: str) -> str:
     target = str(target).lower()
-    if target in {"u", "flow", "flow_velocity"}:
-        target = "velocity"
+    if target in {"u", "flow", "flow_velocity", "velocity"}:
+        target = "v"
     if target not in VALID_LOSS_TARGETS:
-        raise ValueError(f"target must be eps | x0 | v | velocity, got {target!r}")
+        raise ValueError(f"target must be eps | x0 | v, got {target!r}")
     return target
 
 
@@ -50,7 +50,7 @@ class AtomicLoss:
             return process.x0_from_output(fb.xt, fb.t, out, aux=fb.aux), process.x0_target(fb)
         if self.target == "v":
             return process.v_from_output(fb.xt, fb.t, out, aux=fb.aux), process.v_target(fb)
-        return process.velocity_from_output(fb.xt, fb.t, out, aux=fb.aux), process.velocity_target(fb)
+        raise AssertionError(f"Unexpected loss target={self.target!r}")
 
     def per_example(self, process, fb, out) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns (unweighted [B], per-space weight [B])."""

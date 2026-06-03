@@ -3,6 +3,8 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 
+from x0loop.core.process_base import BaseProcess, ForwardBatch
+from x0loop.core.schedules import TimeSchedule
 from x0loop.losses.atomic import CompositeLoss, regress
 
 def bucket_losses(t: torch.Tensor, per_example_loss: torch.Tensor) -> dict[str, float]:
@@ -99,7 +101,15 @@ class TimeBinAccumulator:
         self.sum_x0 = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
         self.sum_v = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
 
-    def update(self, *, schedule, process, loss_fn: CompositeLoss, fb, out) -> None:
+    def update(
+        self,
+        *,
+        schedule: TimeSchedule,
+        process: BaseProcess,
+        loss_fn: CompositeLoss,
+        fb: ForwardBatch,
+        out: torch.Tensor,
+    ) -> None:
         t = fb.t.detach()
         out_d = out.detach()
 

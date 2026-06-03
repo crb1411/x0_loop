@@ -6,7 +6,9 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from x0loop.core.process_base import ForwardBatch
+from x0loop.core.process_base import BaseProcess, ForwardBatch
+from x0loop.core.time_sampling import TimeSampler
+from x0loop.losses.atomic import CompositeLoss
 
 
 @dataclass
@@ -25,7 +27,14 @@ class Denoiser(nn.Module):
     target-space conversion, loss construction, CFG, and sampling.
     """
 
-    def __init__(self, net: nn.Module, *, process, loss_fn=None, time_sampler=None):
+    def __init__(
+        self,
+        net: nn.Module,
+        *,
+        process: BaseProcess,
+        loss_fn: CompositeLoss | None = None,
+        time_sampler: TimeSampler | None = None,
+    ):
         super().__init__()
         self.net = net
         self.process = process

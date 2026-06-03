@@ -7,8 +7,10 @@ import re
 import torch
 from PIL import Image, ImageDraw
 
+from x0loop.core.process_base import BaseProcess
 from x0loop.training.context import LoopConfig, ModelContext, ResumeState, RuntimeContext
 from x0loop.utils import dist as dist_utils
+from x0loop.utils.ema import EMA
 
 
 CIFAR10_CLASS_NAMES = (
@@ -172,8 +174,8 @@ def run_sampling_if_due(
     model: torch.nn.Module,
     runtime: RuntimeContext,
     model_ctx: ModelContext,
-    process,
-    ema,
+    process: BaseProcess,
+    ema: EMA | None,
     loop_cfg: LoopConfig,
     resume: ResumeState,
     cond: torch.Tensor | None,

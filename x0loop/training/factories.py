@@ -10,16 +10,20 @@ from torch.utils.data.distributed import DistributedSampler
 
 from x0loop.aug.geom import GeomAugment
 from x0loop.aug.identity import NoAug
+from x0loop.aug.base import BaseAugment
 from x0loop.aug.strong_augment import strongAugment
 from x0loop.core.config import dump_resolved_config, resolve_logging_output_dir
+from x0loop.core.process_base import BaseProcess
 from x0loop.core.schedules import TimeSchedule
 from x0loop.models.factory import build_model
+from x0loop.models.denoiser import Denoiser
 from x0loop.processes.diffusion_process import DiffusionProcess
 from x0loop.processes.flow_process import FlowProcess
 from x0loop.training.context import DataContext, ModelContext, ResumeState, RuntimeContext
 from x0loop.training.optimization import maybe_compile_model
 from x0loop.utils import dist as dist_utils
 from x0loop.utils.checkpoint import load_checkpoint
+from x0loop.utils.ema import EMA
 from x0loop.utils.fsdp import wrap_fsdp2
 from x0loop.utils.logger import Logger
 
@@ -53,7 +57,7 @@ def build_schedule(cfg: dict) -> TimeSchedule:
     return TimeSchedule(mode=sc["mode"], num_steps=int(sc.get("num_steps", 1000)), beta_min=float(sc.get("beta_min", 0.1)), beta_max=float(sc.get("beta_max", 20.0)))
 
 
-def build_process(cfg: dict, schedule: TimeSchedule):
+def build_process(cfg: dict, schedule: TimeSchedule) -> BaseProcess:
     pc = cfg.get("process", {})
     name = str(pc.get("name", "diffusion")).lower()
     if name != str(schedule.mode).lower():
@@ -66,7 +70,7 @@ def build_process(cfg: dict, schedule: TimeSchedule):
     raise ValueError(f"Unknown process: {name}")
 
 
-def build_augment(cfg: dict):
+def build_augment(cfg: dict) -> tuple[BaseAugment, str]:
     ac = cfg.get("augment", {"name": "none"})
     name = ac.get("name", "none").lower()
     mode = ac.get("mode", "data_only")
@@ -164,7 +168,15 @@ def build_model_context(cfg: dict, runtime: RuntimeContext) -> ModelContext:
     return ModelContext(model=model, model_cfg=model_cfg, use_fsdp=use_fsdp, fsdp_mode=fsdp_mode, precision=precision)
 
 
-def load_resume_state(cfg: dict, *, denoiser, optimizer, scaler, ema, runtime: RuntimeContext) -> ResumeState:
+def load_resume_state(
+    cfg: dict,
+    *,
+    denoiser: Denoiser,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler | None,
+    ema: EMA | None,
+    runtime: RuntimeContext,
+) -> ResumeState:
     resume_path = cfg["train"].get("resume")
     ckpt_mode = runtime.distributed_cfg.get("checkpoint", {}).get("mode", "full")
     if resume_path:
