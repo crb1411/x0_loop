@@ -39,7 +39,8 @@ if [ "$#" -gt 0 ] && [[ "${1}" != --* ]]; then
   shift
 fi
 
-setsid torchrun \
+setsid train_run/run_and_plot.sh "${LOG_FILE}" "${X0LOOP_RUN_TIMESTAMP}" "${ROOT}" -- \
+  torchrun \
   --nnodes=1 \
   --node_rank=0 \
   --nproc_per_node="${NPROC_PER_NODE}" \
@@ -57,3 +58,4 @@ echo "[x0loop] log: ${ROOT}/${LOG_FILE}"
 echo "[x0loop] pid: ${RUN_PID}"
 echo "[x0loop] stop: kill -- -${RUN_PID}"
 echo "[x0loop] watch: tail -f ${ROOT}/${LOG_FILE}"
+echo "[x0loop] plots: generated automatically after successful completion; see log for paths"
