@@ -26,8 +26,12 @@ loss:
   formula: mse
 
 augment:
-  name: none
-
+  name: geom
+  mode: data_only
+  hflip_prob: 0.5
+  max_translation: 0
+  crop_min_scale: 1.0
+  enable_crop_resize: false
 train:
   seed: 42
   deterministic: false

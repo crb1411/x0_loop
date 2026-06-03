@@ -46,26 +46,12 @@ loss:
       coef: 0.5
 
 augment:
-  name: none           # none | geom | dit | dit_original | strongaugment | strong
-  mode: data_only      # data_only (only supported mode)
-  # --- geom / dit / dit_original ---
-  hflip_prob: 0.5      # [0.0, 1.0] probability of horizontal flip
-  max_translation: 2   # [0, inf)   max pixel shift in each direction (roll, wrap-around)
-  crop_min_scale: 0.9  # (0.0, 1.0] minimum crop scale; 1.0 disables crop-resize
-  enable_crop_resize: true  # false | true; crop a random sub-region then resize back to original size
-  random_crop_position: false  # false=center crop, true=random position crop
-  # --- strongaugment / strong ---
-  crop_max_scale: 1.0        # (crop_min_scale, 1.0]
-  crop_min_ratio: 0.75       # (0.0, 1.0]  min aspect ratio of crop
-  crop_max_ratio: 1.3333     # [1.0, inf)  max aspect ratio of crop
-  brightness: 0.4            # [0.0, inf)  color jitter strength
-  contrast: 0.4              # [0.0, inf)
-  saturation: 0.4            # [0.0, inf)
-  grayscale_prob: 0.1        # [0.0, 1.0]
-  erasing_prob: 0.25         # [0.0, 1.0]  random erasing probability
-  erase_min_scale: 0.02      # (0.0, 1.0]  min erased area fraction
-  erase_max_scale: 0.2       # (erase_min_scale, 1.0]
-
+  name: geom
+  mode: data_only
+  hflip_prob: 0.5
+  max_translation: 0
+  crop_min_scale: 1.0
+  enable_crop_resize: false
 train:
   seed: 42
   deterministic: false # false | true
