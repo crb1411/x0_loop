@@ -29,9 +29,7 @@ time_sampler:
   name: uniform_continuous
 
 loss:
-  outer_weight: target
-  outer_weight_power: 2.0
-  outer_weight_floor: 0.0
+  outer_weight: none
 
   terms:
     - {target: x0, formula: mse, coef: 1.0}
