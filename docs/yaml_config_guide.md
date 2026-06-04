@@ -667,9 +667,9 @@ Default CIFAR10 flow configs use:
 ```yaml
 gen_eval:
   enabled: true
-  every_steps: 5000
-  num_samples: 50000
-  batch_size: 64
+  every_steps: 10000
+  num_samples: 5000
+  batch_size: 128
   steps: 50
   sampler: heun
   guidance_scale: 3.0
@@ -687,7 +687,7 @@ gen_eval:
 Fields:
 
 - `enabled`: enable generation metrics during training.
-- `every_steps`: optimizer-step interval. Default for this eval path is `5000`.
+- `every_steps`: optimizer-step interval. CIFAR10 ablation configs use `10000`.
 - `num_samples`: number of fake images used for metrics.
 - `batch_size`: generation batch size.
 - `steps`: sampling/integration steps.

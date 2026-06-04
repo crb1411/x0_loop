@@ -21,9 +21,9 @@ def _cfg(cfg: dict) -> dict[str, Any]:
     sample_cfg = cfg.get("sample", {}) or {}
     return {
         "enabled": bool(gen_cfg.get("enabled", False)),
-        "every_steps": int(gen_cfg.get("every_steps", 5000)),
-        "num_samples": int(gen_cfg.get("num_samples", gen_cfg.get("num", 50000))),
-        "batch_size": int(gen_cfg.get("batch_size", 64)),
+        "every_steps": int(gen_cfg.get("every_steps", 10000)),
+        "num_samples": int(gen_cfg.get("num_samples", gen_cfg.get("num", 5000))),
+        "batch_size": int(gen_cfg.get("batch_size", 128)),
         "steps": int(gen_cfg.get("steps", sample_cfg.get("steps", 50))),
         "sampler": str(gen_cfg.get("sampler", sample_cfg.get("sampler", "heun"))),
         "guidance_scale": float(gen_cfg.get("guidance_scale", 3.0)),
