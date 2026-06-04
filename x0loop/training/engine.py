@@ -18,9 +18,8 @@ from x0loop.training.factories import build_augment, build_data_context, build_m
 from x0loop.training.metrics import TimeBinAccumulator
 from x0loop.training.optimization import amp_dtype_for_precision, build_step_lr_schedule, maybe_make_scaler
 from x0loop.training.evaluation import run_eval_if_due
-from x0loop.training.generative_eval import run_generative_eval_if_due
+from x0loop.training.generative_eval import run_final_generative_eval, run_generative_eval_if_due
 from x0loop.training.checkpointing import save_checkpoint_if_due
-from x0loop.training.post_eval import run_post_train_eval
 from x0loop.training.sampling import apply_classifier_free_label_dropout, run_sampling_if_due
 from x0loop.utils.ema import EMA
 from x0loop.utils.fsdp import clip_grad_norm
@@ -214,6 +213,6 @@ def train(cfg: dict) -> None:
                 run_sampling_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, loop_cfg=loop_cfg, resume=resume, cond=fwd.cond, use_label_cond=use_label_cond)
                 save_checkpoint_if_due(cfg=cfg, denoiser=denoiser, runtime=runtime, optimizer=optimizer, scaler=scaler, ema=ema, loop_cfg=loop_cfg, resume=resume, epoch=epoch)
                 run_generative_eval_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, resume=resume)
-        run_post_train_eval(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, resume=resume)
+        run_final_generative_eval(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, resume=resume)
     finally:
         runtime.logger.close()

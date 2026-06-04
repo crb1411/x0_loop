@@ -22,7 +22,6 @@ logging: {}
 eval: {}
 sample: {}
 gen_eval: {}
-post_eval: {}
 ```
 
 ## `dataset`
@@ -670,7 +669,7 @@ gen_eval:
   every_steps: 10000
   num_samples: 5000
   batch_size: 128
-  steps: 50
+  steps: 20
   sampler: heun
   guidance_scale: 3.0
   input2: cifar10-train
@@ -682,6 +681,11 @@ gen_eval:
     ppl: false
     prc: true
     mind: true
+  final:
+    enabled: true
+    num_samples: 20000
+    steps: 50
+    sampler: heun
 ```
 
 Fields:
@@ -703,12 +707,21 @@ Fields:
 - `metrics.isc`, `metrics.fid`, `metrics.kid`, `metrics.ppl`,
   `metrics.prc`, `metrics.mind`: metric switches forwarded to
   `torch_fidelity`.
+- `final.enabled`: run one full generation metrics pass after training
+  completes.
+- `final.num_samples`: number of fake images for the final full pass. CIFAR10
+  ablation configs use `20000`.
+- `final.steps`: sampling steps for the final full pass. CIFAR10 ablation
+  configs use `50`.
+- `final.sampler`: sampler for the final full pass. CIFAR10 ablation configs
+  use `heun`.
 
 Notes:
 
 - This is different from `eval`, which measures validation losses.
-- This is different from `post_eval`, which runs once at the end and writes a
-  YAML manifest.
+- Periodic `gen_eval` is intentionally cheaper (`5000` samples, `20` sampling
+  steps). Final `gen_eval` is more complete (`20000` samples, `50` sampling
+  steps, Heun).
 - `torch_fidelity` must be installed in the training environment.
 - PPL requires `torch_fidelity` to receive a `GenerativeModelBase` or wrapped
   generator model. x0loop `gen_eval` currently passes a generated image
@@ -781,54 +794,6 @@ Default labels:
 - If `sample.class_labels` is omitted and class conditioning is enabled, sample
   labels cycle deterministically through class ids.
 - For CIFAR10, filenames include readable labels such as `_ybird`.
-
-## `post_eval`
-
-`post_eval` runs once after training finishes successfully. It is the x0loop
-equivalent of JiT's generation eval path: switch the model to eval mode, copy
-EMA weights when enabled, generate images, then write a YAML manifest with the
-exact sampling settings and artifact paths.
-
-```yaml
-post_eval:
-  enabled: true
-  steps: 50
-  num: 50
-  batch_size: 50
-  sampler: heun
-  guidance_scale: 3.0
-  save_images: true
-  save_grid: true
-```
-
-Fields:
-
-- `enabled`: run generation eval after the last training epoch.
-- `steps`: number of sampling/integration steps.
-- `num`: number of images to generate.
-- `batch_size`: generation batch size.
-- `sampler`: sampling method. For flow, use `euler` or `heun`; default is
-  `heun`.
-- `guidance_scale`: classifier-free guidance scale. The post-train default is
-  `3.0`.
-- `posterior_noise_scale`: optional diffusion posterior noise scale.
-- `save_images`: save individual PNG files.
-- `save_grid`: save one grid PNG.
-- `out_dir`: optional output directory. If omitted, uses
-  `<run_dir>/post_eval`.
-- `class_labels`: optional fixed labels.
-- `class_names`: optional label names used in filenames.
-
-Artifacts:
-
-- individual images: `<run_dir>/post_eval/images/sample_000000_yairplane_x0loop.png`
-- grid: `<run_dir>/post_eval/grid.png`
-- manifest: `<run_dir>/post_eval/post_eval.yaml`
-
-The manifest records the dataset/model/process/loss sections, sampling config,
-generated artifact paths, and a `metrics: {}` field reserved for future FID/IS
-results. Current x0loop post eval does not compute FID by default because the
-CIFAR10 reference statistics path is not yet part of the config.
 
 ## Common Examples
 

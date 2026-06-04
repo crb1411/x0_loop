@@ -19,12 +19,12 @@ def _cfg(cfg: dict) -> dict[str, Any]:
     gen_cfg = dict(cfg.get("gen_eval", {}) or {})
     metric_cfg = dict(gen_cfg.get("metrics", {}) or {})
     sample_cfg = cfg.get("sample", {}) or {}
-    return {
+    out = {
         "enabled": bool(gen_cfg.get("enabled", False)),
         "every_steps": int(gen_cfg.get("every_steps", 10000)),
         "num_samples": int(gen_cfg.get("num_samples", gen_cfg.get("num", 5000))),
         "batch_size": int(gen_cfg.get("batch_size", 128)),
-        "steps": int(gen_cfg.get("steps", sample_cfg.get("steps", 50))),
+        "steps": int(gen_cfg.get("steps", 20)),
         "sampler": str(gen_cfg.get("sampler", sample_cfg.get("sampler", "heun"))),
         "guidance_scale": float(gen_cfg.get("guidance_scale", 3.0)),
         "posterior_noise_scale": gen_cfg.get("posterior_noise_scale", sample_cfg.get("posterior_noise_scale", None)),
@@ -41,6 +41,16 @@ def _cfg(cfg: dict) -> dict[str, Any]:
         "prc": bool(metric_cfg.get("prc", gen_cfg.get("prc", True))),
         "mind": bool(metric_cfg.get("mind", gen_cfg.get("mind", True))),
     }
+    final_cfg = dict(gen_cfg.get("final", {}) or {})
+    out["final"] = {
+        "enabled": bool(final_cfg.get("enabled", gen_cfg.get("final_enabled", True))),
+        "num_samples": int(final_cfg.get("num_samples", gen_cfg.get("final_num_samples", 20000))),
+        "batch_size": int(final_cfg.get("batch_size", gen_cfg.get("final_batch_size", out["batch_size"]))),
+        "steps": int(final_cfg.get("steps", gen_cfg.get("final_steps", 50))),
+        "sampler": str(final_cfg.get("sampler", gen_cfg.get("final_sampler", out["sampler"]))),
+        "guidance_scale": float(final_cfg.get("guidance_scale", gen_cfg.get("final_guidance_scale", out["guidance_scale"]))),
+    }
+    return out
 
 
 def _default_input2(cfg: dict) -> str | None:
@@ -150,32 +160,28 @@ def _calculate_metrics(cfg: dict, gen_cfg: dict[str, Any], fake_dir: str, runtim
     return calculate_metrics(**metric_kwargs)
 
 
-def run_generative_eval_if_due(
+def _run_generative_eval(
     *,
     cfg: dict,
+    gen_cfg: dict[str, Any],
     model: torch.nn.Module,
     runtime: RuntimeContext,
     model_ctx: ModelContext,
     process: BaseProcess,
     ema: EMA | None,
     resume: ResumeState,
+    tag: str,
 ) -> None:
-    gen_cfg = _cfg(cfg)
-    if not gen_cfg["enabled"]:
-        return
-    every_steps = int(gen_cfg["every_steps"])
-    if every_steps <= 0 or resume.global_step <= 0 or (resume.global_step % every_steps != 0):
-        return
     if int(gen_cfg["num_samples"]) <= 0:
         raise ValueError(f"gen_eval.num_samples must be > 0, got {gen_cfg['num_samples']}")
 
-    eval_dir = os.path.join(runtime.out_dir, "gen_eval", f"step_{resume.global_step:08d}")
+    eval_dir = os.path.join(runtime.out_dir, "gen_eval", tag)
     fake_dir = os.path.join(eval_dir, "fake")
     if runtime.is_main:
         os.makedirs(fake_dir, exist_ok=True)
         runtime.logger.log_text(
             "[gen_eval] start: "
-            f"step={resume.global_step}, num_samples={gen_cfg['num_samples']}, "
+            f"tag={tag}, step={resume.global_step}, num_samples={gen_cfg['num_samples']}, "
             f"steps={gen_cfg['steps']}, sampler={gen_cfg['sampler']}, guidance_scale={gen_cfg['guidance_scale']}"
         )
     if runtime.is_distributed:
@@ -201,6 +207,7 @@ def run_generative_eval_if_due(
         row = {
             "step": int(resume.global_step),
             "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "tag": tag,
             "eval_dir": eval_dir,
             "fake_dir": fake_dir if gen_cfg["keep_images"] else None,
             "num_samples": int(gen_cfg["num_samples"]),
@@ -217,3 +224,60 @@ def run_generative_eval_if_due(
             shutil.rmtree(eval_dir, ignore_errors=True)
     if runtime.is_distributed:
         dist_utils.barrier()
+
+
+def run_generative_eval_if_due(
+    *,
+    cfg: dict,
+    model: torch.nn.Module,
+    runtime: RuntimeContext,
+    model_ctx: ModelContext,
+    process: BaseProcess,
+    ema: EMA | None,
+    resume: ResumeState,
+) -> None:
+    gen_cfg = _cfg(cfg)
+    if not gen_cfg["enabled"]:
+        return
+    every_steps = int(gen_cfg["every_steps"])
+    if every_steps <= 0 or resume.global_step <= 0 or (resume.global_step % every_steps != 0):
+        return
+    _run_generative_eval(
+        cfg=cfg,
+        gen_cfg=gen_cfg,
+        model=model,
+        runtime=runtime,
+        model_ctx=model_ctx,
+        process=process,
+        ema=ema,
+        resume=resume,
+        tag=f"step_{resume.global_step:08d}",
+    )
+
+
+def run_final_generative_eval(
+    *,
+    cfg: dict,
+    model: torch.nn.Module,
+    runtime: RuntimeContext,
+    model_ctx: ModelContext,
+    process: BaseProcess,
+    ema: EMA | None,
+    resume: ResumeState,
+) -> None:
+    gen_cfg = _cfg(cfg)
+    final_cfg = dict(gen_cfg.pop("final"))
+    if not gen_cfg["enabled"] or not final_cfg["enabled"]:
+        return
+    gen_cfg.update(final_cfg)
+    _run_generative_eval(
+        cfg=cfg,
+        gen_cfg=gen_cfg,
+        model=model,
+        runtime=runtime,
+        model_ctx=model_ctx,
+        process=process,
+        ema=ema,
+        resume=resume,
+        tag=f"final_step_{resume.global_step:08d}",
+    )
