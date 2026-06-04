@@ -253,6 +253,38 @@ Examples:
 
 - `alpha=1,beta=1`: uniform.
 - `alpha<1,beta<1`: more endpoints.
+
+### Flow solver-grid mixing
+
+For flow training only, any base `time_sampler` can mix in solver-grid times:
+
+```yaml
+time_sampler:
+  name: logit_normal
+  mean: -0.8
+  std: 0.8
+  grid_mix_prob: 0.2
+  grid_steps: [50, 20]
+```
+
+For each sample independently:
+
+```text
+with probability 1 - grid_mix_prob: use the base sampler above
+with probability grid_mix_prob: sample from the solver grids
+```
+
+`grid_steps: [50, 20]` builds the same model-evaluation times used by flow
+solver runs with 50 and 20 steps:
+
+```text
+{1/50, 2/50, ..., 1} ∪ {1/20, 2/20, ..., 1}
+```
+
+The default excludes `t=0`, matching the flow sampler behavior where the final
+endpoint is reached after the last step rather than by evaluating the model at
+`t=0`. Set `grid_include_t0: true` only when the objective is known to be stable
+at exactly zero.
 - `alpha>1,beta>1`: more middle.
 - `alpha>beta`: more large `t`.
 - `alpha<beta`: more small `t`.

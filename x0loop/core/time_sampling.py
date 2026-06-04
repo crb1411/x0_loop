@@ -82,11 +82,56 @@ class BetaSampler(TimeSampler):
         return self.min_t + (self.max_t - self.min_t) * t
 
 
-def build_time_sampler(cfg: dict, schedule) -> TimeSampler:
-    scfg = cfg.get("time_sampler", None)
-    if scfg is None:
-        return LegacyScheduleSampler(schedule)
+class FlowSolverGridSampler(TimeSampler):
+    def __init__(
+        self,
+        *,
+        steps: int | list[int] | tuple[int, ...],
+        min_t: float = 1e-5,
+        include_t0: bool = False,
+    ):
+        if isinstance(steps, int):
+            steps = [steps]
+        self.steps = [int(step) for step in steps]
+        self.min_t = float(min_t)
+        self.include_t0 = bool(include_t0)
+        if not self.steps:
+            raise ValueError("steps must contain at least one positive integer")
+        if any(step <= 0 for step in self.steps):
+            raise ValueError(f"steps must be positive, got {self.steps}")
 
+        values: list[float] = []
+        for step_count in self.steps:
+            start = 0 if self.include_t0 else 1
+            values.extend(float(i) / float(step_count) for i in range(start, step_count + 1))
+        self.values = [max(self.min_t, min(1.0, value)) for value in values]
+
+    def sample(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        idx = torch.randint(0, len(self.values), (batch_size,), device=device)
+        values = torch.tensor(self.values, device=device, dtype=torch.float32)
+        return values[idx]
+
+
+class MixedTimeSampler(TimeSampler):
+    def __init__(self, *, base: TimeSampler, branch: TimeSampler, branch_prob: float):
+        self.base = base
+        self.branch = branch
+        self.branch_prob = float(branch_prob)
+        if not (0.0 <= self.branch_prob <= 1.0):
+            raise ValueError(f"branch_prob must be in [0, 1], got {branch_prob}")
+
+    def sample(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        base_t = self.base.sample(batch_size, device=device)
+        if self.branch_prob == 0.0:
+            return base_t
+        branch_t = self.branch.sample(batch_size, device=device)
+        if self.branch_prob == 1.0:
+            return branch_t
+        use_branch = torch.rand(batch_size, device=device) < self.branch_prob
+        return torch.where(use_branch, branch_t, base_t)
+
+
+def _build_base_time_sampler(scfg: dict, schedule) -> TimeSampler:
     name = str(scfg.get("name", "legacy")).lower()
     if name in {"legacy", "schedule"}:
         return LegacyScheduleSampler(schedule)
@@ -116,3 +161,31 @@ def build_time_sampler(cfg: dict, schedule) -> TimeSampler:
             max_t=float(scfg.get("max_t", 1.0)),
         )
     raise ValueError(f"Unknown time_sampler.name={name!r}")
+
+
+def _grid_mix_prob(scfg: dict) -> float:
+    for key in ("grid_mix_prob", "mix_grid_prob", "grid_prob", "p_grid"):
+        if key in scfg:
+            return float(scfg[key])
+    return 0.0
+
+
+def build_time_sampler(cfg: dict, schedule) -> TimeSampler:
+    scfg = cfg.get("time_sampler", None)
+    if scfg is None:
+        return LegacyScheduleSampler(schedule)
+
+    base = _build_base_time_sampler(scfg, schedule)
+    branch_prob = _grid_mix_prob(scfg)
+    if not (0.0 <= branch_prob <= 1.0):
+        raise ValueError(f"grid_mix_prob must be in [0, 1], got {branch_prob}")
+    if branch_prob <= 0.0:
+        return base
+    if getattr(schedule, "mode", None) != "flow":
+        raise ValueError("time_sampler grid mixing is only supported for flow schedules.")
+    branch = FlowSolverGridSampler(
+        steps=scfg.get("grid_steps", [50, 20]),
+        min_t=float(scfg.get("grid_min_t", 1e-5)),
+        include_t0=bool(scfg.get("grid_include_t0", False)),
+    )
+    return MixedTimeSampler(base=base, branch=branch, branch_prob=branch_prob)
