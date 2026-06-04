@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+
 import torch
 
 
@@ -90,8 +92,7 @@ class FlowSolverGridSampler(TimeSampler):
         min_t: float = 1e-5,
         include_t0: bool = False,
     ):
-        if isinstance(steps, int):
-            steps = [steps]
+        steps = self._coerce_steps(steps)
         self.steps = [int(step) for step in steps]
         self.min_t = float(min_t)
         self.include_t0 = bool(include_t0)
@@ -110,6 +111,23 @@ class FlowSolverGridSampler(TimeSampler):
         idx = torch.randint(0, len(self.values), (batch_size,), device=device)
         values = torch.tensor(self.values, device=device, dtype=torch.float32)
         return values[idx]
+
+    @staticmethod
+    def _coerce_steps(steps) -> list[int] | list[str]:
+        if isinstance(steps, int):
+            return [steps]
+        if isinstance(steps, str):
+            text = steps.strip()
+            try:
+                parsed = ast.literal_eval(text)
+            except (ValueError, SyntaxError):
+                parsed = [part.strip() for part in text.strip("[]").split(",") if part.strip()]
+            if isinstance(parsed, int):
+                return [parsed]
+            if isinstance(parsed, (list, tuple)):
+                return list(parsed)
+            return [parsed]
+        return list(steps)
 
 
 class MixedTimeSampler(TimeSampler):

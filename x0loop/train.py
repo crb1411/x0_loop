@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 
 from x0loop.core.config import DEFAULT_RUNTIME_CONFIG, load_merged_config
 from x0loop.training.engine import train
@@ -25,6 +26,10 @@ def _apply_set_overrides(cfg: dict, overrides: list[str]) -> dict:
             return True
         if value.lower() == "false":
             return False
+        try:
+            return ast.literal_eval(value)
+        except (ValueError, SyntaxError):
+            pass
         try:
             return int(value)
         except ValueError:
