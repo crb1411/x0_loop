@@ -18,7 +18,9 @@ from x0loop.training.factories import build_augment, build_data_context, build_m
 from x0loop.training.metrics import TimeBinAccumulator
 from x0loop.training.optimization import amp_dtype_for_precision, build_step_lr_schedule, maybe_make_scaler
 from x0loop.training.evaluation import run_eval_if_due
+from x0loop.training.generative_eval import run_generative_eval_if_due
 from x0loop.training.checkpointing import save_checkpoint_if_due
+from x0loop.training.post_eval import run_post_train_eval
 from x0loop.training.sampling import apply_classifier_free_label_dropout, run_sampling_if_due
 from x0loop.utils.ema import EMA
 from x0loop.utils.fsdp import clip_grad_norm
@@ -173,41 +175,45 @@ def train(cfg: dict) -> None:
     if runtime.is_main:
         log_loop_config(runtime.logger, loop_cfg)
     tbin_stats = TimeBinAccumulator(num_bins=loop_cfg.tbin_count, device=runtime.device)
-    denoiser.train()
-    iter_start = time.time()
-    for epoch in range(resume.start_epoch, loop_cfg.epochs):
-        if data_ctx.sampler is not None:
-            data_ctx.sampler.set_epoch(epoch)
-        use_label_cond = int(cfg["model"].get("num_classes", 0)) > 0
-        for micro_step, (x0, y) in enumerate(data_ctx.loader):
-            accum_index = micro_step % loop_cfg.gradient_accumulation_steps
-            update_step = accum_index == 0
-            remaining_micro_steps = loop_cfg.micro_steps_per_epoch - micro_step
-            current_accum_steps = min(loop_cfg.gradient_accumulation_steps, remaining_micro_steps)
-            if update_step:
-                step_lr = float(loop_cfg.lr_for_step(resume.global_step))
-                for pg in optimizer.param_groups:
-                    pg["lr"] = step_lr
-                optimizer.zero_grad(set_to_none=True)
-            fwd = compute_forward_batch(cfg=cfg, runtime=runtime, model_ctx=model_ctx, denoiser=denoiser, process=process, augment=augment, augment_mode=augment_mode, x0=x0, y=y, use_label_cond=use_label_cond)
-            backward_loss(fwd.loss, current_accum_steps=current_accum_steps, scaler=scaler)
-            did_optimizer_step = should_step_optimizer(micro_step, loop_cfg)
-            grad_norm = None
-            if did_optimizer_step:
-                effective_clip = 0.0 if resume.global_step < 10000 else loop_cfg.grad_clip
-                grad_norm = step_optimizer(denoiser, optimizer, scaler, effective_clip)
-            if did_optimizer_step and ema is not None:
-                ema.update(denoiser)
-            tbin_stats.update(schedule=schedule, process=process, loss_fn=loss_fn, fb=fwd.fb, out=fwd.out)
-            iter_time = time.time() - iter_start
-            iter_start = time.time()
-            update_train_meters(meters, fwd, lr=float(optimizer.param_groups[0]["lr"]), iter_time=iter_time, world_size=runtime.world_size, grad_norm=grad_norm if did_optimizer_step else None)
-            if not did_optimizer_step:
-                continue
-            resume.global_step += 1
-            resume.run_step += 1
-            log_training_step(runtime=runtime, loop_cfg=loop_cfg, resume=resume, meters=meters, tbin_stats=tbin_stats, epoch=epoch, micro_step=micro_step, current_accum_steps=current_accum_steps)
-            run_eval_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, schedule=schedule, time_sampler=time_sampler, process=process, loss_fn=loss_fn, data_ctx=data_ctx, resume=resume, use_label_cond=use_label_cond)
-            run_sampling_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, loop_cfg=loop_cfg, resume=resume, cond=fwd.cond, use_label_cond=use_label_cond)
-            save_checkpoint_if_due(cfg=cfg, denoiser=denoiser, runtime=runtime, optimizer=optimizer, scaler=scaler, ema=ema, loop_cfg=loop_cfg, resume=resume, epoch=epoch)
-    runtime.logger.close()
+    try:
+        denoiser.train()
+        iter_start = time.time()
+        for epoch in range(resume.start_epoch, loop_cfg.epochs):
+            if data_ctx.sampler is not None:
+                data_ctx.sampler.set_epoch(epoch)
+            use_label_cond = int(cfg["model"].get("num_classes", 0)) > 0
+            for micro_step, (x0, y) in enumerate(data_ctx.loader):
+                accum_index = micro_step % loop_cfg.gradient_accumulation_steps
+                update_step = accum_index == 0
+                remaining_micro_steps = loop_cfg.micro_steps_per_epoch - micro_step
+                current_accum_steps = min(loop_cfg.gradient_accumulation_steps, remaining_micro_steps)
+                if update_step:
+                    step_lr = float(loop_cfg.lr_for_step(resume.global_step))
+                    for pg in optimizer.param_groups:
+                        pg["lr"] = step_lr
+                    optimizer.zero_grad(set_to_none=True)
+                fwd = compute_forward_batch(cfg=cfg, runtime=runtime, model_ctx=model_ctx, denoiser=denoiser, process=process, augment=augment, augment_mode=augment_mode, x0=x0, y=y, use_label_cond=use_label_cond)
+                backward_loss(fwd.loss, current_accum_steps=current_accum_steps, scaler=scaler)
+                did_optimizer_step = should_step_optimizer(micro_step, loop_cfg)
+                grad_norm = None
+                if did_optimizer_step:
+                    effective_clip = 0.0 if resume.global_step < 10000 else loop_cfg.grad_clip
+                    grad_norm = step_optimizer(denoiser, optimizer, scaler, effective_clip)
+                if did_optimizer_step and ema is not None:
+                    ema.update(denoiser)
+                tbin_stats.update(schedule=schedule, process=process, loss_fn=loss_fn, fb=fwd.fb, out=fwd.out)
+                iter_time = time.time() - iter_start
+                iter_start = time.time()
+                update_train_meters(meters, fwd, lr=float(optimizer.param_groups[0]["lr"]), iter_time=iter_time, world_size=runtime.world_size, grad_norm=grad_norm if did_optimizer_step else None)
+                if not did_optimizer_step:
+                    continue
+                resume.global_step += 1
+                resume.run_step += 1
+                log_training_step(runtime=runtime, loop_cfg=loop_cfg, resume=resume, meters=meters, tbin_stats=tbin_stats, epoch=epoch, micro_step=micro_step, current_accum_steps=current_accum_steps)
+                run_eval_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, schedule=schedule, time_sampler=time_sampler, process=process, loss_fn=loss_fn, data_ctx=data_ctx, resume=resume, use_label_cond=use_label_cond)
+                run_sampling_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, loop_cfg=loop_cfg, resume=resume, cond=fwd.cond, use_label_cond=use_label_cond)
+                save_checkpoint_if_due(cfg=cfg, denoiser=denoiser, runtime=runtime, optimizer=optimizer, scaler=scaler, ema=ema, loop_cfg=loop_cfg, resume=resume, epoch=epoch)
+                run_generative_eval_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, resume=resume)
+        run_post_train_eval(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, resume=resume)
+    finally:
+        runtime.logger.close()

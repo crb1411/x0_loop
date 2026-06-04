@@ -103,6 +103,32 @@ def save_sample_grid(sample_tensor: torch.Tensor, out_path: str):
     save_image(grid, out_path)
 
 
+def save_sample_images(
+    sample_tensor: torch.Tensor,
+    out_dir: str,
+    *,
+    start_index: int = 0,
+    indices: list[int] | None = None,
+    labels: torch.Tensor | None = None,
+    label_names: tuple[str, ...] | None = None,
+) -> list[str]:
+    os.makedirs(out_dir, exist_ok=True)
+    if indices is not None and len(indices) != int(sample_tensor.shape[0]):
+        raise ValueError(f"Expected {sample_tensor.shape[0]} sample indices, got {len(indices)}.")
+    label_ids = labels.detach().cpu().flatten().tolist() if labels is not None else None
+    if label_ids is not None and len(label_ids) != int(sample_tensor.shape[0]):
+        raise ValueError(f"Expected {sample_tensor.shape[0]} sample labels, got {len(label_ids)}.")
+
+    paths: list[str] = []
+    for offset, x in enumerate(sample_tensor):
+        sample_index = indices[offset] if indices is not None else start_index + offset
+        label_tag = _label_tag(int(label_ids[offset]), label_names) if label_ids is not None else ""
+        out_path = os.path.join(out_dir, f"sample_{sample_index:06d}{label_tag}_x0loop.png")
+        Image.fromarray(_tensor_chw_to_uint8_rgb(x)).save(out_path)
+        paths.append(out_path)
+    return paths
+
+
 def _tensor_chw_to_uint8_rgb(x: torch.Tensor):
     x = ((x.detach().cpu().clamp(-1, 1) + 1.0) * 127.5).to(torch.uint8)
     if x.ndim != 3:

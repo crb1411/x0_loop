@@ -49,6 +49,18 @@ COMMON_ARGS=(
   --set "train.epochs=300"
   --set "process.sampler=heun"
   --set "sample.sampler=heun"
+  --set "post_eval.enabled=true"
+  --set "post_eval.steps=50"
+  --set "post_eval.num=50"
+  --set "post_eval.batch_size=50"
+  --set "post_eval.sampler=heun"
+  --set "post_eval.guidance_scale=3.0"
+  --set "gen_eval.enabled=true"
+  --set "gen_eval.every_steps=5000"
+  --set "gen_eval.num_samples=50000"
+  --set "gen_eval.batch_size=64"
+  --set "gen_eval.sampler=heun"
+  --set "gen_eval.guidance_scale=3.0"
 )
 
 parse_resume_arg() {

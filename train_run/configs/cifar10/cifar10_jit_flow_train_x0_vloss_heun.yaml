@@ -86,3 +86,31 @@ sample:
   sampler: heun
   guidance_scale: 1.0
   save_trace: false
+
+post_eval:
+  enabled: true
+  steps: 50
+  num: 50
+  batch_size: 50
+  sampler: heun
+  guidance_scale: 3.0
+  save_images: true
+  save_grid: true
+
+gen_eval:
+  enabled: true
+  every_steps: 5000
+  num_samples: 50000
+  batch_size: 64
+  steps: 50
+  sampler: heun
+  guidance_scale: 3.0
+  input2: cifar10-train
+  keep_images: false
+  metrics:
+    isc: true
+    fid: true
+    kid: true
+    ppl: true
+    prc: true
+    mind: true

@@ -1,0 +1,219 @@
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import time
+from typing import Any
+
+import torch
+
+from x0loop.core.process_base import BaseProcess
+from x0loop.training.context import ModelContext, ResumeState, RuntimeContext
+from x0loop.training.sampling import build_null_class_cond, build_sample_label_names, save_sample_images
+from x0loop.utils import dist as dist_utils
+from x0loop.utils.ema import EMA
+
+
+def _cfg(cfg: dict) -> dict[str, Any]:
+    gen_cfg = dict(cfg.get("gen_eval", {}) or {})
+    metric_cfg = dict(gen_cfg.get("metrics", {}) or {})
+    sample_cfg = cfg.get("sample", {}) or {}
+    return {
+        "enabled": bool(gen_cfg.get("enabled", False)),
+        "every_steps": int(gen_cfg.get("every_steps", 5000)),
+        "num_samples": int(gen_cfg.get("num_samples", gen_cfg.get("num", 50000))),
+        "batch_size": int(gen_cfg.get("batch_size", 64)),
+        "steps": int(gen_cfg.get("steps", sample_cfg.get("steps", 50))),
+        "sampler": str(gen_cfg.get("sampler", sample_cfg.get("sampler", "heun"))),
+        "guidance_scale": float(gen_cfg.get("guidance_scale", 3.0)),
+        "posterior_noise_scale": gen_cfg.get("posterior_noise_scale", sample_cfg.get("posterior_noise_scale", None)),
+        "input2": gen_cfg.get("input2", None),
+        "fid_statistics_file": gen_cfg.get("fid_statistics_file", None),
+        "keep_images": bool(gen_cfg.get("keep_images", False)),
+        "verbose": bool(gen_cfg.get("verbose", False)),
+        "cache": bool(gen_cfg.get("cache", True)),
+        "cache_root": gen_cfg.get("cache_root", None),
+        "isc": bool(metric_cfg.get("isc", gen_cfg.get("isc", True))),
+        "fid": bool(metric_cfg.get("fid", gen_cfg.get("fid", True))),
+        "kid": bool(metric_cfg.get("kid", gen_cfg.get("kid", True))),
+        "ppl": bool(metric_cfg.get("ppl", gen_cfg.get("ppl", True))),
+        "prc": bool(metric_cfg.get("prc", gen_cfg.get("prc", True))),
+        "mind": bool(metric_cfg.get("mind", gen_cfg.get("mind", True))),
+    }
+
+
+def _default_input2(cfg: dict) -> str | None:
+    dataset_name = str((cfg.get("dataset", {}) or {}).get("name", "")).lower()
+    if dataset_name == "cifar10":
+        return "cifar10-train"
+    return None
+
+
+def _labels_for_indices(cfg: dict, indices: list[int], device: torch.device) -> torch.Tensor | None:
+    num_classes = int(cfg.get("model", {}).get("num_classes", 0))
+    if num_classes <= 0:
+        return None
+    return (torch.as_tensor(indices, device=device, dtype=torch.long) % num_classes).flatten()
+
+
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().tolist()
+    if isinstance(value, dict):
+        return {str(k): _json_ready(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(v) for v in value]
+    try:
+        import numpy as np
+
+        if isinstance(value, np.generic):
+            return value.item()
+    except Exception:
+        pass
+    return value
+
+
+def _metrics_path(runtime: RuntimeContext) -> str:
+    timestamp = getattr(runtime.logger, "run_timestamp", time.strftime("%Y%m%d_%H%M%S", time.localtime()))
+    return os.path.join(runtime.out_dir, f"gen_eval_metrics_{timestamp}.jsonl")
+
+
+def _write_metrics_jsonl(runtime: RuntimeContext, row: dict[str, Any]) -> str:
+    path = _metrics_path(runtime)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(_json_ready(row), ensure_ascii=True) + "\n")
+    return path
+
+
+@torch.no_grad()
+def _export_fake_images(
+    *,
+    cfg: dict,
+    gen_cfg: dict[str, Any],
+    model: torch.nn.Module,
+    runtime: RuntimeContext,
+    model_ctx: ModelContext,
+    process: BaseProcess,
+    fake_dir: str,
+) -> None:
+    local_indices = list(range(runtime.rank, int(gen_cfg["num_samples"]), runtime.world_size))
+    label_names = build_sample_label_names(cfg)
+    null_cond_full = build_null_class_cond(cfg, sample_num=int(gen_cfg["batch_size"]), device=runtime.device)
+
+    for offset in range(0, len(local_indices), int(gen_cfg["batch_size"])):
+        indices = local_indices[offset : offset + int(gen_cfg["batch_size"])]
+        cond = _labels_for_indices(cfg, indices, runtime.device)
+        null_cond = null_cond_full[: len(indices)] if null_cond_full is not None else None
+        result = process.sample(
+            model=model,
+            steps=int(gen_cfg["steps"]),
+            shape=(len(indices), model_ctx.model_cfg.out_channels, model_ctx.model_cfg.image_size, model_ctx.model_cfg.image_size),
+            device=runtime.device,
+            dtype=torch.float32,
+            return_trace=False,
+            cond=cond,
+            null_cond=null_cond,
+            guidance_scale=float(gen_cfg["guidance_scale"]),
+            sampler=str(gen_cfg["sampler"]),
+            posterior_noise_scale=gen_cfg["posterior_noise_scale"],
+        )
+        labels_cpu = cond.detach().cpu() if cond is not None else None
+        save_sample_images(result["x"].detach().cpu(), fake_dir, indices=indices, labels=labels_cpu, label_names=label_names)
+
+
+def _calculate_metrics(cfg: dict, gen_cfg: dict[str, Any], fake_dir: str, runtime: RuntimeContext) -> dict:
+    from torch_fidelity import calculate_metrics
+
+    input2 = gen_cfg["input2"] or _default_input2(cfg)
+    metric_kwargs: dict[str, Any] = {
+        "input1": fake_dir,
+        "cuda": bool(runtime.device.type == "cuda"),
+        "isc": bool(gen_cfg["isc"]),
+        "fid": bool(gen_cfg["fid"]),
+        "kid": bool(gen_cfg["kid"]),
+        "ppl": bool(gen_cfg["ppl"]),
+        "prc": bool(gen_cfg["prc"]),
+        "mind": bool(gen_cfg["mind"]),
+        "verbose": bool(gen_cfg["verbose"]),
+        "cache": bool(gen_cfg["cache"]),
+    }
+    if input2 is not None:
+        metric_kwargs["input2"] = input2
+    if gen_cfg["fid_statistics_file"] is not None:
+        metric_kwargs["fid_statistics_file"] = gen_cfg["fid_statistics_file"]
+    if gen_cfg["cache_root"]:
+        metric_kwargs["cache_root"] = gen_cfg["cache_root"]
+    if metric_kwargs["fid"] and input2 is None and not gen_cfg["fid_statistics_file"]:
+        raise ValueError("gen_eval requires input2 or fid_statistics_file for FID unless dataset.name=cifar10.")
+    return calculate_metrics(**metric_kwargs)
+
+
+def run_generative_eval_if_due(
+    *,
+    cfg: dict,
+    model: torch.nn.Module,
+    runtime: RuntimeContext,
+    model_ctx: ModelContext,
+    process: BaseProcess,
+    ema: EMA | None,
+    resume: ResumeState,
+) -> None:
+    gen_cfg = _cfg(cfg)
+    if not gen_cfg["enabled"]:
+        return
+    every_steps = int(gen_cfg["every_steps"])
+    if every_steps <= 0 or resume.global_step <= 0 or (resume.global_step % every_steps != 0):
+        return
+    if int(gen_cfg["num_samples"]) <= 0:
+        raise ValueError(f"gen_eval.num_samples must be > 0, got {gen_cfg['num_samples']}")
+
+    eval_dir = os.path.join(runtime.out_dir, "gen_eval", f"step_{resume.global_step:08d}")
+    fake_dir = os.path.join(eval_dir, "fake")
+    if runtime.is_main:
+        os.makedirs(fake_dir, exist_ok=True)
+        runtime.logger.log_text(
+            "[gen_eval] start: "
+            f"step={resume.global_step}, num_samples={gen_cfg['num_samples']}, "
+            f"steps={gen_cfg['steps']}, sampler={gen_cfg['sampler']}, guidance_scale={gen_cfg['guidance_scale']}"
+        )
+    if runtime.is_distributed:
+        dist_utils.barrier()
+
+    was_training = model.training
+    model.eval()
+    if ema is not None:
+        ema.store(model)
+        ema.copy_to(model)
+    try:
+        _export_fake_images(cfg=cfg, gen_cfg=gen_cfg, model=model, runtime=runtime, model_ctx=model_ctx, process=process, fake_dir=fake_dir)
+    finally:
+        if ema is not None:
+            ema.restore(model)
+        if was_training:
+            model.train()
+    if runtime.is_distributed:
+        dist_utils.barrier()
+
+    if runtime.is_main:
+        metrics = _calculate_metrics(cfg, gen_cfg, fake_dir, runtime)
+        row = {
+            "step": int(resume.global_step),
+            "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "eval_dir": eval_dir,
+            "fake_dir": fake_dir if gen_cfg["keep_images"] else None,
+            "num_samples": int(gen_cfg["num_samples"]),
+            "batch_size": int(gen_cfg["batch_size"]),
+            "steps": int(gen_cfg["steps"]),
+            "sampler": str(gen_cfg["sampler"]),
+            "guidance_scale": float(gen_cfg["guidance_scale"]),
+            "metrics": metrics,
+        }
+        metrics_path = _write_metrics_jsonl(runtime, row)
+        runtime.logger.log_text(f"[gen_eval] metrics_jsonl={metrics_path}")
+        runtime.logger.log_text(f"[gen_eval] metrics={_json_ready(metrics)}")
+        if not gen_cfg["keep_images"]:
+            shutil.rmtree(eval_dir, ignore_errors=True)
+    if runtime.is_distributed:
+        dist_utils.barrier()

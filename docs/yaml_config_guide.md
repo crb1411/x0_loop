@@ -21,6 +21,8 @@ train: {}
 logging: {}
 eval: {}
 sample: {}
+gen_eval: {}
+post_eval: {}
 ```
 
 ## `dataset`
@@ -650,6 +652,69 @@ Eval logs include:
 - `eval/loss_v`
 - `eval/summary`
 
+## `gen_eval`
+
+`gen_eval` runs expensive generation metrics during training. It generates a
+fixed number of images, computes metrics with `torch_fidelity`, then appends one
+row to a separate jsonl file:
+
+```text
+<run_dir>/gen_eval_metrics_<timestamp>.jsonl
+```
+
+Default CIFAR10 flow configs use:
+
+```yaml
+gen_eval:
+  enabled: true
+  every_steps: 5000
+  num_samples: 50000
+  batch_size: 64
+  steps: 50
+  sampler: heun
+  guidance_scale: 3.0
+  input2: cifar10-train
+  keep_images: false
+  metrics:
+    isc: true
+    fid: true
+    kid: true
+    ppl: true
+    prc: true
+    mind: true
+```
+
+Fields:
+
+- `enabled`: enable generation metrics during training.
+- `every_steps`: optimizer-step interval. Default for this eval path is `5000`.
+- `num_samples`: number of fake images used for metrics.
+- `batch_size`: generation batch size.
+- `steps`: sampling/integration steps.
+- `sampler`: sampling method. For flow, use `euler` or `heun`.
+- `guidance_scale`: classifier-free guidance scale.
+- `input2`: torch-fidelity real-data reference. CIFAR10 commonly uses
+  `cifar10-train`.
+- `fid_statistics_file`: optional precomputed FID statistics path. Use this
+  instead of `input2` when comparing against prepared reference stats.
+- `keep_images`: keep generated PNGs under
+  `<run_dir>/gen_eval/step_<step>/fake`. If false, remove them after metrics.
+- `cache`, `cache_root`, `verbose`: forwarded to `torch_fidelity`.
+- `metrics.isc`, `metrics.fid`, `metrics.kid`, `metrics.ppl`,
+  `metrics.prc`, `metrics.mind`: metric switches forwarded to
+  `torch_fidelity`.
+
+Notes:
+
+- This is different from `eval`, which measures validation losses.
+- This is different from `post_eval`, which runs once at the end and writes a
+  YAML manifest.
+- `torch_fidelity` must be installed in the training environment.
+- PPL support depends on the torch-fidelity input mode. It is enabled by
+  default here because the ablation request asks for it explicitly; if the
+  installed torch-fidelity build rejects directory input for PPL, disable
+  `metrics.ppl`.
+
 ## `sample`
 
 ```yaml
@@ -718,6 +783,54 @@ Default labels:
   labels cycle deterministically through class ids.
 - For CIFAR10, filenames include readable labels such as `_ybird`.
 
+## `post_eval`
+
+`post_eval` runs once after training finishes successfully. It is the x0loop
+equivalent of JiT's generation eval path: switch the model to eval mode, copy
+EMA weights when enabled, generate images, then write a YAML manifest with the
+exact sampling settings and artifact paths.
+
+```yaml
+post_eval:
+  enabled: true
+  steps: 50
+  num: 50
+  batch_size: 50
+  sampler: heun
+  guidance_scale: 3.0
+  save_images: true
+  save_grid: true
+```
+
+Fields:
+
+- `enabled`: run generation eval after the last training epoch.
+- `steps`: number of sampling/integration steps.
+- `num`: number of images to generate.
+- `batch_size`: generation batch size.
+- `sampler`: sampling method. For flow, use `euler` or `heun`; default is
+  `heun`.
+- `guidance_scale`: classifier-free guidance scale. The post-train default is
+  `3.0`.
+- `posterior_noise_scale`: optional diffusion posterior noise scale.
+- `save_images`: save individual PNG files.
+- `save_grid`: save one grid PNG.
+- `out_dir`: optional output directory. If omitted, uses
+  `<run_dir>/post_eval`.
+- `class_labels`: optional fixed labels.
+- `class_names`: optional label names used in filenames.
+
+Artifacts:
+
+- individual images: `<run_dir>/post_eval/images/sample_000000_yairplane_x0loop.png`
+- grid: `<run_dir>/post_eval/grid.png`
+- manifest: `<run_dir>/post_eval/post_eval.yaml`
+
+The manifest records the dataset/model/process/loss sections, sampling config,
+generated artifact paths, and a `metrics: {}` field reserved for future FID/IS
+results. Current x0loop post eval does not compute FID by default because the
+CIFAR10 reference statistics path is not yet part of the config.
+
 ## Common Examples
 
 ### Unweighted Flow `v` Loss With Heun Sampling
@@ -785,4 +898,3 @@ time_sampler:
 
 This samples more training points near the middle of the interval than uniform
 sampling.
-
