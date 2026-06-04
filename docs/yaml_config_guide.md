@@ -673,6 +673,8 @@ gen_eval:
   sampler: heun
   guidance_scale: 3.0
   input2: cifar10-train
+  datasets_root: /root/data/cifar10_data
+  datasets_download: false
   keep_images: false
   metrics:
     isc: true
@@ -699,6 +701,10 @@ Fields:
 - `guidance_scale`: classifier-free guidance scale.
 - `input2`: torch-fidelity real-data reference. CIFAR10 commonly uses
   `cifar10-train`.
+- `datasets_root`: root for torch-fidelity registered datasets. For CIFAR10,
+  point this to the same root as `dataset.root` to avoid re-downloading.
+- `datasets_download`: whether torch-fidelity may download registered datasets.
+  CIFAR10 ablation configs use `false`.
 - `fid_statistics_file`: optional precomputed FID statistics path. Use this
   instead of `input2` when comparing against prepared reference stats.
 - `keep_images`: keep generated PNGs under

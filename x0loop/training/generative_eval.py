@@ -30,6 +30,8 @@ def _cfg(cfg: dict) -> dict[str, Any]:
         "posterior_noise_scale": gen_cfg.get("posterior_noise_scale", sample_cfg.get("posterior_noise_scale", None)),
         "input2": gen_cfg.get("input2", None),
         "fid_statistics_file": gen_cfg.get("fid_statistics_file", None),
+        "datasets_root": gen_cfg.get("datasets_root", None),
+        "datasets_download": bool(gen_cfg.get("datasets_download", False)),
         "keep_images": bool(gen_cfg.get("keep_images", False)),
         "verbose": bool(gen_cfg.get("verbose", False)),
         "cache": bool(gen_cfg.get("cache", True)),
@@ -58,6 +60,13 @@ def _default_input2(cfg: dict) -> str | None:
     if dataset_name == "cifar10":
         return "cifar10-train"
     return None
+
+
+def _default_datasets_root(cfg: dict, input2: str | None) -> str | None:
+    if input2 not in {"cifar10-train", "cifar10-val"}:
+        return None
+    root = (cfg.get("dataset", {}) or {}).get("root", None)
+    return str(root) if root else None
 
 
 def _labels_for_indices(cfg: dict, indices: list[int], device: torch.device) -> torch.Tensor | None:
@@ -155,6 +164,10 @@ def _calculate_metrics(cfg: dict, gen_cfg: dict[str, Any], fake_dir: str, runtim
         metric_kwargs["fid_statistics_file"] = gen_cfg["fid_statistics_file"]
     if gen_cfg["cache_root"]:
         metric_kwargs["cache_root"] = gen_cfg["cache_root"]
+    datasets_root = gen_cfg["datasets_root"] or _default_datasets_root(cfg, input2)
+    if datasets_root is not None:
+        metric_kwargs["datasets_root"] = datasets_root
+    metric_kwargs["datasets_download"] = bool(gen_cfg["datasets_download"])
     if metric_kwargs["fid"] and input2 is None and not gen_cfg["fid_statistics_file"]:
         raise ValueError("gen_eval requires input2 or fid_statistics_file for FID unless dataset.name=cifar10.")
     return calculate_metrics(**metric_kwargs)
