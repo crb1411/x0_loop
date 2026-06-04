@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Usage:
-#   bash train_run/ablations/cifar10_flow_x0_vloss/run_jit_logitnormal_pmean_m0p8_sequential.sh [extra x0loop.train args...]
+#   bash train_run/ablations/cifar10_flow_x0_vloss/run_jit_logitnormal_pmean_0p8_sequential.sh [extra x0loop.train args...]
 #
-# Runs JiT logit-normal P_mean=-0.8/P_std=0.8 ablations one by one:
-#   train_jit_logitnormal_pmean_m0p8*.sh
+# Runs JiT logit-normal P_mean=0.8/P_std=0.8 ablations one by one:
+#   train_jit_logitnormal_pmean_0p8*.sh
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 collect_scripts() {
   local path
-  for path in "${DIR}"/train_jit_logitnormal_pmean_m0p8*.sh; do
+  for path in "${DIR}"/train_jit_logitnormal_pmean_0p8*.sh; do
     [ -e "${path}" ] || continue
     basename "${path}"
   done | sort
@@ -71,7 +71,7 @@ run_one() {
 mapfile -t SCRIPTS < <(collect_scripts)
 
 if [ "${#SCRIPTS[@]}" -eq 0 ]; then
-  echo "[ablation-suite] no matching scripts: ${DIR}/train_jit_logitnormal_pmean_m0p8*.sh" >&2
+  echo "[ablation-suite] no matching scripts: ${DIR}/train_jit_logitnormal_pmean_0p8*.sh" >&2
   exit 1
 fi
 
