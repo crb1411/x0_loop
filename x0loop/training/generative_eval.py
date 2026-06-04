@@ -37,7 +37,7 @@ def _cfg(cfg: dict) -> dict[str, Any]:
         "isc": bool(metric_cfg.get("isc", gen_cfg.get("isc", True))),
         "fid": bool(metric_cfg.get("fid", gen_cfg.get("fid", True))),
         "kid": bool(metric_cfg.get("kid", gen_cfg.get("kid", True))),
-        "ppl": bool(metric_cfg.get("ppl", gen_cfg.get("ppl", True))),
+        "ppl": bool(metric_cfg.get("ppl", gen_cfg.get("ppl", False))),
         "prc": bool(metric_cfg.get("prc", gen_cfg.get("prc", True))),
         "mind": bool(metric_cfg.get("mind", gen_cfg.get("mind", True))),
     }

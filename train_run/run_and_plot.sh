@@ -35,7 +35,13 @@ set -e
 
     if [ -n "${METRICS_FILE}" ] && [ -f "${METRICS_FILE}" ]; then
       echo "[x0loop] plotting metrics: ${METRICS_FILE}"
+      set +e
       python "${ROOT}/tools/plot_training_trends.py" "${METRICS_FILE}"
+      PLOT_STATUS=$?
+      set -e
+      if [ "${PLOT_STATUS}" -ne 0 ]; then
+        echo "[x0loop] plotting failed with status ${PLOT_STATUS}; training result is still status ${TRAIN_STATUS}"
+      fi
     else
       echo "[x0loop] no metrics jsonl found for timestamp ${X0LOOP_RUN_TIMESTAMP}; skip plotting"
     fi

@@ -61,6 +61,7 @@ COMMON_ARGS=(
   --set "gen_eval.batch_size=64"
   --set "gen_eval.sampler=heun"
   --set "gen_eval.guidance_scale=3.0"
+  --set "gen_eval.metrics.ppl=false"
 )
 
 parse_resume_arg() {

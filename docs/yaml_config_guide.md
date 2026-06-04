@@ -679,7 +679,7 @@ gen_eval:
     isc: true
     fid: true
     kid: true
-    ppl: true
+    ppl: false
     prc: true
     mind: true
 ```
@@ -710,10 +710,9 @@ Notes:
 - This is different from `post_eval`, which runs once at the end and writes a
   YAML manifest.
 - `torch_fidelity` must be installed in the training environment.
-- PPL support depends on the torch-fidelity input mode. It is enabled by
-  default here because the ablation request asks for it explicitly; if the
-  installed torch-fidelity build rejects directory input for PPL, disable
-  `metrics.ppl`.
+- PPL requires `torch_fidelity` to receive a `GenerativeModelBase` or wrapped
+  generator model. x0loop `gen_eval` currently passes a generated image
+  directory, so `metrics.ppl` defaults to `false`.
 
 ## `sample`
 

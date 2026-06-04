@@ -57,7 +57,7 @@ run_one() {
   local status
   status="unknown"
   if [ -n "${log_file}" ] && [ -f "${log_file}" ]; then
-    status="$(awk '/\\[x0loop\\] train exited with status / {s=$NF} END {print s}' "${log_file}")"
+    status="$(awk '/\[x0loop\] train exited with status / {s=$NF} END {print s}' "${log_file}")"
   fi
 
   if [ "${status}" != "0" ]; then

@@ -111,6 +111,6 @@ gen_eval:
     isc: true
     fid: true
     kid: true
-    ppl: true
+    ppl: false
     prc: true
     mind: true
