@@ -90,3 +90,4 @@ class ForwardBatch:
     fb: object
     out: torch.Tensor
     extra_metrics: dict | None = None
+    extra_tbin: dict | None = None

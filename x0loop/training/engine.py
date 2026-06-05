@@ -170,6 +170,9 @@ def maybe_apply_adversarial(
     weights = t_weight(fb.t, cfg)
     enabled_fraction = (weights > 0).float().mean()
     metrics: dict[str, torch.Tensor | float] = {"gan/g_weight": g_weight, "gan/enabled_t_fraction": enabled_fraction}
+    tbin_values: dict[str, torch.Tensor] = {
+        "advw": weights.detach(),
+    }
 
     if step % adv_cfg.update_every == 0:
         _set_requires_grad(discriminator, True)
@@ -206,14 +209,22 @@ def maybe_apply_adversarial(
             })
             for key, val in accuracy_metrics(real_logits.detach(), fake_logits.detach()).items():
                 metrics[f"gan/{key}"] = val
+            tbin_values.update({
+                "drl": per_real.detach(),
+                "dfl": per_fake.detach(),
+                "dacc": 0.5 * ((real_logits.detach() > 0).float() + (fake_logits.detach() < 0).float()),
+            })
 
     _set_requires_grad(discriminator, False)
     fake_g = process.x0_from_output(fb.xt, fb.t, fwd.out, aux={})
     fake_logits_g = discriminator(fake_g, fb.t, fwd.cond)
-    g_adv = _weighted_mean(generator_loss(fake_logits_g, loss=adv_cfg.loss), weights)
+    per_g_adv = generator_loss(fake_logits_g, loss=adv_cfg.loss)
+    g_adv = _weighted_mean(per_g_adv, weights)
     fwd.loss = fwd.loss + float(g_weight) * g_adv
     metrics["gan/g_adv_loss"] = g_adv.detach()
+    tbin_values["gadv"] = per_g_adv.detach()
     fwd.extra_metrics = {**(fwd.extra_metrics or {}), **metrics}
+    fwd.extra_tbin = {**(fwd.extra_tbin or {}), **tbin_values}
     _set_requires_grad(discriminator, True)
 
 
@@ -305,7 +316,7 @@ def train(cfg: dict) -> None:
                     grad_norm = step_optimizer(denoiser, optimizer, scaler, effective_clip)
                 if did_optimizer_step and ema is not None:
                     ema.update(denoiser)
-                tbin_stats.update(schedule=schedule, process=process, loss_fn=loss_fn, fb=fwd.fb, out=fwd.out)
+                tbin_stats.update(schedule=schedule, process=process, loss_fn=loss_fn, fb=fwd.fb, out=fwd.out, extra_values=fwd.extra_tbin)
                 iter_time = time.time() - iter_start
                 iter_start = time.time()
                 update_train_meters(meters, fwd, lr=float(optimizer.param_groups[0]["lr"]), iter_time=iter_time, world_size=runtime.world_size, grad_norm=grad_norm if did_optimizer_step else None)

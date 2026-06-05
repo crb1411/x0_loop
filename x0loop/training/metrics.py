@@ -70,6 +70,7 @@ def format_tbin_summary(
     avg_eps: torch.Tensor,
     avg_x0: torch.Tensor,
     avg_v: torch.Tensor,
+    extra_avgs: dict[str, torch.Tensor] | None = None,
 ) -> str:
     parts = []
     n = counts.numel()
@@ -86,6 +87,8 @@ def format_tbin_summary(
             f"lx0={float(avg_x0[i].item()):.4g}",
             f"lv={float(avg_v[i].item()):.4g}",
         ]
+        for key, values in (extra_avgs or {}).items():
+            fields.append(f"{key}={float(values[i].item()):.4g}")
         parts.append(f"[{left:.2f},{right:.2f}{close}: {', '.join(fields)}")
     return " | ".join(parts)
 
@@ -100,6 +103,23 @@ class TimeBinAccumulator:
         self.sum_eps = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
         self.sum_x0 = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
         self.sum_v = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
+        self.extra_counts: dict[str, torch.Tensor] = {}
+        self.extra_sums: dict[str, torch.Tensor] = {}
+
+    def update_extra(self, *, t: torch.Tensor, values: dict[str, torch.Tensor] | None) -> None:
+        if not values:
+            return
+        for key, value in values.items():
+            if value is None:
+                continue
+            if value.ndim > 1:
+                value = value.view(value.shape[0], -1).mean(dim=1)
+            c, s = compute_tbin_value_sum(t, value, num_bins=self.num_bins)
+            if key not in self.extra_counts:
+                self.extra_counts[key] = torch.zeros_like(self.counts)
+                self.extra_sums[key] = torch.zeros_like(self.sum_eps)
+            self.extra_counts[key] += c
+            self.extra_sums[key] += s
 
     def update(
         self,
@@ -109,6 +129,7 @@ class TimeBinAccumulator:
         loss_fn: CompositeLoss,
         fb: ForwardBatch,
         out: torch.Tensor,
+        extra_values: dict[str, torch.Tensor] | None = None,
     ) -> None:
         t = fb.t.detach()
         out_d = out.detach()
@@ -147,6 +168,7 @@ class TimeBinAccumulator:
         self.sum_eps += sl_eps
         self.sum_x0 += sl_x0
         self.sum_v += sl_v
+        self.update_extra(t=t, values=extra_values)
 
     def summary(self, *, is_distributed: bool) -> str:
         rc = self.counts.clone()
@@ -155,17 +177,29 @@ class TimeBinAccumulator:
         rse = self.sum_eps.clone()
         rsxl = self.sum_x0.clone()
         rsvl = self.sum_v.clone()
+        extra_counts = {k: v.clone() for k, v in self.extra_counts.items()}
+        extra_sums = {k: v.clone() for k, v in self.extra_sums.items()}
         if is_distributed and dist.is_available() and dist.is_initialized():
             for t in (rc, rsa, rsw, rse, rsxl, rsvl):
                 dist.all_reduce(t, op=dist.ReduceOp.SUM)
+            for key in extra_counts:
+                dist.all_reduce(extra_counts[key], op=dist.ReduceOp.SUM)
+                dist.all_reduce(extra_sums[key], op=dist.ReduceOp.SUM)
 
         denom = rc.clamp_min(1.0)
+        extra_avgs = {
+            key: extra_sums[key] / extra_counts[key].clamp_min(1.0)
+            for key in extra_sums
+        }
         return format_tbin_summary(
             self.edges, rc,
             rsa / denom, rsw / denom,
             rse / denom, rsxl / denom, rsvl / denom,
+            extra_avgs,
         )
 
     def reset(self) -> None:
         for t in (self.counts, self.sum_alpha, self.sum_weight, self.sum_eps, self.sum_x0, self.sum_v):
+            t.zero_()
+        for t in (*self.extra_counts.values(), *self.extra_sums.values()):
             t.zero_()
