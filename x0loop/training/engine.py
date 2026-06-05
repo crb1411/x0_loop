@@ -9,12 +9,13 @@ from torch.utils.data import DataLoader
 from x0loop.aug.base import BaseAugment
 from x0loop.core.process_base import BaseProcess, ForwardBatch as ProcessForwardBatch
 from x0loop.core.time_sampling import build_time_sampler
+from x0loop.losses.adversarial import accuracy_metrics, adversarial_weight, build_adversarial_config, discriminator_loss, generator_loss, r1_penalty, t_weight
 from x0loop.losses.atomic import regress
 from x0loop.losses.spec import build_loss
 from x0loop.models.denoiser import Denoiser
 from x0loop.training.context import ForwardBatch as TrainForwardBatch
 from x0loop.training.context import LoopConfig, ModelContext, ResumeState, RuntimeContext
-from x0loop.training.factories import build_augment, build_data_context, build_model_context, build_process, build_schedule, init_runtime, load_resume_state
+from x0loop.training.factories import build_augment, build_data_context, build_discriminator, build_model_context, build_process, build_schedule, init_runtime, load_resume_state
 from x0loop.training.metrics import TimeBinAccumulator
 from x0loop.training.optimization import amp_dtype_for_precision, build_step_lr_schedule, maybe_make_scaler
 from x0loop.training.evaluation import run_eval_if_due
@@ -127,9 +128,93 @@ def update_train_meters(
     meters.update(loss=float(fwd.loss.detach().item()), lr=float(lr), iter_s=float(iter_time), img_s=fwd.batch_size * world_size / max(iter_time, 1e-6))
     for target, val in fwd.loss_by_target.items():
         meters.update(**{f"loss_{target}": float(val.detach().item())})
+    for key, val in (fwd.extra_metrics or {}).items():
+        if isinstance(val, torch.Tensor):
+            val = float(val.detach().float().mean().item())
+        meters.update(**{key: float(val)})
     if grad_norm is not None:
         grad_norm_value = float(grad_norm.detach().item()) if isinstance(grad_norm, torch.Tensor) else float(grad_norm)
         meters.update(grad_norm=grad_norm_value)
+
+
+def _set_requires_grad(module: torch.nn.Module, enabled: bool) -> None:
+    for p in module.parameters():
+        p.requires_grad_(enabled)
+
+
+def _weighted_mean(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    weights = weights.to(device=values.device, dtype=values.dtype)
+    return (values * weights).sum() / weights.sum().clamp_min(1e-8)
+
+
+def maybe_apply_adversarial(
+    *,
+    cfg: dict,
+    fwd: TrainForwardBatch,
+    process: BaseProcess,
+    discriminator: torch.nn.Module | None,
+    d_optimizer: torch.optim.Optimizer | None,
+    scaler: torch.amp.GradScaler | None,
+    step: int,
+) -> None:
+    adv_cfg = build_adversarial_config(cfg)
+    g_weight = adversarial_weight(adv_cfg, step)
+    if discriminator is None or d_optimizer is None or g_weight <= 0.0:
+        return
+    if adv_cfg.fake_space != "x0_hat":
+        raise ValueError(f"Only adversarial.fake_space=x0_hat is supported, got {adv_cfg.fake_space!r}")
+    if adv_cfg.update_every <= 0 or adv_cfg.d_steps <= 0:
+        raise ValueError("adversarial.update_every and adversarial.d_steps must be > 0")
+
+    fb = fwd.fb
+    weights = t_weight(fb.t, cfg)
+    enabled_fraction = (weights > 0).float().mean()
+    metrics: dict[str, torch.Tensor | float] = {"gan/g_weight": g_weight, "gan/enabled_t_fraction": enabled_fraction}
+
+    if step % adv_cfg.update_every == 0:
+        _set_requires_grad(discriminator, True)
+        for _ in range(adv_cfg.d_steps):
+            d_optimizer.zero_grad(set_to_none=True)
+            with torch.no_grad():
+                fake_d = process.x0_from_output(fb.xt, fb.t, fwd.out.detach(), aux={})
+                if adv_cfg.clamp_fake_for_d:
+                    fake_d = fake_d.clamp(-1.0, 1.0)
+            use_r1 = adv_cfg.r1_gamma > 0.0 and adv_cfg.r1_interval > 0 and (step % adv_cfg.r1_interval == 0)
+            real_images = fb.x0.detach().requires_grad_(use_r1)
+            real_logits = discriminator(real_images, fb.t, fwd.cond)
+            fake_logits = discriminator(fake_d, fb.t, fwd.cond)
+            per_d, per_real, per_fake = discriminator_loss(real_logits, fake_logits, loss=adv_cfg.loss)
+            d_loss = _weighted_mean(per_d, weights)
+            r1 = torch.zeros((), device=d_loss.device, dtype=d_loss.dtype)
+            if use_r1:
+                r1 = _weighted_mean(r1_penalty(real_logits, real_images), weights)
+                d_loss = d_loss + 0.5 * float(adv_cfg.r1_gamma) * float(adv_cfg.r1_interval) * r1
+            if scaler is not None:
+                scaler.scale(d_loss).backward()
+                scaler.step(d_optimizer)
+                scaler.update()
+            else:
+                d_loss.backward()
+                d_optimizer.step()
+        with torch.no_grad():
+            metrics.update({
+                "gan/d_loss": d_loss.detach(),
+                "gan/d_real_loss": _weighted_mean(per_real.detach(), weights),
+                "gan/d_fake_loss": _weighted_mean(per_fake.detach(), weights),
+                "gan/r1_penalty": r1.detach(),
+                "gan/d_lr": float(d_optimizer.param_groups[0]["lr"]),
+            })
+            for key, val in accuracy_metrics(real_logits.detach(), fake_logits.detach()).items():
+                metrics[f"gan/{key}"] = val
+
+    _set_requires_grad(discriminator, False)
+    fake_g = process.x0_from_output(fb.xt, fb.t, fwd.out, aux={})
+    fake_logits_g = discriminator(fake_g, fb.t, fwd.cond)
+    g_adv = _weighted_mean(generator_loss(fake_logits_g, loss=adv_cfg.loss), weights)
+    fwd.loss = fwd.loss + float(g_weight) * g_adv
+    metrics["gan/g_adv_loss"] = g_adv.detach()
+    fwd.extra_metrics = {**(fwd.extra_metrics or {}), **metrics}
+    _set_requires_grad(discriminator, True)
 
 
 def log_training_step(*, runtime: RuntimeContext, loop_cfg: LoopConfig, resume: ResumeState, meters: MetricLogger, tbin_stats: TimeBinAccumulator, epoch: int, micro_step: int, current_accum_steps: int) -> None:
@@ -158,6 +243,7 @@ def train(cfg: dict) -> None:
     time_sampler = build_time_sampler(cfg, schedule)
     process = build_process(cfg, schedule)
     loss_fn = build_loss(cfg["loss"], schedule)
+    discriminator = build_discriminator(cfg, runtime)
     denoiser = Denoiser(
         model_ctx.model,
         process=process,
@@ -172,10 +258,21 @@ def train(cfg: dict) -> None:
         runtime.logger.log_text(f"[loss] {atom_descs}")
         runtime.logger.log_text(f"[time_sampler] {cfg.get('time_sampler', {'name': 'legacy'})}")
         runtime.logger.log_text(f"[time_condition_jitter] {cfg.get('time_condition_jitter', {'enabled': False})}")
+        runtime.logger.log_text(f"[adversarial] {cfg.get('adversarial', {'enabled': False})}")
     optimizer = torch.optim.AdamW(denoiser.parameters(), lr=float(cfg["train"].get("lr", 1e-4)), betas=(0.9, 0.95), weight_decay=float(cfg["train"].get("weight_decay", 0.05)))
+    d_optimizer = None
+    if discriminator is not None:
+        dc = cfg.get("discriminator", {}) or {}
+        betas = dc.get("betas", [0.0, 0.99])
+        d_optimizer = torch.optim.AdamW(
+            discriminator.parameters(),
+            lr=float(dc.get("lr", 2e-4)),
+            betas=(float(betas[0]), float(betas[1])),
+            weight_decay=float(dc.get("weight_decay", 0.0)),
+        )
     scaler = maybe_make_scaler(precision=model_ctx.precision, use_fsdp=model_ctx.use_fsdp)
     ema = EMA(model=denoiser, decay=float(cfg["train"].get("ema_decay", 0.9999))) if bool(cfg["train"].get("use_ema", True)) else None
-    resume = load_resume_state(cfg, denoiser=denoiser, optimizer=optimizer, scaler=scaler, ema=ema, runtime=runtime)
+    resume = load_resume_state(cfg, denoiser=denoiser, optimizer=optimizer, scaler=scaler, ema=ema, discriminator=discriminator, d_optimizer=d_optimizer, runtime=runtime)
     meters = MetricLogger(window_size=int(cfg["logging"].get("window_size", 20)))
     loop_cfg = build_loop_config(cfg, data_ctx.loader, runtime.distributed_cfg)
     if runtime.is_main:
@@ -199,6 +296,7 @@ def train(cfg: dict) -> None:
                         pg["lr"] = step_lr
                     optimizer.zero_grad(set_to_none=True)
                 fwd = compute_forward_batch(cfg=cfg, runtime=runtime, model_ctx=model_ctx, denoiser=denoiser, process=process, augment=augment, augment_mode=augment_mode, x0=x0, y=y, use_label_cond=use_label_cond)
+                maybe_apply_adversarial(cfg=cfg, fwd=fwd, process=process, discriminator=discriminator, d_optimizer=d_optimizer, scaler=scaler, step=resume.global_step)
                 backward_loss(fwd.loss, current_accum_steps=current_accum_steps, scaler=scaler)
                 did_optimizer_step = should_step_optimizer(micro_step, loop_cfg)
                 grad_norm = None
@@ -218,7 +316,12 @@ def train(cfg: dict) -> None:
                 log_training_step(runtime=runtime, loop_cfg=loop_cfg, resume=resume, meters=meters, tbin_stats=tbin_stats, epoch=epoch, micro_step=micro_step, current_accum_steps=current_accum_steps)
                 run_eval_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, schedule=schedule, time_sampler=time_sampler, process=process, loss_fn=loss_fn, data_ctx=data_ctx, resume=resume, use_label_cond=use_label_cond)
                 run_sampling_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, loop_cfg=loop_cfg, resume=resume, cond=fwd.cond, use_label_cond=use_label_cond)
-                save_checkpoint_if_due(cfg=cfg, denoiser=denoiser, runtime=runtime, optimizer=optimizer, scaler=scaler, ema=ema, loop_cfg=loop_cfg, resume=resume, epoch=epoch)
+                extra_state = None
+                if discriminator is not None:
+                    extra_state = {"discriminator": discriminator.state_dict()}
+                    if d_optimizer is not None:
+                        extra_state["d_optimizer"] = d_optimizer.state_dict()
+                save_checkpoint_if_due(cfg=cfg, denoiser=denoiser, runtime=runtime, optimizer=optimizer, scaler=scaler, ema=ema, extra_state=extra_state, loop_cfg=loop_cfg, resume=resume, epoch=epoch)
                 run_generative_eval_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, resume=resume)
         run_final_generative_eval(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, resume=resume)
     finally:

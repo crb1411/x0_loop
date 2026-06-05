@@ -87,6 +87,7 @@ def save_checkpoint(
     step: int,
     epoch: int,
     config: dict | None = None,
+    extra_state: dict | None = None,
     is_main: bool = True,
     mode: str = "full",
 ):
@@ -110,6 +111,8 @@ def save_checkpoint(
             ckpt["scaler"] = scaler.state_dict()
         if ema is not None:
             ckpt["ema"] = ema.state_dict()
+        if extra_state:
+            ckpt.update(extra_state)
         shard_path = path.replace(".pt", f"_rank{rank:04d}.pt")
         torch.save(ckpt, shard_path)
         return
@@ -134,6 +137,8 @@ def save_checkpoint(
         ckpt["scaler"] = scaler.state_dict()
     if ema is not None:
         ckpt["ema"] = ema.state_dict()
+    if extra_state:
+        ckpt.update(extra_state)
     torch.save(ckpt, path)
 
 

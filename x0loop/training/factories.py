@@ -17,6 +17,7 @@ from x0loop.core.process_base import BaseProcess
 from x0loop.core.schedules import TimeSchedule
 from x0loop.models.factory import build_model
 from x0loop.models.denoiser import Denoiser
+from x0loop.models.discriminator import build_x0_discriminator
 from x0loop.processes.diffusion_process import DiffusionProcess
 from x0loop.processes.flow_process import FlowProcess
 from x0loop.training.context import DataContext, ModelContext, ResumeState, RuntimeContext
@@ -168,6 +169,21 @@ def build_model_context(cfg: dict, runtime: RuntimeContext) -> ModelContext:
     return ModelContext(model=model, model_cfg=model_cfg, use_fsdp=use_fsdp, fsdp_mode=fsdp_mode, precision=precision)
 
 
+def build_discriminator(cfg: dict, runtime: RuntimeContext) -> torch.nn.Module | None:
+    ac = cfg.get("adversarial", {}) or {}
+    if not bool(ac.get("enabled", False)):
+        return None
+    name = str((cfg.get("discriminator", {}) or {}).get("name", "x0_resnet")).lower()
+    if name not in {"x0_resnet", "resnet", "small_cnn"}:
+        raise ValueError(f"Unknown discriminator.name={name!r}")
+    discriminator = build_x0_discriminator(cfg).to(runtime.device)
+    if runtime.is_main:
+        total = sum(p.numel() for p in discriminator.parameters())
+        trainable = sum(p.numel() for p in discriminator.parameters() if p.requires_grad)
+        runtime.logger.log_text(f"[discriminator] name={name}, params: total={total:,}, trainable={trainable:,}")
+    return discriminator
+
+
 def load_resume_state(
     cfg: dict,
     *,
@@ -175,12 +191,18 @@ def load_resume_state(
     optimizer: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler | None,
     ema: EMA | None,
+    discriminator: torch.nn.Module | None = None,
+    d_optimizer: torch.optim.Optimizer | None = None,
     runtime: RuntimeContext,
 ) -> ResumeState:
     resume_path = cfg["train"].get("resume")
     ckpt_mode = runtime.distributed_cfg.get("checkpoint", {}).get("mode", "full")
     if resume_path:
         ckpt = load_checkpoint(resume_path, model=denoiser, optimizer=optimizer, scaler=scaler, ema=ema, map_location="cpu", mode=ckpt_mode)
+        if discriminator is not None and "discriminator" in ckpt:
+            discriminator.load_state_dict(ckpt["discriminator"])
+        if d_optimizer is not None and "d_optimizer" in ckpt:
+            d_optimizer.load_state_dict(ckpt["d_optimizer"])
         start_epoch = int(ckpt.get("epoch", 0))
         global_step = int(ckpt.get("step", 0))
         if runtime.is_main:

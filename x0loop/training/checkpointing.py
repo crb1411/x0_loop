@@ -19,6 +19,7 @@ def save_checkpoint_if_due(
     optimizer: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler | None,
     ema: EMA | None,
+    extra_state: dict | None = None,
     loop_cfg: LoopConfig,
     resume: ResumeState,
     epoch: int,
@@ -36,6 +37,7 @@ def save_checkpoint_if_due(
         step=resume.global_step,
         epoch=epoch,
         config=cfg,
+        extra_state=extra_state,
         is_main=runtime.is_main,
         mode=resume.ckpt_mode,
     )
