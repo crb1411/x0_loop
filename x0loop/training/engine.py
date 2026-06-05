@@ -147,6 +147,10 @@ def _weighted_mean(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     return (values * weights).sum() / weights.sum().clamp_min(1e-8)
 
 
+def _discriminator_input_dtype(discriminator: torch.nn.Module) -> torch.dtype:
+    return next(discriminator.parameters()).dtype
+
+
 def maybe_apply_adversarial(
     *,
     cfg: dict,
@@ -167,6 +171,7 @@ def maybe_apply_adversarial(
         raise ValueError("adversarial.update_every and adversarial.d_steps must be > 0")
 
     fb = fwd.fb
+    disc_dtype = _discriminator_input_dtype(discriminator)
     weights = t_weight(fb.t, cfg)
     enabled_fraction = (weights > 0).float().mean()
     metrics: dict[str, torch.Tensor | float] = {"gan/g_weight": g_weight, "gan/enabled_t_fraction": enabled_fraction}
@@ -182,8 +187,9 @@ def maybe_apply_adversarial(
                 fake_d = process.x0_from_output(fb.xt, fb.t, fwd.out.detach(), aux={})
                 if adv_cfg.clamp_fake_for_d:
                     fake_d = fake_d.clamp(-1.0, 1.0)
+                fake_d = fake_d.to(dtype=disc_dtype)
             use_r1 = adv_cfg.r1_gamma > 0.0 and adv_cfg.r1_interval > 0 and (step % adv_cfg.r1_interval == 0)
-            real_images = fb.x0.detach().requires_grad_(use_r1)
+            real_images = fb.x0.detach().to(dtype=disc_dtype).requires_grad_(use_r1)
             real_logits = discriminator(real_images, fb.t, fwd.cond)
             fake_logits = discriminator(fake_d, fb.t, fwd.cond)
             per_d, per_real, per_fake = discriminator_loss(real_logits, fake_logits, loss=adv_cfg.loss)
@@ -216,7 +222,7 @@ def maybe_apply_adversarial(
             })
 
     _set_requires_grad(discriminator, False)
-    fake_g = process.x0_from_output(fb.xt, fb.t, fwd.out, aux={})
+    fake_g = process.x0_from_output(fb.xt, fb.t, fwd.out, aux={}).to(dtype=disc_dtype)
     fake_logits_g = discriminator(fake_g, fb.t, fwd.cond)
     per_g_adv = generator_loss(fake_logits_g, loss=adv_cfg.loss)
     g_adv = _weighted_mean(per_g_adv, weights)
