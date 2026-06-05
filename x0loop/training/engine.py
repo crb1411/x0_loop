@@ -158,13 +158,20 @@ def train(cfg: dict) -> None:
     time_sampler = build_time_sampler(cfg, schedule)
     process = build_process(cfg, schedule)
     loss_fn = build_loss(cfg["loss"], schedule)
-    denoiser = Denoiser(model_ctx.model, process=process, loss_fn=loss_fn, time_sampler=time_sampler)
+    denoiser = Denoiser(
+        model_ctx.model,
+        process=process,
+        loss_fn=loss_fn,
+        time_sampler=time_sampler,
+        time_condition_jitter=cfg.get("time_condition_jitter", None),
+    )
     augment, augment_mode = build_augment(cfg)
     if runtime.is_main:
         atom_descs = ", ".join(repr(atom) for atom in loss_fn.atoms)
         runtime.logger.log_text(f"[process] name={cfg.get('process', {}).get('name')} output_target={process.output_target} schedule={schedule.mode}")
         runtime.logger.log_text(f"[loss] {atom_descs}")
         runtime.logger.log_text(f"[time_sampler] {cfg.get('time_sampler', {'name': 'legacy'})}")
+        runtime.logger.log_text(f"[time_condition_jitter] {cfg.get('time_condition_jitter', {'enabled': False})}")
     optimizer = torch.optim.AdamW(denoiser.parameters(), lr=float(cfg["train"].get("lr", 1e-4)), betas=(0.9, 0.95), weight_decay=float(cfg["train"].get("weight_decay", 0.05)))
     scaler = maybe_make_scaler(precision=model_ctx.precision, use_fsdp=model_ctx.use_fsdp)
     ema = EMA(model=denoiser, decay=float(cfg["train"].get("ema_decay", 0.9999))) if bool(cfg["train"].get("use_ema", True)) else None
