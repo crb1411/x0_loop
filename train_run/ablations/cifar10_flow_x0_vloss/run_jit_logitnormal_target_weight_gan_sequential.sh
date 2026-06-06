@@ -8,11 +8,11 @@ set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 EXPERIMENTS=(
-  "gan_late_w0p01_piecewise 0.01 piecewise default"
-  "gan_late_w0p02_piecewise 0.02 piecewise default"
-  "gan_late_w0p05_piecewise 0.05 piecewise default"
+  "gan_late_nohigh_w0p01_piecewise 0.01 piecewise nohigh"
+  "gan_late_nohigh_w0p02_piecewise 0.02 piecewise nohigh"
+  "gan_late_nohigh_w0p05_piecewise 0.05 piecewise nohigh"
   "gan_late_w0p02_lowt 0.02 piecewise lowt"
-  "gan_late_w0p02_tjitter_std0p02 0.02 piecewise tjitter_std0p02"
+  "gan_late_nohigh_w0p02_tjitter_std0p02 0.02 piecewise nohigh_tjitter_std0p02"
 )
 
 extract_field() {
@@ -24,15 +24,17 @@ extract_field() {
 append_t_weight_sets() {
   local mode="$1"
   case "${mode}" in
-    default)
+    nohigh)
       EXTRA_SETS+=(--set "adversarial.t_weight.name=piecewise")
+      EXTRA_SETS+=(--set "adversarial.t_weight.bins=[[0.00,0.05,0.25],[0.05,0.35,1.0],[0.35,0.65,0.5],[0.65,1.00,0.0]]")
       ;;
     lowt)
       EXTRA_SETS+=(--set "adversarial.t_weight.name=piecewise")
       EXTRA_SETS+=(--set "adversarial.t_weight.bins=[[0.00,0.05,0.0],[0.05,0.35,1.0],[0.35,1.00,0.0]]")
       ;;
-    tjitter_std0p02)
+    nohigh_tjitter_std0p02)
       EXTRA_SETS+=(--set "adversarial.t_weight.name=piecewise")
+      EXTRA_SETS+=(--set "adversarial.t_weight.bins=[[0.00,0.05,0.25],[0.05,0.35,1.0],[0.35,0.65,0.5],[0.65,1.00,0.0]]")
       EXTRA_SETS+=(--set "time_condition_jitter.enabled=true")
       EXTRA_SETS+=(--set "time_condition_jitter.mean=0.0")
       EXTRA_SETS+=(--set "time_condition_jitter.std=0.02")
