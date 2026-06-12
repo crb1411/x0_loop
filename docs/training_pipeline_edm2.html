@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EDM2 训练 & FID 推理全景图</title>
+<style>
+  :root{
+    --bg:#ffffff; --panel:#f6f8fa; --panel2:#eef1f5; --border:#d0d7de;
+    --text:#1f2328; --muted:#59636e; --accent:#0969da; --accent2:#1a7f37;
+    --warn:#bc4c00; --pink:#cf222e; --purple:#8250df; --yellow:#9a6700;
+    --mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    line-height:1.65;font-size:15px}
+  a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+  .layout{display:flex;max-width:1400px;margin:0 auto}
+  nav{position:sticky;top:0;align-self:flex-start;height:100vh;overflow:auto;
+    width:260px;flex:0 0 260px;padding:24px 16px;border-right:1px solid var(--border);font-size:13.5px}
+  nav h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:18px 0 8px}
+  nav a{display:block;color:var(--muted);padding:3px 8px;border-radius:6px}
+  nav a:hover{background:var(--panel2);color:var(--text);text-decoration:none}
+  main{flex:1;min-width:0;padding:32px 40px 120px}
+  h1{font-size:30px;margin:0 0 4px;background:linear-gradient(90deg,#8250df,#0969da);
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:var(--muted);margin-bottom:28px}
+  h2.sec{font-size:23px;margin:48px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  h3{font-size:18px;margin:28px 0 10px;color:var(--accent2)}
+  h4{font-size:15.5px;margin:18px 0 8px;color:var(--yellow)}
+  p{margin:10px 0}
+  code{font-family:var(--mono);background:var(--panel2);padding:1px 6px;border-radius:5px;font-size:13px;color:#1f2328}
+  pre{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;
+    overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.55}
+  pre .k{color:var(--pink)} pre .c{color:var(--muted)} pre .s{color:var(--accent2)} pre .n{color:var(--yellow)}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--text);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.015)}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px 22px;margin:16px 0}
+  .grid{display:grid;gap:14px}
+  .grid2{grid-template-columns:1fr 1fr}
+  .grid3{grid-template-columns:1fr 1fr 1fr}
+  @media(max-width:900px){.grid2,.grid3{grid-template-columns:1fr}nav{display:none}}
+  .tag{display:inline-block;font-family:var(--mono);font-size:11.5px;padding:1px 8px;border-radius:20px;
+    border:1px solid var(--border);color:var(--muted);margin:0 4px 4px 0}
+  .tag.b{color:var(--accent);border-color:#aacdf5}
+  .tag.g{color:var(--accent2);border-color:#ace0b4}
+  .tag.o{color:var(--warn);border-color:#f0c3a0}
+  .tag.p{color:var(--purple);border-color:#d9c2f5}
+  .note{border-left:3px solid var(--accent);background:rgba(88,166,255,.06);padding:10px 16px;border-radius:0 8px 8px 0;margin:14px 0}
+  .warnbox{border-left:3px solid var(--warn);background:rgba(240,136,62,.07);padding:10px 16px;border-radius:0 8px 8px 0;margin:14px 0}
+  .ok{border-left:3px solid var(--accent2);background:rgba(126,231,135,.06);padding:10px 16px;border-radius:0 8px 8px 0;margin:14px 0}
+  .flow{display:flex;flex-direction:column;gap:0;align-items:center;margin:20px 0}
+  .fbox{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:12px 18px;
+    min-width:360px;text-align:center;position:relative}
+  .fbox .t{font-weight:600;color:var(--accent)}
+  .fbox .d{font-size:12.5px;color:var(--muted);font-family:var(--mono)}
+  .fbox.g{border-color:#27512f} .fbox.g .t{color:var(--accent2)}
+  .fbox.o{border-color:#5c3a1e} .fbox.o .t{color:var(--warn)}
+  .fbox.p{border-color:#46336b} .fbox.p .t{color:var(--purple)}
+  .arr{width:2px;height:22px;background:var(--border);position:relative}
+  .arr:after{content:"▼";position:absolute;bottom:-4px;left:-5px;color:var(--border);font-size:11px}
+  .row{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin:8px 0}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:11px;height:11px;border-radius:3px;display:inline-block}
+  .formula{font-family:var(--mono);background:var(--panel);border:1px solid var(--border);
+    border-radius:8px;padding:10px 16px;margin:10px 0;color:#1f2328;overflow:auto}
+  ul{margin:8px 0;padding-left:22px} li{margin:4px 0}
+  hr{border:none;border-top:1px solid var(--border);margin:30px 0}
+  .small{font-size:12.5px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav>
+  <h2>导航</h2>
+  <a href="#overview">0 · 全景概览</a>
+  <a href="#vs">1 · vs 原版 EDM</a>
+  <a href="#data">2 · 数据 & VAE latent</a>
+  <a href="#arch">3 · 网络 & 幅度保持</a>
+  <a href="#precond">4 · Preconditioning</a>
+  <a href="#loss">5 · EDM2Loss + 不确定性</a>
+  <a href="#tsample">6 · σ 噪声采样</a>
+  <a href="#loop">7 · 训练主循环</a>
+  <a href="#lr">8 · LR / Adam / 无裁剪</a>
+  <a href="#ema">9 · Post-hoc EMA</a>
+  <a href="#presets">10 · 配置 presets</a>
+  <a href="#sampler">11 · 采样器 (Heun)</a>
+  <a href="#guidance">12 · Guidance / Autoguidance</a>
+  <a href="#fid">13 · FID 推理全流程 ★</a>
+  <a href="#metrics">14 · FID / FD_DINOv2 计算</a>
+  <a href="#results">15 · 结果 & 对照 x0_loop</a>
+</nav>
+<main>
+  <h1>EDM2 训练 &amp; FID 推理全景图</h1>
+  <div class="sub">NVlabs/edm2 · 《Analyzing and Improving the Training Dynamics of Diffusion Models》(CVPR 2024) + Autoguidance (NeurIPS 2024) — 全部训练细节 + 计算 FID 的推理方式</div>
+
+  <div class="card">
+    <strong>这是什么</strong> · 逐文件梳理 <code>/data/seek/aigc/edm2</code> 的训练与评测管线：
+    <span class="tag p">VAE latent 扩散</span><span class="tag b">σ-lognormal 噪声</span>
+    <span class="tag g">EDM preconditioning</span><span class="tag g">不确定性加权 loss</span>
+    <span class="tag">幅度保持网络 (MP)</span><span class="tag">强制权重归一化</span>
+    <span class="tag p">post-hoc EMA</span><span class="tag o">Heun 2 阶确定性采样</span>
+    <span class="tag o">classifier-free / autoguidance</span>
+    <span class="tag">FID(InceptionV3) + FD_DINOv2</span>
+    源码主线：<code>train_edm2.py → training/training_loop.py → networks_edm2.py</code>；评测 <code>generate_images.py + calculate_metrics.py</code>。
+  </div>
+
+  <!-- 0 OVERVIEW -->
+  <h2 class="sec" id="overview">0 · 全景概览</h2>
+  <p>EDM2 是 <b>ImageNet-512 / ImageNet-64 类条件 latent 扩散</b>。img512 在 SD-VAE 的 8 通道 64×64 latent 上训练；
+  img64 直接在 RGB 上训练。整条链路按 <b>训练图像数 nimg</b>（而非 epoch/step）计量。</p>
+
+  <div class="flow">
+    <div class="fbox p"><div class="t">数据 (img, label) </div><div class="d">ImageFolderDataset · 类条件 one-hot label_dim</div></div>
+    <div class="arr"></div>
+    <div class="fbox p"><div class="t">① VAE 编码 encode_latents</div><div class="d">SD-VAE-ft-mse → 8ch latent，按 raw_mean/std 归一到 σ_data≈0.5</div></div>
+    <div class="arr"></div>
+    <div class="fbox b"><div class="t">② 采样噪声 σ</div><div class="d">ln σ ~ N(P_mean, P_std) → σ = exp(·)，逐样本</div></div>
+    <div class="arr"></div>
+    <div class="fbox"><div class="t">③ 加噪</div><div class="d">x̃ = x + σ·n,  n~N(0,I)</div></div>
+    <div class="arr"></div>
+    <div class="fbox g"><div class="t">④ Precond 去噪</div><div class="d">D(x̃,σ)=c_skip·x̃ + c_out·F(c_in·x̃, c_noise, label) · 同时出 logvar</div></div>
+    <div class="arr"></div>
+    <div class="fbox g"><div class="t">⑤ 不确定性加权 loss</div><div class="d">L = (w(σ)/e^{logvar})·‖D−x‖² + logvar</div></div>
+    <div class="arr"></div>
+    <div class="fbox"><div class="t">⑥ Adam step</div><div class="d">无梯度裁剪 · nan_to_num · inv-sqrt LR · fp16 · batch 2048</div></div>
+    <div class="arr"></div>
+    <div class="fbox p"><div class="t">⑦ Post-hoc Power EMA</div><div class="d">同时跟踪 2 条 EMA 曲线 (std=0.05,0.10)，训练后可重建任意 EMA 长度</div></div>
+    <div class="arr"></div>
+    <div class="row">
+      <div class="fbox o" style="min-width:260px"><div class="t">⑧ 采样 generate_images</div><div class="d">EDM Heun 32 步 · σ∈[0.002,80] · ρ=7 · 50000 张</div></div>
+      <div class="fbox g" style="min-width:260px"><div class="t">⑨ calculate_metrics</div><div class="d">InceptionV3→FID · DINOv2→FD_DINOv2 · 对 dataset-ref 统计</div></div>
+    </div>
+  </div>
+  <div class="legend">
+    <span><span class="dot" style="background:var(--purple)"></span>VAE / EMA</span>
+    <span><span class="dot" style="background:var(--accent)"></span>噪声 / 优化</span>
+    <span><span class="dot" style="background:var(--accent2)"></span>网络 / 评测</span>
+    <span><span class="dot" style="background:var(--warn)"></span>采样 / guidance</span>
+  </div>
+
+  <!-- 1 VS EDM -->
+  <h2 class="sec" id="vs">1 · 与原版 EDM(Karras 2022)的关键区别</h2>
+  <p>EDM2 沿用 EDM 的 preconditioning + Heun 采样 + σ-lognormal，<b>新增的全是「训练动力学」层面的工程</b>，
+  目标是让各层激活/权重幅度在训练全程保持恒定。</p>
+  <table>
+    <tr><th>方面</th><th>EDM (2022)</th><th>EDM2 (2024)</th></tr>
+    <tr><td>数据空间</td><td>像素 (CIFAR/FFHQ 64)</td><td>VAE latent (ImageNet-512) / 像素 (img64)</td></tr>
+    <tr><td>网络</td><td>DDPM++/NCSN++,GroupNorm</td><td><b>幅度保持 UNet</b>：MPConv/mp_silu/mp_sum/mp_cat，无 GroupNorm</td></tr>
+    <tr><td>权重</td><td>普通</td><td><b>强制权重归一化</b>（每步把权重投回单位范数）+ 前向再归一</td></tr>
+    <tr><td>归一化</td><td>GroupNorm</td><td><b>pixel norm</b>（沿通道）+ 各 add 用幅度保持系数</td></tr>
+    <tr><td>可学习增益</td><td>—</td><td><code>out_gain / emb_gain</code> 初始化为 <b>0</b>，让网络从恒等启动</td></tr>
+    <tr><td>EMA</td><td>固定 halflife</td><td><b>post-hoc EMA</b>：训练后任意重建 EMA 长度</td></tr>
+    <tr><td>loss 权重</td><td>固定 λ(σ)</td><td>λ(σ) + <b>学习的不确定性 logvar</b> 自适应再平衡各 σ</td></tr>
+    <tr><td>guidance</td><td>无</td><td>classifier-free + <b>autoguidance</b>（用差版自己引导）</td></tr>
+  </table>
+
+  <!-- 2 DATA -->
+  <h2 class="sec" id="data">2 · 数据 &amp; VAE latent <span class="tag">training/encoders.py</span></h2>
+  <div class="grid grid2">
+    <div class="card"><h4>img512 → StabilityVAEEncoder</h4>
+      <ul>
+        <li>VAE：<code>stabilityai/sd-vae-ft-mse</code></li>
+        <li>raw latent → 归一：<code>z = z·scale + bias</code></li>
+        <li><code>scale = final_std/raw_std</code>，<code>bias = final_mean − raw_mean·scale</code></li>
+        <li>raw_mean=[5.81,3.25,0.12,−2.15]，raw_std=[4.17,4.62,3.71,3.28]</li>
+        <li>归一后 latent std ≈ <code>σ_data=0.5</code>，8 通道 64×64</li>
+      </ul></div>
+    <div class="card"><h4>img64 → StandardRGBEncoder</h4>
+      <ul>
+        <li>仅把像素缩放到 <code>[−1,+1]</code>（×2−1）</li>
+        <li>3 通道 64×64，直接像素扩散</li>
+        <li>采样后 <code>decode</code> 反向回 uint8 像素</li>
+      </ul></div>
+  </div>
+  <div class="note">类条件：label 是 one-hot，维度 <code>label_dim</code>。<code>--cond=True</code> 时数据集必须带标签。
+  EDM2 主结果是<b>类条件</b>模型，无条件版另有 <code>-uncond</code> 系列。</div>
+
+  <!-- 3 ARCH -->
+  <h2 class="sec" id="arch">3 · 幅度保持网络 <span class="tag g">UNet / Block / MPConv</span></h2>
+  <p>核心思想：每个算子都不改变激活的期望幅度，从而无需 GroupNorm 即可稳定训练。</p>
+  <table>
+    <tr><th>组件</th><th>作用 (论文式)</th></tr>
+    <tr><td><code>MPConv</code></td><td>训练时 <b>强制</b>把权重 in-place 投回单位范数(式66)；前向再 normalize 并按 <code>1/√fan_in</code> 缩放(式47)</td></tr>
+    <tr><td><code>mp_silu</code></td><td><code>silu(x)/0.596</code>，补偿 SiLU 的幅度衰减(式81)</td></tr>
+    <tr><td><code>mp_sum(a,b,t)</code></td><td><code>lerp(a,b,t)/√((1−t)²+t²)</code>，残差/注意力合并保持幅度(式88)</td></tr>
+    <tr><td><code>mp_cat</code></td><td>skip 拼接的幅度保持版(式103)</td></tr>
+    <tr><td><code>MPFourier</code></td><td>幅度保持傅里叶时间嵌入(式75)；<code>c_noise = ln(σ)/4</code> 作为输入</td></tr>
+    <tr><td>pixel norm</td><td>encoder 块对输入沿通道维 <code>normalize(x,dim=1)</code></td></tr>
+    <tr><td><code>emb_gain / out_gain</code></td><td>初值 0；条件调制 <code>c = emb_linear(emb)·gain + 1</code>，输出 <code>out_conv(x, gain=out_gain)</code></td></tr>
+    <tr><td>注意力</td><td>QK 先 pixel-norm 再 softmax；<code>attn_resolutions=[16,8]</code></td></tr>
+    <tr><td>clip_act</td><td>每个 Block 输出 clip 到 ±256 防溢出</td></tr>
+  </table>
+  <p class="small">结构：UNet base channels = <code>model_channels × [1,2,3,4]</code>，每分辨率 <code>num_blocks=3</code>，
+  <code>res_balance=attn_balance=0.3</code>，<code>concat_balance=label_balance=0.5</code>。
+  输入会拼一个全 1 通道（类似 condition-augmentation 占位）。fp16 跑主干，preconditioning 用 fp32。</p>
+
+  <!-- 4 PRECOND -->
+  <h2 class="sec" id="precond">4 · Preconditioning <span class="tag g">Precond.forward</span></h2>
+  <p>网络真正学的是残差 <code>F</code>，去噪输出 <code>D</code> 由跨噪声尺度自动归一的系数组合而成（这正是你 x0_loop 想借的核心）。</p>
+  <div class="formula">
+c_skip = σ_data² / (σ² + σ_data²)<br>
+c_out  = σ·σ_data / √(σ² + σ_data²)<br>
+c_in   = 1 / √(σ_data² + σ²)<br>
+c_noise = ln(σ) / 4<br><br>
+F = UNet( c_in · x̃,  c_noise,  label )<br>
+<b>D(x̃, σ) = c_skip · x̃ + c_out · F</b>
+  </div>
+  <p>这保证无论 σ 多大，网络输入 <code>c_in·x̃</code> 与回归目标都是单位方差，small/big σ 都不会数值失衡。
+  <code>σ_data=0.5</code>（latent 已归一到此）。</p>
+
+  <!-- 5 LOSS -->
+  <h2 class="sec" id="loss">5 · EDM2Loss + 不确定性加权 <span class="tag g">training_loop.EDM2Loss</span></h2>
+<pre><span class="k">class</span> EDM2Loss(P_mean=-0.4, P_std=1.0, sigma_data=0.5):
+  def __call__(net, images, labels):
+    rnd   = randn([B,1,1,1])
+    sigma = (rnd * P_std + P_mean).exp()           <span class="c"># lognormal σ</span>
+    weight = (sigma**2 + sd**2) / (sigma*sd)**2     <span class="c"># EDM λ(σ)，使各 σ 有效权重均衡</span>
+    noise  = randn_like(images) * sigma
+    denoised, logvar = net(images+noise, sigma, labels, return_logvar=True)
+    loss = (weight / logvar.exp()) * (denoised - images)**2 + logvar
+    return loss</pre>
+  <div class="note"><b>不确定性再加权（式 21）</b>：网络额外用一个小分支从 <code>c_noise</code> 预测每个 σ 的
+  <code>logvar=u(σ)</code>。loss 把难（高方差）的 σ 自动降权 <code>1/e^{logvar}</code>，再加 <code>+logvar</code> 防止塌缩。
+  等价于让各噪声尺度对总梯度的贡献自适应均衡——EDM2 涨点的关键之一。</div>
+  <p class="small">注意：EDM2 直接回归 <b>x0（denoised vs images）</b>，σ 加权 + preconditioning 已把它等价折算到各空间。无显式 v/eps 选择。</p>
+
+  <!-- 6 TSAMPLE -->
+  <h2 class="sec" id="tsample">6 · σ 噪声采样（= 你的 time sampler）</h2>
+  <div class="formula">ln σ ~ N(P_mean, P_std),&nbsp;&nbsp; σ = exp(ln σ)</div>
+  <table>
+    <tr><th>preset</th><th>P_mean</th><th>P_std</th></tr>
+    <tr><td>img512 (xxs…xxl)</td><td>−0.4</td><td>1.0</td></tr>
+    <tr><td>img64 (xs…xl)</td><td>−0.8</td><td>1.6</td></tr>
+  </table>
+  <div class="ok">这就是 x0_loop 里 <code>logit_normal</code> 时间采样的 σ-空间对应物。EDM2 在 σ 上用 lognormal，
+  你在 t 上用 logit-normal——同一思想：训练样本集中在「中等噪声」区。</div>
+
+  <!-- 7 LOOP -->
+  <h2 class="sec" id="loop">7 · 训练主循环 <span class="tag">training/training_loop.py</span></h2>
+  <p>没有 epoch 概念，用 <code>InfiniteSampler</code> 无限取数，按 <code>cur_nimg</code> 推进到 <code>total_nimg</code>。</p>
+<pre><span class="k">while</span> cur_nimg &lt; stop_at_nimg:
+    <span class="c"># 周期性任务（按 nimg）</span>
+    report_status   每 128Ki img → stats.jsonl
+    save_snapshot   每 8Mi img   → network-snapshot-*.pkl（每条 EMA 一份, fp16）
+    save_checkpoint 每 128Mi img → training-state-*.pt（含 optimizer/ema 全态）
+
+    optimizer.zero_grad()
+    <span class="k">for</span> round <span class="k">in</span> range(num_accumulation_rounds):     <span class="c"># 梯度累积凑够 batch=2048</span>
+        images, labels = next(iterator)
+        images = encoder.encode_latents(images)        <span class="c"># VAE 编码</span>
+        loss = loss_fn(net=ddp, images, labels)
+        loss.sum().mul(loss_scaling / batch_gpu_total).backward()
+
+    lr = learning_rate_schedule(cur_nimg, batch_size)  <span class="c"># 见 §8</span>
+    <span class="k">if</span> force_finite:                                   <span class="c"># 无梯度裁剪！只清 NaN/Inf</span>
+        nan_to_num(param.grad, 0, 0, 0)
+    optimizer.step()
+    cur_nimg += batch_size
+    ema.update(cur_nimg, batch_size)</pre>
+  <div class="grid grid3">
+    <div class="card small"><b>batch</b><br>2048（全局），per-GPU 由 <code>batch_gpu</code> + 累积凑</div>
+    <div class="card small"><b>duration</b><br>896 Mi – 2048 Mi 训练图（按模型大小，见 presets）</div>
+    <div class="card small"><b>精度</b><br>fp16 主干，关闭 TF32，<code>cudnn_benchmark=True</code></div>
+  </div>
+
+  <!-- 8 LR -->
+  <h2 class="sec" id="lr">8 · LR / 优化器 / 不裁剪梯度</h2>
+  <div class="grid grid2">
+    <div class="card"><h4>LR schedule（inverse-sqrt 衰减 + rampup）</h4>
+      <div class="formula">lr = ref_lr / √(max(nimg/(ref_batches·B), 1))<br>× min(nimg/(rampup_Mimg·1e6), 1)</div>
+      <p class="small">rampup 默认 10 Mimg；<code>ref_batches=decay</code>（img512=70k, img64=35k）；<code>ref_lr</code> 按模型 0.0065–0.017。
+      <b>无 warmup-cosine、无 min_lr</b>，纯 1/√t 衰减。</p></div>
+    <div class="card"><h4>优化器 & 稳定性</h4>
+      <ul>
+        <li><code>Adam(betas=(0.9, 0.99))</code></li>
+        <li><b>无 weight decay</b>（权重归一化已约束尺度）</li>
+        <li><b>无 grad clip</b> — 只 <code>nan_to_num</code> 清掉 NaN/Inf 梯度</li>
+        <li><code>loss_scaling</code> 缓解 fp16 下溢</li>
+      </ul></div>
+  </div>
+  <div class="warnbox">与 x0_loop 的明显差异：EDM2 <b>不裁剪梯度、不用 weight decay、不用 cosine</b>。
+  它靠「强制权重归一化 + 幅度保持层 + 0 初始增益」从结构上稳住训练，而非靠裁剪/wd 这类外部约束。</div>
+
+  <!-- 9 EMA -->
+  <h2 class="sec" id="ema">9 · Post-hoc EMA <span class="tag p">training/phema.py · reconstruct_phema.py</span></h2>
+  <p>EDM2 发现「EMA 长度」是强超参，但每个长度重训成本太高。方案：训练时只跟踪 <b>2 条</b> power-function EMA
+  （<code>stds=[0.050, 0.100]</code>），训练后用线性组合 <b>重建任意目标 EMA 长度</b>。</p>
+  <div class="formula">β(std) = (1 − Δt/t)^(exp(std)+1)&nbsp;&nbsp;<span class="c"># 随 nimg 自适应，非固定 decay</span><br>
+p_ema ← lerp(p_ema, p_net, 1−β)</div>
+  <ul>
+    <li><b>PowerFunctionEMA</b>：power-function 响应核，无固定半衰期，等价于「相对 std」参数化</li>
+    <li><b>reconstruct_phema.py</b>：用 <code>solve_posthoc_coefficients</code>（最小二乘）从训练存的 snapshot 解出目标 EMA</li>
+    <li>预训练权重文件名里的 <code>…-0.130.pkl</code> 那个数字 = <b>重建出的 EMA 相对 std</b>，专门为最小化 FID/FD_DINOv2 而选</li>
+  </ul>
+  <div class="note">这正是为何同一模型有 <code>-fid</code> 与 <code>-dino</code> 两个 preset：<b>同一份训练，只是重建了不同的 EMA 长度</b>
+  分别最小化两个指标。EMA 长度 + guidance 是评测期联合调的两个旋钮。</div>
+
+  <!-- 10 PRESETS -->
+  <h2 class="sec" id="presets">10 · 配置 presets <span class="tag">train_edm2.py</span></h2>
+  <table>
+    <tr><th>preset</th><th>channels</th><th>lr</th><th>dropout</th><th>P_mean/P_std</th><th>duration (Mimg)</th></tr>
+    <tr><td>img512-xxs</td><td>64</td><td>0.0170</td><td>0.00</td><td>−0.4 / 1.0</td><td>2048</td></tr>
+    <tr><td>img512-xs</td><td>128</td><td>0.0120</td><td>0.00</td><td>−0.4 / 1.0</td><td>2048</td></tr>
+    <tr><td>img512-s</td><td>192</td><td>0.0100</td><td>0.00</td><td>−0.4 / 1.0</td><td>2048</td></tr>
+    <tr><td>img512-m</td><td>256</td><td>0.0090</td><td>0.10</td><td>−0.4 / 1.0</td><td>2048</td></tr>
+    <tr><td>img512-l</td><td>320</td><td>0.0080</td><td>0.10</td><td>−0.4 / 1.0</td><td>1792</td></tr>
+    <tr><td>img512-xl</td><td>384</td><td>0.0070</td><td>0.10</td><td>−0.4 / 1.0</td><td>1280</td></tr>
+    <tr><td>img512-xxl</td><td>448</td><td>0.0065</td><td>0.10</td><td>−0.4 / 1.0</td><td>896</td></tr>
+    <tr><td>img64-s</td><td>192</td><td>0.0100</td><td>0.00</td><td>−0.8 / 1.6</td><td>1024</td></tr>
+    <tr><td>img64-xl</td><td>384</td><td>0.0070</td><td>0.10</td><td>−0.8 / 1.6</td><td>640</td></tr>
+  </table>
+  <p class="small">decay(<code>ref_batches</code>)：img512=70000，img64=35000。全部 batch=2048。启动示例：
+  <code>torchrun --nproc_per_node=8 train_edm2.py --outdir=… --data=img512-sd.zip --preset=edm2-img512-s --batch-gpu=32</code></p>
+
+  <!-- 11 SAMPLER -->
+  <h2 class="sec" id="sampler">11 · 采样器：EDM Heun 2 阶确定性 <span class="tag o">generate_images.edm_sampler</span></h2>
+  <p>FID 用的就是这个采样器，默认参数即评测配置。</p>
+  <div class="formula">
+<span class="c"># σ 网格：ρ=7 非均匀，从大到小</span><br>
+t_i = ( σ_max^(1/ρ) + i/(N−1)·(σ_min^(1/ρ) − σ_max^(1/ρ)) )^ρ ,&nbsp; t_N = 0<br>
+σ_max=80, σ_min=0.002, ρ=7, N = num_steps = 32
+  </div>
+<pre>x = noise · t_0
+<span class="k">for</span> i, (t_cur, t_next) <span class="k">in</span> steps:
+    d_cur = (x − denoise(x, t_cur)) / t_cur          <span class="c"># 一阶导（Euler 预测）</span>
+    x_next = x + (t_next − t_cur) · d_cur
+    <span class="k">if</span> i &lt; N−1:                                       <span class="c"># 2 阶 Heun 校正</span>
+        d_prime = (x_next − denoise(x_next, t_next)) / t_next
+        x_next = x + (t_next − t_cur) · (0.5·d_cur + 0.5·d_prime)
+    x = x_next</pre>
+  <ul>
+    <li><b>32 步 → 约 63 次网络前向</b>（NFE）：每步 2 次去噪，最后一步省一次</li>
+    <li>默认 <b>确定性</b>：<code>S_churn=0</code>（无随机扰动注入），FID 评测即用此</li>
+    <li><code>denoise</code> 内部直接调 Precond 的 <code>D(x,σ,label)</code>；guidance≠1 时见 §12</li>
+    <li>每张图固定 seed（<code>StackedRandomGenerator</code> 逐样本独立 generator）→ 可复现</li>
+  </ul>
+
+  <!-- 12 GUIDANCE -->
+  <h2 class="sec" id="guidance">12 · Guidance / Autoguidance <span class="tag o">denoise()</span></h2>
+  <div class="formula">D_guided(x,σ) = lerp( D_ref(x,σ), D_main(x,σ), w )
+&nbsp;= D_ref + w·(D_main − D_ref)</div>
+  <table>
+    <tr><th>模式</th><th>gnet（引导网络）</th><th>典型 w</th></tr>
+    <tr><td>无 guidance</td><td>gnet=net（w=1，直接返回 D）</td><td>1.0</td></tr>
+    <tr><td>classifier-free（<code>-guid-</code>）</td><td>同结构的<b>无条件</b>小模型（xs-uncond）</td><td>1.2–1.9</td></tr>
+    <tr><td>autoguidance（<code>-autog-</code>）</td><td>同模型的<b>差版本</b>（更小/欠训的 ckpt）</td><td>1.7–2.9</td></tr>
+  </table>
+  <div class="ok"><b>Autoguidance</b>（NeurIPS 2024）是 EDM2 仓的另一篇：用「自己的一个更弱版本」当 D_ref 引导，
+  比传统 CFG 更能压低 FID（img512-xxl autog FID 1.25，img64-s autog FID 1.01）。
+  注意 guidance 强度 w 是<b>评测期</b>旋钮，与 EMA 长度一起在固定模型上扫优。</div>
+
+  <!-- 13 FID PIPELINE -->
+  <h2 class="sec" id="fid">13 · 计算 FID 的完整推理方式 ★</h2>
+  <p>这是你特别要的部分。EDM2 计 FID 有两条等价路径：先存图再算，或边生成边算（<code>gen</code> 子命令，不落盘）。</p>
+
+  <div class="flow">
+    <div class="fbox o"><div class="t">A. 生成 50000 张</div><div class="d">generate_images.py · seeds=0–49999 · EDM Heun 32步 · (可选)guidance</div></div>
+    <div class="arr"></div>
+    <div class="fbox p"><div class="t">B. VAE 解码</div><div class="d">latent → encoder.decode → uint8 RGB（img512 才有这步）</div></div>
+    <div class="arr"></div>
+    <div class="fbox g"><div class="t">C. 特征提取</div><div class="d">InceptionV3(2048-d) 和/或 DINOv2 ViT-L/14(1024-d)</div></div>
+    <div class="arr"></div>
+    <div class="fbox g"><div class="t">D. 累计高斯统计</div><div class="d">分布式累加 Σμ、Σσ → 生成集 (mu, sigma)</div></div>
+    <div class="arr"></div>
+    <div class="fbox"><div class="t">E. 对参考统计算 Fréchet 距离</div><div class="d">ref = dataset-refs/img512.pkl（预存的真实数据统计）</div></div>
+  </div>
+
+  <h4>命令（评测期标准配方）</h4>
+<pre><span class="c"># 直接对模型边生成边算（不存图），8 卡，50000 张</span>
+torchrun --standalone --nproc_per_node=8 calculate_metrics.py gen \
+    --net=…/edm2-img512-s-2147483-0.130.pkl \      <span class="c"># 选好 EMA 长度的 ema 权重</span>
+    --ref=…/edm2/dataset-refs/img512.pkl \          <span class="c"># 真实数据参考统计</span>
+    --metrics=fid --num=50000 --seed=0
+
+<span class="c"># 或：先生成 50000 张落盘，再算</span>
+torchrun --nproc_per_node=8 generate_images.py \
+    --preset=edm2-img512-xxl-guid-fid --outdir=out --subdirs --seeds=0-49999
+python calculate_metrics.py calc --images=out --ref=…/img512.pkl --num=50000</pre>
+
+  <div class="grid grid2">
+    <div class="card small"><b>采样默认值（即 FID 用值）</b>
+      <ul>
+        <li>num_steps=32, σ_min=0.002, σ_max=80, ρ=7</li>
+        <li>S_churn=0（确定性）</li>
+        <li>num_images=50000，max_batch=32/卡</li>
+        <li>label 随机均匀（类条件）</li>
+        <li>net 用的是 snapshot 里的 <code>ema</code>（fp16）</li>
+      </ul></div>
+    <div class="card small"><b>preset 内置的 EMA + guidance</b>
+      <ul>
+        <li><code>-fid</code>：选最小化 FID 的 EMA std（如 0.130）</li>
+        <li><code>-dino</code>：选最小化 FD_DINOv2 的 EMA std（如 0.190）</li>
+        <li><code>-guid-/-autog-</code>：额外带 gnet + guidance 强度</li>
+      </ul></div>
+  </div>
+
+  <!-- 14 METRICS -->
+  <h2 class="sec" id="metrics">14 · FID / FD_DINOv2 数学定义 <span class="tag g">calculate_metrics.py</span></h2>
+  <div class="grid grid2">
+    <div class="card"><h4>特征提取器</h4>
+      <ul>
+        <li><b>fid</b>：InceptionV3（StyleGAN3 移植版 pkl），2048 维，输入 uint8 NCHW</li>
+        <li><b>fd_dinov2</b>：DINOv2 <code>dinov2_vitl14</code>，1024 维；先 bicubic resize 到 224、再按 ImageNet 均值方差标准化</li>
+      </ul></div>
+    <div class="card"><h4>统计累计（分布式）</h4>
+      <div class="formula">μ = Σf / N<br>Σ = (Σ fᵀf − N·μμᵀ) / (N−1)</div>
+      <p class="small">all_reduce 跨卡求和，最后一个 batch 输出最终 (μ, Σ)。</p></div>
+  </div>
+  <h4>Fréchet 距离（FID 与 FD_DINOv2 同一公式，只是特征不同）</h4>
+  <div class="formula">d² = ‖μ_gen − μ_ref‖² + Tr( Σ_gen + Σ_ref − 2·(Σ_gen Σ_ref)^{1/2} )</div>
+  <p class="small">矩阵平方根用 <code>scipy.linalg.sqrtm</code>。<code>ref</code> 是预先用 <code>calculate_metrics.py ref</code> 在<b>整个真实数据集</b>上算好的
+  <code>(μ,Σ)</code>，存成 <code>dataset-refs/*.pkl</code>。生成集只需算自己的 <code>(μ,Σ)</code> 再代入。</p>
+  <div class="note"><b>与 x0_loop 的口径差异</b>：你用 <code>torch_fidelity</code> + cifar10-train 作 ref，输出 FID/KID/IS/PRC；
+  EDM2 自带 InceptionV3/DINOv2 两套，<b>50000 张</b>、对全数据集 ref、确定性 Heun 63 NFE——比你的 5000/20000 张、20–50 步更「足量」。
+  跨框架 FID 数值不能直接对比，需统一 ref 与采样预算。</div>
+
+  <!-- 15 RESULTS -->
+  <h2 class="sec" id="results">15 · 结果 &amp; 对照 x0_loop</h2>
+  <table>
+    <tr><th>数据集</th><th>模型</th><th>FID</th><th>说明</th></tr>
+    <tr><td>ImageNet-512</td><td>xs / s / m / l / xl / xxl</td><td>3.53 / 2.56 / 2.25 / 2.06 / 1.96 / 1.91</td><td>无 guidance，纯 EMA 调优</td></tr>
+    <tr><td>ImageNet-512</td><td>xxl-guid-fid</td><td><b>1.81</b></td><td>classifier-free guidance</td></tr>
+    <tr><td>ImageNet-512</td><td>xxl-autog-fid</td><td><b>1.25</b></td><td>autoguidance</td></tr>
+    <tr><td>ImageNet-64</td><td>s / m / l / xl</td><td>1.58 / 1.43 / 1.33 / 1.33</td><td>像素空间</td></tr>
+    <tr><td>ImageNet-64</td><td>s-autog-fid</td><td><b>1.01</b></td><td>autoguidance</td></tr>
+  </table>
+
+  <h4>EDM2 能直接搬进 x0_loop 的组件（按性价比排序）</h4>
+  <table>
+    <tr><th>EDM2 组件</th><th>x0_loop 现状</th><th>移植难度 / 收益</th></tr>
+    <tr><td><b>Preconditioning</b> c_skip/c_out/c_in/c_noise</td><td>裸 eps/x0/v 预测</td><td>中 / 高 —— 加一个 <code>output_target=edm_precond</code></td></tr>
+    <tr><td><b>不确定性 logvar 加权</b></td><td>三角/多项式 outer_weight</td><td>低 / 中 —— 加一个 logvar 分支 + 改 loss</td></tr>
+    <tr><td>σ/t lognormal 采样</td><td>已用 logit_normal ✅</td><td>已有，可对齐 P_mean/P_std</td></tr>
+    <tr><td>Heun + ρ=7 σ 网格</td><td>有 Heun，均匀 t 网格</td><td>低 / 中 —— 换非均匀网格</td></tr>
+    <tr><td>Post-hoc / power EMA</td><td>固定 decay=0.999</td><td>中 / 中 —— 评测期可调 EMA</td></tr>
+    <tr><td>去掉 grad clip + wd，改幅度保持</td><td>clip10 + wd0.04</td><td>高 / 不确定 —— 需整套 MP 层</td></tr>
+  </table>
+  <div class="ok">最低成本两步：① 把 loss 换成 EDM 的 <b>preconditioning + λ(σ) 加权</b>（即便不上幅度保持网络也有效）；
+  ② 评测改成 <b>50000 张 + 固定 ref + Heun 多步</b>，让你的 FID 口径与文献可比。</div>
+
+  <hr>
+  <p class="small">源码主线：<code>edm2/train_edm2.py</code> · <code>training/training_loop.py</code>（EDM2Loss + LR + loop）·
+  <code>training/networks_edm2.py</code>（UNet/Block/MPConv/Precond）· <code>training/phema.py</code>（post-hoc EMA）·
+  <code>training/encoders.py</code>（VAE latent）· <code>generate_images.py</code>（edm_sampler + presets）·
+  <code>calculate_metrics.py</code>（FID/FD_DINOv2）。论文：arXiv 2312.02696（EDM2）/ 2406.02507（Autoguidance）。
+  姊妹文档：<a href="training_pipeline.html">training_pipeline.html</a>（x0_loop 自身管线）。</p>
+</main>
+</div>
+</body>
+</html>

@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EDM (2022) 训练 & FID 推理全景图 — cifar10-cond-vp 主线</title>
+<style>
+  :root{
+    --bg:#ffffff; --panel:#f6f8fa; --panel2:#eef1f5; --border:#d0d7de;
+    --text:#1f2328; --muted:#59636e; --accent:#0969da; --accent2:#1a7f37;
+    --warn:#bc4c00; --pink:#cf222e; --purple:#8250df; --yellow:#9a6700;
+    --mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    line-height:1.65;font-size:15px}
+  a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+  .layout{display:flex;max-width:1400px;margin:0 auto}
+  nav{position:sticky;top:0;align-self:flex-start;height:100vh;overflow:auto;
+    width:260px;flex:0 0 260px;padding:24px 16px;border-right:1px solid var(--border);font-size:13.5px}
+  nav h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:18px 0 8px}
+  nav a{display:block;color:var(--muted);padding:3px 8px;border-radius:6px}
+  nav a:hover{background:var(--panel2);color:var(--text);text-decoration:none}
+  main{flex:1;min-width:0;padding:32px 40px 120px}
+  h1{font-size:30px;margin:0 0 4px;background:linear-gradient(90deg,#0969da,#1a7f37);
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:var(--muted);margin-bottom:28px}
+  h2.sec{font-size:23px;margin:48px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  h3{font-size:18px;margin:28px 0 10px;color:var(--accent2)}
+  h4{font-size:15.5px;margin:18px 0 8px;color:var(--yellow)}
+  p{margin:10px 0}
+  code{font-family:var(--mono);background:var(--panel2);padding:1px 6px;border-radius:5px;font-size:13px;color:#1f2328}
+  pre{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;
+    overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.55}
+  pre .k{color:var(--pink)} pre .c{color:var(--muted)} pre .s{color:var(--accent2)} pre .n{color:var(--yellow)}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--text);font-weight:600}
+  tr:nth-child(even) td{background:rgba(0,0,0,.015)}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px 22px;margin:16px 0}
+  .grid{display:grid;gap:14px}
+  .grid2{grid-template-columns:1fr 1fr}
+  .grid3{grid-template-columns:1fr 1fr 1fr}
+  @media(max-width:900px){.grid2,.grid3{grid-template-columns:1fr}nav{display:none}}
+  .tag{display:inline-block;font-family:var(--mono);font-size:11.5px;padding:1px 8px;border-radius:20px;
+    border:1px solid var(--border);color:var(--muted);margin:0 4px 4px 0}
+  .tag.b{color:var(--accent);border-color:#aacdf5}
+  .tag.g{color:var(--accent2);border-color:#ace0b4}
+  .tag.o{color:var(--warn);border-color:#f0c3a0}
+  .tag.p{color:var(--purple);border-color:#d9c2f5}
+  .note{border-left:3px solid var(--accent);background:rgba(9,105,218,.06);padding:10px 16px;border-radius:0 8px 8px 0;margin:14px 0}
+  .warnbox{border-left:3px solid var(--warn);background:rgba(188,76,0,.07);padding:10px 16px;border-radius:0 8px 8px 0;margin:14px 0}
+  .ok{border-left:3px solid var(--accent2);background:rgba(26,127,55,.07);padding:10px 16px;border-radius:0 8px 8px 0;margin:14px 0}
+  .flow{display:flex;flex-direction:column;gap:0;align-items:center;margin:20px 0}
+  .fbox{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:12px 18px;
+    min-width:360px;text-align:center;position:relative}
+  .fbox .t{font-weight:600;color:var(--accent)}
+  .fbox .d{font-size:12.5px;color:var(--muted);font-family:var(--mono)}
+  .fbox.g{border-color:#ace0b4} .fbox.g .t{color:var(--accent2)}
+  .fbox.o{border-color:#f0c3a0} .fbox.o .t{color:var(--warn)}
+  .fbox.p{border-color:#d9c2f5} .fbox.p .t{color:var(--purple)}
+  .arr{width:2px;height:22px;background:var(--border);position:relative}
+  .arr:after{content:"▼";position:absolute;bottom:-4px;left:-5px;color:var(--border);font-size:11px}
+  .row{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin:8px 0}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:11px;height:11px;border-radius:3px;display:inline-block}
+  .formula{font-family:var(--mono);background:var(--panel);border:1px solid var(--border);
+    border-radius:8px;padding:10px 16px;margin:10px 0;color:#1f2328;overflow:auto}
+  .shape{color:var(--purple);font-weight:600}
+  ul{margin:8px 0;padding-left:22px} li{margin:4px 0}
+  hr{border:none;border-top:1px solid var(--border);margin:30px 0}
+  .small{font-size:12.5px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav>
+  <h2>导航</h2>
+  <a href="#overview">0 · 全景概览（带 shape）</a>
+  <a href="#mainline">1 · 主线配置 & 符号</a>
+  <a href="#design">2 · 设计空间四要素</a>
+  <a href="#data">3 · 数据 & 非泄漏增强</a>
+  <a href="#arch">4 · DDPM++ 逐层 shape ★</a>
+  <a href="#precond">5 · Preconditioning ★</a>
+  <a href="#loss">6 · Loss & σ 采样</a>
+  <a href="#loop">7 · 训练主循环</a>
+  <a href="#hparam">8 · LR / Adam / EMA</a>
+  <a href="#presets">9 · 其它官方配置</a>
+  <a href="#sampler">10 · EDM Heun 采样器 ★</a>
+  <a href="#ablation">11 · Ablation 采样器</a>
+  <a href="#fid">12 · FID 推理全流程 ★</a>
+  <a href="#results">13 · 结果 & 对照 x0_loop</a>
+</nav>
+<main>
+  <h1>EDM (2022) 训练 &amp; FID 推理全景图</h1>
+  <div class="sub">NVlabs/edm · 《Elucidating the Design Space of Diffusion-Based Generative Models》(NeurIPS 2022)<br>
+  <b>主线：cifar10-cond-vp（class-conditional DDPM++，FID 1.79）——全文所有张量按此配置标注具体 shape</b></div>
+
+  <div class="card">
+    <strong>这是什么</strong> · 逐文件梳理 <code>/data/seek/aigc/edm</code> 的训练与评测管线，
+    并以 <code>edm-cifar10-32x32-cond-vp.pkl</code>（<code>--cond=1 --arch=ddpmpp --precond=edm</code>）为唯一主线，
+    每个张量都给出实际 shape（已用 <code>EDMPrecond(img_resolution=32, label_dim=10, augment_dim=9, …)</code> 实例化验证，<b>参数量 55,735,299 ≈ 55.7M</b>）：
+    <span class="tag b">σ-lognormal 噪声</span><span class="tag g">EDM preconditioning</span>
+    <span class="tag g">DDPM++ SongUNet 逐层 shape</span><span class="tag o">Heun 18 步 = 35 NFE</span>
+    <span class="tag p">非泄漏增强 [B,9]</span><span class="tag">EMA halflife</span>
+    <span class="tag">50000 张 FID</span>
+    源码主线：<code>train.py → training/{loss,networks,training_loop}.py</code>；评测 <code>generate.py + fid.py</code>。
+  </div>
+
+  <!-- 0 OVERVIEW -->
+  <h2 class="sec" id="overview">0 · 全景概览（每个箭头都带 shape）</h2>
+  <p>训练 batch 全局 512，README 标准跑法 8×V100 → 每卡 micro-batch <span class="shape">B=64</span>。下面全程以单卡视角标 shape。</p>
+
+  <div class="flow">
+    <div class="fbox p"><div class="t">数据 (img, label)</div><div class="d">img <b>[64,3,32,32]</b> uint8→fp32→[−1,1] · label one-hot <b>[64,10]</b></div></div>
+    <div class="arr"></div>
+    <div class="fbox p"><div class="t">① 非泄漏增强 augment_pipe (p=0.12)</div><div class="d">y <b>[64,3,32,32]</b> · 增强参数 aug_label <b>[64,9]</b> 作为条件喂网络</div></div>
+    <div class="arr"></div>
+    <div class="fbox b"><div class="t">② 采样噪声 σ</div><div class="d">rnd <b>[64,1,1,1]</b> ~N(0,1) → σ = exp(rnd·1.2 − 1.2) <b>[64,1,1,1]</b></div></div>
+    <div class="arr"></div>
+    <div class="fbox"><div class="t">③ 加噪</div><div class="d">n <b>[64,3,32,32]</b>·σ；ỹ = y + n·σ <b>[64,3,32,32]</b></div></div>
+    <div class="arr"></div>
+    <div class="fbox g"><div class="t">④ EDMPrecond 去噪 (55.7M)</div><div class="d">D(ỹ,σ) = c_skip·ỹ + c_out·F(c_in·ỹ <b>[64,3,32,32]</b>, c_noise <b>[64]</b>, y₁₀ <b>[64,10]</b>, aug <b>[64,9]</b>) → <b>[64,3,32,32]</b></div></div>
+    <div class="arr"></div>
+    <div class="fbox g"><div class="t">⑤ 加权回归 loss（逐像素）</div><div class="d">L = λ(σ)<b>[64,1,1,1]</b> · (D−y)² <b>[64,3,32,32]</b> → sum()/64 backward</div></div>
+    <div class="arr"></div>
+    <div class="fbox"><div class="t">⑥ Adam step</div><div class="d">lr=1e-3 线性 rampup 10 Mimg · 无裁剪 · nan_to_num · fp32</div></div>
+    <div class="arr"></div>
+    <div class="fbox p"><div class="t">⑦ EMA（halflife 0.5 Mimg）</div><div class="d">55.7M 参数逐个 lerp · 存 snapshot.pkl['ema']</div></div>
+    <div class="arr"></div>
+    <div class="row">
+      <div class="fbox o" style="min-width:270px"><div class="t">⑧ 采样 generate.py</div><div class="d">latents <b>[64,3,32,32]</b>×782 批 = 50000 张<br>Heun 18 步 (t_steps <b>[19]</b>) = 35 NFE · fp64</div></div>
+      <div class="fbox g" style="min-width:270px"><div class="t">⑨ fid.py</div><div class="d">InceptionV3 feat <b>[50000,2048]</b><br>→ μ<b>[2048]</b>, Σ<b>[2048,2048]</b> vs cifar10-32x32.npz</div></div>
+    </div>
+  </div>
+  <div class="legend">
+    <span><span class="dot" style="background:var(--purple)"></span>数据 / 增强 / EMA</span>
+    <span><span class="dot" style="background:var(--accent)"></span>噪声 / 优化</span>
+    <span><span class="dot" style="background:var(--accent2)"></span>网络 / 评测</span>
+    <span><span class="dot" style="background:var(--warn)"></span>采样</span>
+  </div>
+
+  <!-- 1 MAINLINE -->
+  <h2 class="sec" id="mainline">1 · 主线配置 cifar10-cond-vp & shape 符号约定</h2>
+  <div class="grid grid2">
+    <div class="card"><h4>训练命令（README 原文）</h4>
+<pre>torchrun --standalone --nproc_per_node=8 train.py \
+    --outdir=training-runs \
+    --data=datasets/cifar10-32x32.zip \
+    --cond=1 --arch=ddpmpp
+<span class="c"># 默认: --precond=edm --batch=512 --lr=1e-3</span>
+<span class="c">#       --dropout=0.13 --augment=0.12</span>
+<span class="c">#       --ema=0.5 --duration=200 (Mimg)</span></pre></div>
+    <div class="card"><h4>shape 符号</h4>
+      <table>
+        <tr><th>符号</th><th>值</th><th>含义</th></tr>
+        <tr><td><b>B</b></td><td>64</td><td>每卡 micro-batch（512 / 8 GPU）</td></tr>
+        <tr><td>C×H×W</td><td>3×32×32</td><td>CIFAR-10 像素</td></tr>
+        <tr><td>label_dim</td><td>10</td><td>one-hot 类标签</td></tr>
+        <tr><td>augment_dim</td><td>9</td><td>增强条件向量</td></tr>
+        <tr><td>σ_data</td><td>0.5</td><td>数据标准差假设</td></tr>
+      </table></div>
+  </div>
+  <div class="note"><b>命名澄清</b>：模型名里的「vp」指 <b>DDPM++（VP 谱系）backbone</b>，
+  不是 VP preconditioning——cifar10-cond-vp 实际用的是 <b>EDMPrecond + EDMLoss</b>（train.py 默认 <code>--precond=edm</code>）。
+  对应 <code>--arch=ncsnpp</code> 的模型则叫 …-ve。</div>
+
+  <!-- 2 DESIGN -->
+  <h2 class="sec" id="design">2 · 设计空间的四个正交轴</h2>
+  <table>
+    <tr><th>轴</th><th>含义</th><th>cifar10-cond-vp 的选择</th></tr>
+    <tr><td>Preconditioning</td><td>网络输入/输出/噪声标签如何缩放</td><td><b>EDMPrecond</b>：c_skip/c_out/c_in <span class="shape">[B,1,1,1]</span>，c_noise <span class="shape">[B]</span></td></tr>
+    <tr><td>训练噪声分布</td><td>训练时 σ 怎么采</td><td><b>lognormal</b>(P_mean=−1.2, P_std=1.2)，σ <span class="shape">[B,1,1,1]</span></td></tr>
+    <tr><td>网络架构</td><td>backbone</td><td><b>DDPM++ SongUNet</b> 55.7M：128 基通道 ×[2,2,2]，attn@16×16</td></tr>
+    <tr><td>采样</td><td>ODE 求解器 + 时间离散</td><td><b>Heun 2 阶 + ρ=7 网格</b>，18 步、t_steps <span class="shape">[19]</span>，确定性</td></tr>
+  </table>
+  <div class="note">EDM 把 DDPM/VP/VE/iDDPM 统一到 <code>ỹ = y + σ·n</code> + 去噪器 D 的框架里，每轴单独消融。
+  <b>preconditioning + Heun + lognormal 是三个最关键的涨点</b>。</div>
+
+  <!-- 3 DATA -->
+  <h2 class="sec" id="data">3 · 数据 &amp; 非泄漏增强 <span class="tag">training/augment.py</span></h2>
+  <p>数据集是 <code>dataset_tool.py</code> 打包的 <code>cifar10-32x32.zip</code>（50000 张训练图 + dataset.json 标签）。
+  loader 输出 uint8 <span class="shape">[B,3,32,32]</span>，训练循环里 <code>/127.5−1</code> 转 fp32 [−1,1]。</p>
+  <div class="grid grid2">
+    <div class="card"><h4>AugmentPipe（p=0.12）</h4>
+      <ul>
+        <li>输入 y <span class="shape">[B,3,32,32]</span> → 输出同 shape + aug_label <span class="shape">[B,9]</span></li>
+        <li>几何：x/y-flip、各向同/异性缩放、分数旋转/平移（启用项：<code>xflip,yflip,scale,rotate_frac,aniso,translate_frac</code>）</li>
+        <li>每张图独立采样变换参数，9 个标量拼成条件向量</li>
+      </ul></div>
+    <div class="card"><h4>条件注入（防泄漏）</h4>
+      <ul>
+        <li><code>map_augment: Linear(9→128, bias=False)</code>，把 <span class="shape">[B,9]</span> 投到噪声嵌入 <span class="shape">[B,128]</span> 相加</li>
+        <li>网络「知道」图被增强过 → 增强痕迹不泄漏进生成分布</li>
+        <li><b>采样时 aug_label 置 None</b>（等效全 0）→ 生成干净分布</li>
+      </ul></div>
+  </div>
+  <div class="ok">对照 x0_loop：你只有 hflip。这套<b>带条件注入的几何+色彩增强</b>是 CIFAR10 小数据集压 FID 的关键之一——可以放心开激进增强而不污染分布。</div>
+
+  <!-- 4 ARCH -->
+  <h2 class="sec" id="arch">4 · DDPM++ SongUNet 逐层 shape ★ <span class="tag g">training/networks.py · 55.7M 参数</span></h2>
+  <p>cifar10-cond-vp 的 backbone 配置（train.py <code>--arch=ddpmpp</code> 注入）：
+  <code>model_channels=128, channel_mult=[2,2,2], num_blocks=4, attn_resolutions=[16],
+  embedding_type=positional, channel_mult_noise=1, resample_filter=[1,1], dropout=0.13</code>。
+  三个分辨率级：32×32 / 16×16 / 8×8，主通道宽度统一为 <b>128×2 = 256</b>。</p>
+
+  <h4>4.1 条件嵌入（Mapping）</h4>
+<pre>c_noise = ln(σ)/4            <span class="c"># [B,1,1,1].flatten() → [B]</span>
+emb = PositionalEmbedding(128)(c_noise)        <span class="c"># [B] → [B,128]，swap sin/cos</span>
+emb += Linear(10→128)(label · √10)             <span class="c"># 类条件 [B,10] → [B,128]</span>
+emb += Linear(9→128, no bias)(aug_label)       <span class="c"># 增强条件 [B,9] → [B,128]</span>
+emb = silu(Linear(128→512)(emb))               <span class="c"># [B,512]</span>
+emb = silu(Linear(512→512)(emb))               <span class="c"># [B,512] → 喂给每个 UNetBlock</span></pre>
+
+  <h4>4.2 Encoder（15 个 skip，逐层 shape 实测）</h4>
+  <table>
+    <tr><th>层</th><th>输出 shape</th><th>说明</th></tr>
+    <tr><td><code>32x32_conv</code></td><td><span class="shape">[B,128,32,32]</span></td><td>3×3 conv，3→128</td></tr>
+    <tr><td><code>32x32_block0..3</code></td><td><span class="shape">[B,256,32,32]</span> ×4</td><td>block0: 128→256；无注意力（32∉attn_res）</td></tr>
+    <tr><td><code>16x16_down</code></td><td><span class="shape">[B,256,16,16]</span></td><td>UNetBlock(down=True)</td></tr>
+    <tr><td><code>16x16_block0..3</code></td><td><span class="shape">[B,256,16,16]</span> ×4</td><td><b>带 self-attention</b>（1 头 256 维，16∈attn_res）</td></tr>
+    <tr><td><code>8x8_down</code></td><td><span class="shape">[B,256,8,8]</span></td><td>UNetBlock(down=True)</td></tr>
+    <tr><td><code>8x8_block0..3</code></td><td><span class="shape">[B,256,8,8]</span> ×4</td><td>无注意力（8∉attn_res）</td></tr>
+  </table>
+  <p class="small">每层输出都 push 进 skips（conv + 4block 每级 ×3 级 = <b>15 个 skip</b>）。
+  每个 UNetBlock 内部：GroupNorm → silu → conv3×3 → (+emb 投影 <span class="shape">[B,512]→[B,256]</span>) → GroupNorm → silu → dropout(0.13) → conv3×3 → +skip，skip_scale=1/√2。</p>
+
+  <h4>4.3 Decoder（skip 拼接，cin 列出拼接后通道）</h4>
+  <table>
+    <tr><th>层</th><th>cin → cout</th><th>输出 shape</th><th>说明</th></tr>
+    <tr><td><code>8x8_in0</code></td><td>256→256</td><td><span class="shape">[B,256,8,8]</span></td><td><b>bottleneck，带 attention</b></td></tr>
+    <tr><td><code>8x8_in1</code></td><td>256→256</td><td><span class="shape">[B,256,8,8]</span></td><td></td></tr>
+    <tr><td><code>8x8_block0..4</code></td><td>cat(256+256)=512→256 ×5</td><td><span class="shape">[B,256,8,8]</span></td><td>逐个 pop skip 拼接</td></tr>
+    <tr><td><code>16x16_up</code></td><td>256→256</td><td><span class="shape">[B,256,16,16]</span></td><td>UNetBlock(up=True)</td></tr>
+    <tr><td><code>16x16_block0..4</code></td><td>512→256 ×5</td><td><span class="shape">[B,256,16,16]</span></td><td>block4 带 attention</td></tr>
+    <tr><td><code>32x32_up</code></td><td>256→256</td><td><span class="shape">[B,256,32,32]</span></td><td></td></tr>
+    <tr><td><code>32x32_block0..3</code></td><td>512→256 ×4</td><td><span class="shape">[B,256,32,32]</span></td><td></td></tr>
+    <tr><td><code>32x32_block4</code></td><td>cat(256+<b>128</b>)=384→256</td><td><span class="shape">[B,256,32,32]</span></td><td>最后 pop 到首层 conv 的 128 维 skip</td></tr>
+    <tr><td><code>32x32_aux_norm + aux_conv</code></td><td>256→3（zero-init）</td><td><span class="shape">[B,3,32,32]</span></td><td>GroupNorm → silu → conv3×3 = F_x 输出</td></tr>
+  </table>
+
+  <!-- 5 PRECOND -->
+  <h2 class="sec" id="precond">5 · Preconditioning（统一 4 套）★ <span class="tag g">EDMPrecond.forward</span></h2>
+  <p>所有去噪器统一写成 <code>D(x,σ) = c_skip·x + c_out·F(c_in·x, c_noise)</code>。主线用 EDM 列；shape 全程不变。</p>
+  <table>
+    <tr><th>系数（shape）</th><th>VP</th><th>VE</th><th>iDDPM</th><th><b>EDM（主线）</b></th></tr>
+    <tr><td>c_skip <span class="shape">[B,1,1,1]</span></td><td>1</td><td>1</td><td>1</td><td><b>σd²/(σ²+σd²)</b></td></tr>
+    <tr><td>c_out <span class="shape">[B,1,1,1]</span></td><td>−σ</td><td>σ</td><td>−σ</td><td><b>σ·σd/√(σ²+σd²)</b></td></tr>
+    <tr><td>c_in <span class="shape">[B,1,1,1]</span></td><td>1/√(σ²+1)</td><td>1</td><td>1/√(σ²+1)</td><td><b>1/√(σ²+σd²)</b></td></tr>
+    <tr><td>c_noise <span class="shape">[B]</span></td><td>(M−1)·σ⁻¹(σ)</td><td>ln(σ)/2</td><td>M−1−idx(σ)</td><td><b>ln(σ)/4</b></td></tr>
+  </table>
+<pre><span class="c"># EDMPrecond.forward —— 主线 shape 注释</span>
+x      <span class="c"># [B,3,32,32]  加噪图 ỹ</span>
+sigma  <span class="c"># [B] → reshape [B,1,1,1]</span>
+c_skip = sd²/(σ²+sd²);  c_out = σ·sd/√(σ²+sd²)      <span class="c"># [B,1,1,1]</span>
+c_in   = 1/√(sd²+σ²);   c_noise = ln(σ)/4 .flatten() <span class="c"># [B,1,1,1] / [B]</span>
+F_x = SongUNet(c_in·x, c_noise, label[B,10], aug[B,9])  <span class="c"># [B,3,32,32]</span>
+D_x = c_skip·x + c_out·F_x                               <span class="c"># [B,3,32,32]，σd=0.5</span></pre>
+  <div class="note"><b>为何 EDM 系数最优</b>：它让网络输入 <code>c_in·x</code> 与回归目标在<b>所有 σ 下都是单位方差</b>，
+  且 σ→0 时 D≈恒等（c_skip→1）、σ→∞ 时全靠网络（c_skip→0）——数值尺度全程稳定。这正是 x0_loop 现在缺的那块。</div>
+
+  <!-- 6 LOSS -->
+  <h2 class="sec" id="loss">6 · Loss &amp; σ 采样 <span class="tag g">training/loss.py · EDMLoss</span></h2>
+<pre><span class="k">class</span> EDMLoss(P_mean=-1.2, P_std=1.2, sigma_data=0.5):
+  def __call__(net, images, labels, augment_pipe):
+    rnd   = randn([B,1,1,1])                          <span class="c"># [64,1,1,1]</span>
+    sigma = (rnd·1.2 − 1.2).exp()                     <span class="c"># [64,1,1,1] lognormal</span>
+    weight = (σ²+sd²)/(σ·sd)²                         <span class="c"># [64,1,1,1] = λ(σ)</span>
+    y, aug = augment_pipe(images)                     <span class="c"># [64,3,32,32], [64,9]</span>
+    n = randn_like(y)·sigma                           <span class="c"># [64,3,32,32]</span>
+    D_yn = net(y+n, sigma, labels, augment_labels=aug)<span class="c"># [64,3,32,32]</span>
+    loss = weight · (D_yn − y)²                       <span class="c"># [64,3,32,32] 逐像素</span>
+    return loss   <span class="c"># 训练循环里 loss.sum()·(ls/64).backward()</span></pre>
+  <table>
+    <tr><th>Loss</th><th>σ 采样</th><th>weight λ(σ)</th></tr>
+    <tr><td><b>EDMLoss（主线）</b></td><td>lognormal: ln σ~N(−1.2,1.2)</td><td>(σ²+σd²)/(σσd)²</td></tr>
+    <tr><td>VPLoss</td><td>uniform t∈[ε,1] 经 VP σ(t)</td><td>1/σ²</td></tr>
+    <tr><td>VELoss</td><td>log-uniform σ∈[0.02,100]</td><td>1/σ²</td></tr>
+  </table>
+  <div class="ok">EDM 的 lognormal σ = 你 x0_loop <code>logit_normal</code> 时间采样的 σ-空间版本；λ(σ) = 你 outer_weight 的「正确」形式。
+  loss 是<b>逐像素 [B,3,32,32]</b> 张量，sum 后除以 batch_gpu_total=64 再 backward。</div>
+
+  <!-- 7 LOOP -->
+  <h2 class="sec" id="loop">7 · 训练主循环 <span class="tag">training/training_loop.py</span></h2>
+  <p>按 <b>kimg（千张训练图）</b>计量，<code>InfiniteSampler</code> 无限取数，到 <code>total_kimg=200000</code>（200 Mimg）停。
+  全局 batch 512 = 64/卡 × 8 卡 × 1 轮累积（单卡跑则 num_accumulation_rounds=8）。</p>
+<pre><span class="k">while</span> True:
+    optimizer.zero_grad()
+    <span class="k">for</span> round <span class="k">in</span> range(num_accumulation_rounds):     <span class="c"># 8卡时 =1</span>
+        images, labels = next(iterator)                  <span class="c"># [64,3,32,32] uint8, [64,10]</span>
+        images = images/127.5 − 1                        <span class="c"># fp32 [−1,1]</span>
+        loss = loss_fn(net=ddp, images, labels, augment_pipe)  <span class="c"># [64,3,32,32]</span>
+        loss.sum().mul(loss_scaling / 64).backward()
+
+    lr = 1e-3 · min(cur_nimg / 10e6, 1)                  <span class="c"># 线性 rampup 10 Mimg</span>
+    nan_to_num(grad, 0, +1e5, −1e5)                      <span class="c"># 无裁剪，只清 NaN/Inf</span>
+    optimizer.step()
+
+    <span class="c"># EMA（55.7M 参数逐个 lerp）</span>
+    halflife = min(0.5 Mimg, cur_nimg · 0.05)            <span class="c"># rampup</span>
+    beta = 0.5 ** (512 / halflife)
+    p_ema.lerp_(p_net, 1−beta)
+    cur_nimg += 512
+
+    每 tick(50 kimg): 状态行 → stats.jsonl
+    每 snap(50 tick = 2.5 Mimg): network-snapshot-*.pkl（ema/loss_fn/augment_pipe）
+    每 dump(500 tick): training-state-*.pt（net+optimizer，可 resume）</pre>
+
+  <!-- 8 HPARAM -->
+  <h2 class="sec" id="hparam">8 · LR / 优化器 / EMA（主线值）</h2>
+  <div class="grid grid3">
+    <div class="card"><h4>优化器</h4>
+      <code>Adam(betas=[0.9,0.999], eps=1e-8)</code><br>lr=1e-3，<b>无 weight decay</b></div>
+    <div class="card"><h4>LR schedule</h4>
+      只有<b>线性 rampup</b>（10 Mimg ≈ 19.5k 步），<b>之后恒定</b>，无 decay/cosine</div>
+    <div class="card"><h4>梯度</h4>
+      <b>无裁剪</b>，仅 <code>nan_to_num</code>（NaN→0, ±Inf→±1e5）</div>
+    <div class="card"><h4>EMA</h4>
+      halflife 0.5 Mimg（≈977 步），rampup_ratio=0.05；采样/FID 全用 ema</div>
+    <div class="card"><h4>batch / 时长</h4>
+      512 全局 / 64 每卡；200 Mimg ≈ <b>390625 步</b>（8×V100 约 2 天）</div>
+    <div class="card"><h4>精度</h4>
+      CIFAR10 默认 <b>fp32</b>（--fp16 可选）；关 TF32</div>
+  </div>
+  <div class="warnbox">和 x0_loop 的差异：EDM <b>不裁剪梯度、不用 weight decay、不用 cosine</b>。
+  靠 preconditioning 把各 σ 数值尺度拉平来稳训练，而非外部约束。</div>
+
+  <!-- 9 PRESETS -->
+  <h2 class="sec" id="presets">9 · 其它官方配置（对照主线）</h2>
+  <table>
+    <tr><th>模型</th><th>与主线的差异</th><th>FID</th></tr>
+    <tr><td><b>cifar10-cond-vp（主线）</b></td><td>—（ddpmpp 128×[2,2,2], 55.7M, [B,3,32,32]）</td><td><b>1.79</b></td></tr>
+    <tr><td>cifar10-cond-ve</td><td>backbone 换 ncsnpp（fourier 嵌入、residual 编码、resample=[1,3,3,1]），shape 流相同</td><td>~1.79</td></tr>
+    <tr><td>cifar10-uncond-vp</td><td>label_dim=0（去掉 [B,10] 条件）</td><td><b>1.97</b></td></tr>
+    <tr><td>ffhq/afhqv2-64</td><td>[B,3,64,64]，cres=[1,2,2,2]（128/256/256/256），dropout 0.05/0.25</td><td>2.39 / 1.96</td></tr>
+    <tr><td>imagenet-64</td><td>[B,3,64,64]，ADM（DhariwalUNet 192×[1,2,3,4]），label_dim=1000</td><td><b>1.36</b></td></tr>
+  </table>
+
+  <!-- 10 SAMPLER -->
+  <h2 class="sec" id="sampler">10 · EDM 采样器：Heun 2 阶确定性 ★ <span class="tag o">generate.py · edm_sampler</span></h2>
+  <p>FID 用的就是这个。CIFAR10 默认 <b>18 步</b>，每步 2 次去噪、最后一步省 1 次 → <b>35 次网络评估（NFE）</b>。
+  生成 batch 默认 64，全程 <b>fp64</b> 积分。</p>
+  <div class="formula">
+<span class="c"># ρ=7 非均匀 σ 网格，从大到小；t_steps shape = [19]（18 步 + 末尾 0）</span><br>
+t_i = ( 80^(1/7) + i/17·(0.002^(1/7) − 80^(1/7)) )^7 ,&nbsp; t_18 = 0<br>
+σ_max=80, σ_min=0.002, ρ=7, N=num_steps=18
+  </div>
+<pre>latents = randn([64,3,32,32])                <span class="c"># 每张图独立 seed（StackedRandomGenerator）</span>
+labels  = eye(10)[randint(10,[64])]          <span class="c"># [64,10] 随机类（或 --class 固定）</span>
+x = latents.to(fp64) · t_0                   <span class="c"># [64,3,32,32]，t_0=80</span>
+<span class="k">for</span> i, (t_cur, t_next) <span class="k">in</span> zip(t_steps[:-1], t_steps[1:]):   <span class="c"># 18 轮</span>
+    <span class="c"># 可选 churn（FID 默认 S_churn=0，纯确定性，x_hat=x, t_hat=t_cur）</span>
+    denoised = net(x_hat, t_hat, labels)     <span class="c"># D: [64,3,32,32]，内部 fp32</span>
+    d_cur  = (x_hat − denoised) / t_hat      <span class="c"># [64,3,32,32] 一阶导</span>
+    x_next = x_hat + (t_next − t_hat)·d_cur
+    <span class="k">if</span> i &lt; 17:                               <span class="c"># 2 阶 Heun 校正（再一次 D 前向）</span>
+        denoised = net(x_next, t_next, labels)
+        d_prime  = (x_next − denoised) / t_next
+        x_next   = x_hat + (t_next − t_hat)·(0.5·d_cur + 0.5·d_prime)
+    x = x_next
+<span class="c"># 输出 [64,3,32,32] fp64 → (x·127.5+128).clip(0,255) → uint8 [64,32,32,3] → PNG</span></pre>
+  <ul>
+    <li>确定性：CIFAR10/FFHQ 用 <code>S_churn=0</code>；ImageNet-64 用少量 churn 增稳</li>
+    <li>每张图固定 seed → 完全可复现；50000 张 = 782 个 batch（64/批）</li>
+    <li>aug_label 不喂（=None）→ 生成未增强分布</li>
+  </ul>
+
+  <!-- 11 ABLATION -->
+  <h2 class="sec" id="ablation">11 · Ablation 采样器（全设计空间）<span class="tag o">ablation_sampler</span></h2>
+  <p>一个超集采样器，把论文所有采样变体参数化（shape 流与主线相同，仅 σ 网格/调度不同），用来复现「从 DDPM/VP/VE 逐步改造到 EDM」的消融。</p>
+  <table>
+    <tr><th>旋钮</th><th>取值</th></tr>
+    <tr><td><code>solver</code></td><td>euler（1 阶）/ heun（2 阶）</td></tr>
+    <tr><td><code>discretization</code></td><td>vp / ve / iddpm / edm（σ 网格怎么排）</td></tr>
+    <tr><td><code>schedule</code></td><td>vp / ve / linear（σ(t) 形状）</td></tr>
+    <tr><td><code>scaling</code></td><td>vp / none（信号缩放 s(t)）</td></tr>
+  </table>
+  <p class="small">EDM 最优组合 = <code>solver=heun, disc=edm, schedule=linear, scaling=none</code>，即 <code>edm_sampler</code>。
+  传任一 ablation 参数时 <code>generate.py</code> 自动切到此采样器。</p>
+
+  <!-- 12 FID -->
+  <h2 class="sec" id="fid">12 · 计算 FID 的完整推理方式 ★ <span class="tag g">fid.py</span></h2>
+  <p>两步：先 <code>generate.py</code> 生成 50000 张，再 <code>fid.py calc</code> 对参考统计算 FID。每个箭头标 shape。</p>
+
+  <div class="flow">
+    <div class="fbox o"><div class="t">A. 生成 50000 张</div><div class="d">seeds=0-49999 · 每批 latents <b>[64,3,32,32]</b> · Heun 18 步(35 NFE) · ema 权重 → 50000×PNG(32×32 RGB)</div></div>
+    <div class="arr"></div>
+    <div class="fbox g"><div class="t">B. InceptionV3 特征</div><div class="d">uint8 <b>[n,3,32,32]</b> → feat <b>[n,2048]</b>（StyleGAN3 移植 inception pkl，内部自适应 resize）</div></div>
+    <div class="arr"></div>
+    <div class="fbox g"><div class="t">C. 累计高斯统计</div><div class="d">分布式累加 Σf, Σffᵀ → μ <b>[2048]</b>, Σ <b>[2048,2048]</b>（fp64）</div></div>
+    <div class="arr"></div>
+    <div class="fbox"><div class="t">D. Fréchet 距离</div><div class="d">vs cifar10-32x32.npz（全 50000 张训练集的 μ<b>[2048]</b>, Σ<b>[2048,2048]</b>）</div></div>
+  </div>
+
+  <h4>命令（评测标准配方）</h4>
+<pre><span class="c"># 1) 生成 50000 张（可多卡）</span>
+torchrun --standalone --nproc_per_node=8 generate.py --outdir=fid-tmp --subdirs \
+    --seeds=0-49999 --batch=64 \
+    --network=…/edm-cifar10-32x32-cond-vp.pkl
+
+<span class="c"># 2) 对参考统计算 FID</span>
+torchrun --standalone --nproc_per_node=1 fid.py calc --images=fid-tmp \
+    --ref=…/edm/fid-refs/cifar10-32x32.npz
+
+<span class="c"># 参考统计自己造（一次性，对全训练集）</span>
+python fid.py ref --data=datasets/cifar10-32x32.zip --dest=fid-refs/cifar10-32x32.npz</pre>
+
+  <h4>Fréchet 距离定义（2048 维高斯）</h4>
+  <div class="formula">FID = ‖μ_gen − μ_ref‖² + Tr( Σ_gen + Σ_ref − 2·(Σ_gen·Σ_ref)^{1/2} )&nbsp;&nbsp;<span class="c"># μ:[2048], Σ:[2048,2048], sqrtm 用 scipy</span></div>
+  <div class="warnbox"><b>口径要点（论文强调）</b>：
+  <ul>
+    <li><b>固定 50000 张</b>：少于会报错，多了取随机子集。图数对 FID 数值高度敏感。</li>
+    <li>FID 随 seed 波动：论文对每个模型 <b>跑 3 次不同 seed（0-49999 / 50000-99999 / 100000-149999），取最小值</b>。</li>
+    <li>参考统计 <code>.npz</code> = 在<b>全 CIFAR10 训练集（50000 张）</b>上算的 InceptionV3 (μ,Σ)。</li>
+  </ul></div>
+  <div class="note"><b>与 x0_loop 口径对比</b>：你用 torch_fidelity + cifar10-train、5000/20000 张、20–50 步、g=3.0，输出 FID/KID/IS/PRC。
+  EDM 用自带 InceptionV3、固定 50000 张、Heun 35 NFE、确定性、取 3 次最小。要和文献 1.79 可比，必须对齐：<b>图数 50000 + 同一 ref + 多步确定性采样</b>。</div>
+
+  <!-- 13 RESULTS -->
+  <h2 class="sec" id="results">13 · 结果 &amp; 对照 x0_loop</h2>
+  <table>
+    <tr><th>数据集</th><th>设置</th><th>FID</th><th>NFE</th></tr>
+    <tr><td><b>CIFAR-10（主线）</b></td><td>class-conditional, ddpmpp, 55.7M</td><td><b>1.79</b></td><td>35</td></tr>
+    <tr><td>CIFAR-10</td><td>unconditional, ddpmpp</td><td><b>1.97</b></td><td>35</td></tr>
+    <tr><td>FFHQ-64</td><td>uncond</td><td>2.39</td><td>79</td></tr>
+    <tr><td>AFHQv2-64</td><td>uncond</td><td>1.96</td><td>79</td></tr>
+    <tr><td>ImageNet-64</td><td>class-conditional, ADM</td><td>1.36</td><td>79</td></tr>
+  </table>
+
+  <h4>主线 vs x0_loop（同为 CIFAR10 32×32 类条件）</h4>
+  <table>
+    <tr><th>维度</th><th>EDM cifar10-cond-vp</th><th>x0_loop 最强基线</th></tr>
+    <tr><td>模型</td><td>SongUNet 55.7M, [B,3,32,32]</td><td>JiT dim512/depth12（更小）</td></tr>
+    <tr><td>参数化</td><td>EDM precond（c_skip/c_out/c_in/c_noise）</td><td>裸 x0 预测 + v-loss</td></tr>
+    <tr><td>噪声/时间采样</td><td>lognormal σ (−1.2,1.2)</td><td>logit_normal t (0,1) ✅ 同思想</td></tr>
+    <tr><td>loss 权重</td><td>λ(σ)=(σ²+σd²)/(σσd)²</td><td>target 三角权重</td></tr>
+    <tr><td>增强</td><td>9 维条件几何+色彩 (p=0.12)</td><td>仅 hflip</td></tr>
+    <tr><td>训练量</td><td>200 Mimg ≈ 390k 步 ×512</td><td>58.5k 步 ×256</td></tr>
+    <tr><td>FID 口径</td><td>50000 张 / 35 NFE / 3 seed 取最小</td><td>20000 张 / 50 步 / 单次 / g=3.0</td></tr>
+    <tr><td>FID</td><td><b>1.79</b></td><td>10.19</td></tr>
+  </table>
+  <div class="ok"><b>对 CIFAR10 最直接的路线</b>：EDM 就是 CIFAR10 的 SOTA 配方，比 EDM2（ImageNet）更贴你的任务。
+  最划算的两步：① 移植 <b>EDM preconditioning + λ(σ) + lognormal</b>；② 评测换成 <b>50000 张 + Heun 多步 + 固定 ref</b>，
+  让你当前 10.2 的 FID 与文献可比，再逐步逼近。</div>
+
+  <hr>
+  <p class="small">源码主线：<code>edm/train.py</code> · <code>training/loss.py</code>（VP/VE/EDMLoss）·
+  <code>training/networks.py</code>（VP/VE/iDDPM/EDMPrecond + SongUNet/DhariwalUNet）· <code>training/training_loop.py</code> ·
+  <code>training/augment.py</code>（非泄漏增强）· <code>generate.py</code>（edm_sampler / ablation_sampler）·
+  <code>fid.py</code>（InceptionV3 FID）。论文：arXiv 2206.00364。参数量与逐层 shape 已用本机实例化
+  <code>EDMPrecond(img_resolution=32, label_dim=10, augment_dim=9, model_channels=128, channel_mult=[2,2,2])</code> 验证（55,735,299 参数）。
+  姊妹文档：<a href="training_pipeline.html">training_pipeline.html</a>（x0_loop）·
+  <a href="training_pipeline_edm2.html">training_pipeline_edm2.html</a>（EDM2 / ImageNet）。</p>
+</main>
+</div>
+</body>
+</html>

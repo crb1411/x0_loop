@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>x0_loop 训练流程全景图</title>
+<style>
+  :root{
+    --bg:#ffffff; --panel:#f6f8fa; --panel2:#eef1f5; --border:#d0d7de;
+    --text:#1f2328; --muted:#59636e; --accent:#0969da; --accent2:#1a7f37;
+    --warn:#bc4c00; --pink:#cf222e; --purple:#8250df; --yellow:#9a6700;
+    --mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    line-height:1.65;font-size:15px}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .layout{display:flex;max-width:1400px;margin:0 auto}
+  nav{position:sticky;top:0;align-self:flex-start;height:100vh;overflow:auto;
+    width:250px;flex:0 0 250px;padding:24px 16px;border-right:1px solid var(--border);font-size:13.5px}
+  nav h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:18px 0 8px}
+  nav a{display:block;color:var(--muted);padding:3px 8px;border-radius:6px}
+  nav a:hover{background:var(--panel2);color:var(--text);text-decoration:none}
+  main{flex:1;min-width:0;padding:32px 40px 120px}
+  h1{font-size:30px;margin:0 0 4px;background:linear-gradient(90deg,#0969da,#1a7f37);
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:var(--muted);margin-bottom:28px}
+  h2.sec{font-size:23px;margin:48px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  h3{font-size:18px;margin:28px 0 10px;color:var(--accent2)}
+  h4{font-size:15.5px;margin:18px 0 8px;color:var(--yellow)}
+  p{margin:10px 0}
+  code{font-family:var(--mono);background:var(--panel2);padding:1px 6px;border-radius:5px;font-size:13px;color:#1f2328}
+  pre{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;
+    overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.55}
+  pre .k{color:var(--pink)} pre .c{color:var(--muted)} pre .s{color:var(--accent2)} pre .n{color:var(--yellow)}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--text);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.015)}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px 22px;margin:16px 0}
+  .grid{display:grid;gap:14px}
+  .grid2{grid-template-columns:1fr 1fr}
+  .grid3{grid-template-columns:1fr 1fr 1fr}
+  @media(max-width:900px){.grid2,.grid3{grid-template-columns:1fr}nav{display:none}}
+  .tag{display:inline-block;font-family:var(--mono);font-size:11.5px;padding:1px 8px;border-radius:20px;
+    border:1px solid var(--border);color:var(--muted);margin:0 4px 4px 0}
+  .tag.b{color:var(--accent);border-color:#aacdf5}
+  .tag.g{color:var(--accent2);border-color:#ace0b4}
+  .tag.o{color:var(--warn);border-color:#f0c3a0}
+  .tag.p{color:var(--purple);border-color:#d9c2f5}
+  .note{border-left:3px solid var(--accent);background:rgba(88,166,255,.06);padding:10px 16px;border-radius:0 8px 8px 0;margin:14px 0}
+  .warnbox{border-left:3px solid var(--warn);background:rgba(240,136,62,.07);padding:10px 16px;border-radius:0 8px 8px 0;margin:14px 0}
+  .ok{border-left:3px solid var(--accent2);background:rgba(126,231,135,.06);padding:10px 16px;border-radius:0 8px 8px 0;margin:14px 0}
+  /* flow diagram */
+  .flow{display:flex;flex-direction:column;gap:0;align-items:center;margin:20px 0}
+  .fbox{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:12px 18px;
+    min-width:340px;text-align:center;position:relative}
+  .fbox .t{font-weight:600;color:var(--accent)}
+  .fbox .d{font-size:12.5px;color:var(--muted);font-family:var(--mono)}
+  .fbox.g{border-color:#27512f} .fbox.g .t{color:var(--accent2)}
+  .fbox.o{border-color:#5c3a1e} .fbox.o .t{color:var(--warn)}
+  .fbox.p{border-color:#46336b} .fbox.p .t{color:var(--purple)}
+  .arr{width:2px;height:22px;background:var(--border);position:relative}
+  .arr:after{content:"▼";position:absolute;bottom:-4px;left:-5px;color:var(--border);font-size:11px}
+  .row{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin:8px 0}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:11px;height:11px;border-radius:3px;display:inline-block}
+  .formula{font-family:var(--mono);background:var(--panel);border:1px solid var(--border);
+    border-radius:8px;padding:10px 16px;margin:10px 0;color:#1f2328;overflow:auto}
+  .pill{font-family:var(--mono);font-size:12px;color:var(--accent2)}
+  ul{margin:8px 0;padding-left:22px} li{margin:4px 0}
+  .kbd{font-family:var(--mono);font-size:12px;color:var(--yellow)}
+  hr{border:none;border-top:1px solid var(--border);margin:30px 0}
+  .small{font-size:12.5px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav>
+  <h2>导航</h2>
+  <a href="#overview">0 · 全景概览</a>
+  <a href="#decouple">1 · 四层解耦</a>
+  <a href="#loop">2 · 训练主循环</a>
+  <a href="#data">3 · 数据 & 增强</a>
+  <a href="#tsample">4 · 时间采样 t</a>
+  <a href="#jitter">5 · 时间条件 jitter</a>
+  <a href="#process">6 · 前向过程</a>
+  <a href="#target">7 · 目标转换</a>
+  <a href="#loss">8 · Loss 设计</a>
+  <a href="#gan">9 · GAN 对抗训练</a>
+  <a href="#opt">10 · 优化 / EMA / 调度</a>
+  <a href="#sampling">11 · 采样 / CFG</a>
+  <a href="#eval">12 · Eval & gen_eval</a>
+  <a href="#metrics">13 · t-bin 指标</a>
+  <a href="#ablation">14 · 消融基建</a>
+  <a href="#config">15 · 配置 & 基线</a>
+</nav>
+<main>
+  <h1>x0_loop 训练流程全景图</h1>
+  <div class="sub">CIFAR10 Flow / Diffusion · x0 预测 · v-loss · 时间采样 · GAN 对抗增强 — 全部训练细节</div>
+
+  <div class="card">
+    <strong>这是什么</strong> · 本页把 <code>x0loop</code> 整个训练管线从数据到指标完整画出来，覆盖：
+    <span class="tag b">时间采样器</span><span class="tag b">logit-normal / grid-mix</span>
+    <span class="tag g">flow / diffusion 过程</span><span class="tag g">eps/x0/v 目标转换</span>
+    <span class="tag p">outer / per-space loss 权重</span>
+    <span class="tag o">GAN 判别器 + R1 + t-weight</span>
+    <span class="tag">EMA / cosine LR / grad clip</span>
+    <span class="tag">Heun / Euler 采样</span>
+    <span class="tag">FID/KID/IS/PRC gen_eval</span>
+    源码引用：<code>x0loop/training/engine.py</code> 为主入口。
+  </div>
+
+  <!-- ============ 0 OVERVIEW ============ -->
+  <h2 class="sec" id="overview">0 · 全景概览</h2>
+  <p>训练核心理念是 <b>把生成语义层层解耦</b>：backbone 只实现 <code>f_θ(x_t, t, cond)</code>，
+  其余（时间采样、加噪、目标参数化、loss 聚合、CFG、采样、GAN）全部由
+  <code>Denoiser</code> 包裹层 + <code>Process</code> + <code>Loss</code> 负责。</p>
+
+  <div class="flow">
+    <div class="fbox"><div class="t">数据 batch (x0, y)</div><div class="d">CIFAR10 [-1,1] · hflip 增强 · CFG label dropout</div></div>
+    <div class="arr"></div>
+    <div class="fbox b"><div class="t">① 采样 t</div><div class="d">time_sampler.sample(B) → t ∈ (0,1] · 可 grid-mix</div></div>
+    <div class="arr"></div>
+    <div class="fbox b"><div class="t">② 前向加噪 forward_sample</div><div class="d">x_t = α(t)·x0 + σ(t)·eps,  eps~N(0,I)</div></div>
+    <div class="arr"></div>
+    <div class="fbox p"><div class="t">③ 时间条件 jitter (可选)</div><div class="d">t_model = clamp(t + N(μ,σ))  —— 只喂模型,不污染物理 t</div></div>
+    <div class="arr"></div>
+    <div class="fbox"><div class="t">④ backbone 前向</div><div class="d">out = net(x_t, t_model, cond)  · DiT / JiT / UNet · 直接预测 eps|x0|v</div></div>
+    <div class="arr"></div>
+    <div class="row">
+      <div class="fbox" style="min-width:260px"><div class="t">⑤ 目标转换 + base loss</div><div class="d">x0̂/epŝ/v̂ = process.*_from_output<br>loss = w_out(t)·Σ c_i·w_i(t)·L_i</div></div>
+      <div class="fbox o" style="min-width:260px"><div class="t">⑤' GAN 分支 (可选)</div><div class="d">x0̂ = x0_from_output<br>D-step + G_adv = w_adv(t,step)·E[w(t)·(−D(x0̂))]</div></div>
+    </div>
+    <div class="arr"></div>
+    <div class="fbox"><div class="t">⑥ backward + optimizer step</div><div class="d">grad-accum · clip(10, 仅>10k step) · AdamW · cosine LR · EMA</div></div>
+    <div class="arr"></div>
+    <div class="row">
+      <div class="fbox g" style="min-width:200px"><div class="t">eval</div><div class="d">每1k step · val loss_eps/x0/v</div></div>
+      <div class="fbox g" style="min-width:200px"><div class="t">sample grid</div><div class="d">每10k · Heun 50步</div></div>
+      <div class="fbox g" style="min-width:200px"><div class="t">gen_eval</div><div class="d">每10k · FID/KID/IS/PRC 5k张</div></div>
+      <div class="fbox g" style="min-width:200px"><div class="t">checkpoint</div><div class="d">含 D + d_optimizer</div></div>
+    </div>
+    <div class="arr"></div>
+    <div class="fbox g"><div class="t">⑦ final gen_eval</div><div class="d">训练结束 · 20000 张 · Heun 50 步 · 完整 FID/KID/IS/PRC</div></div>
+  </div>
+
+  <div class="legend">
+    <span><span class="dot" style="background:var(--accent)"></span>时间 / 采样</span>
+    <span><span class="dot" style="background:var(--accent2)"></span>过程 / 评估</span>
+    <span><span class="dot" style="background:var(--purple)"></span>时间条件 jitter</span>
+    <span><span class="dot" style="background:var(--warn)"></span>GAN 对抗</span>
+  </div>
+
+  <!-- ============ 1 DECOUPLE ============ -->
+  <h2 class="sec" id="decouple">1 · 四层解耦设计</h2>
+  <p>整个训练目标拆成四个互不偷逻辑的层 —— <code>process</code> 负责物理/几何一致性，
+  <code>target converter</code> 负责参数化一致性，<code>loss</code> 负责实验目标，<code>time_sampler</code> 负责 t 分布。</p>
+  <div class="grid grid2">
+    <div class="card"><h4>TimeSchedule <span class="tag">core/schedules.py</span></h4>
+      t 的采样空间、<code>α(t)</code>、<code>σ(t)</code>、<code>snr(t)</code>。diffusion 与 flow 仅在这里通过 α/σ 几何区分。</div>
+    <div class="card"><h4>BaseProcess <span class="tag">core/process_base.py</span></h4>
+      <code>x_t = α(t)x0 + σ(t)eps</code> 的加噪、采样 step，以及 <code>eps/x0/v</code> 三向互转。</div>
+    <div class="card"><h4>OutputTarget <span class="tag">process.output_target</span></h4>
+      模型直接输出哪一种：<code>eps</code> / <code>x0</code> / <code>v</code>。<b>它只决定 out 的语义，不决定 loss 在哪算。</b></div>
+    <div class="card"><h4>LossConfig <span class="tag">losses/spec.py</span></h4>
+      在哪些预测空间算 loss + 如何按 t 加权。可在 eps/x0/v 任意空间组合监督。</div>
+  </div>
+  <div class="formula">loss_t = <b style="color:var(--purple)">w_outer(t)</b> · Σ_i ( c_i · <span style="color:var(--accent2)">w_i(t)</span> · L_i(pred_i, target_i) )</div>
+  <p class="small">关键约束：不要在 model 内部处理 DDPM/Flow 差异；不要在 process 内写死 loss；不要让 output_target 决定 loss_space；
+  不要把 <code>t_idx=1..1000</code> 泄漏进 loss；不要把 <code>w(t)</code> 藏进 target converter。</p>
+
+  <!-- ============ 2 LOOP ============ -->
+  <h2 class="sec" id="loop">2 · 训练主循环</h2>
+  <p>入口 <code>train(cfg)</code> 构建全部组件，然后按 epoch × micro-step 迭代。下面是每个 micro-step 的精确流程
+  （见 <code>engine.py:295-337</code>）。</p>
+
+<pre><span class="c"># engine.train() —— 每个 micro_step</span>
+accum_index   = micro_step % grad_accum
+update_step   = (accum_index == 0)
+<span class="k">if</span> update_step:
+    lr = lr_for_step(global_step)          <span class="c"># cosine: warmup 10k → cosine 100k → min</span>
+    optimizer.zero_grad()
+fwd = compute_forward_batch(...)           <span class="c"># ① 采样t ② 加噪 ③ jitter ④ 前向 ⑤ base loss + 诊断loss</span>
+maybe_apply_adversarial(...)               <span class="c"># ⑤' GAN: 改 fwd.loss，更新 D</span>
+backward_loss(fwd.loss / accum_steps)
+<span class="k">if</span> should_step_optimizer(micro_step):
+    clip = 0.0 <span class="k">if</span> global_step &lt; 10000 <span class="k">else</span> 10.0   <span class="c"># 前1万步不裁剪梯度</span>
+    grad_norm = step_optimizer(denoiser, optimizer, scaler, clip)
+    ema.update(denoiser)                   <span class="c"># EMA decay 0.999</span>
+tbin_stats.update(...)                     <span class="c"># 按 t 分桶累计 loss/权重/GAN指标</span>
+<span class="k">if</span> did_optimizer_step:
+    global_step += 1
+    log_training_step(...)                 <span class="c"># 每 log_every=100 步</span>
+    run_eval_if_due(...)                   <span class="c"># 每 1000 步</span>
+    run_sampling_if_due(...)               <span class="c"># 每 10000 步</span>
+    save_checkpoint_if_due(...)            <span class="c"># 含 D / d_optimizer</span>
+    run_generative_eval_if_due(...)        <span class="c"># 每 10000 步</span>
+run_final_generative_eval(...)             <span class="c"># 全部 epoch 结束后</span></pre>
+
+  <h4>compute_forward_batch 内部 <span class="tag">engine.py:63</span></h4>
+<pre>x0 = x0.to(device);  cond = label or None
+cond = <span class="s">apply_classifier_free_label_dropout</span>(cond, null_id=num_classes, p=class_dropout_prob)  <span class="c"># 0.1</span>
+<span class="k">if</span> augment_mode == "data_only":
+    x0 = augment.apply(x0, params)         <span class="c"># 仅对干净数据增强(hflip)</span>
+<span class="k">with</span> autocast(bf16):
+    batch = denoiser.compute_loss(x0, cond=cond)     <span class="c"># 走 Denoiser, 见 §6/§7/§8</span>
+    <span class="k">with</span> no_grad():
+        unweighted = _diagnostic_losses(...)         <span class="c"># 记录纯 mse loss_eps/loss_x0/loss_v</span>
+<span class="k">return</span> ForwardBatch(loss, loss_by_target, fb, out, cond)</pre>
+  <div class="note"><b>诊断 loss</b>：除了被优化的加权 loss，每步还会无梯度算一遍三个空间的纯 MSE
+  <code>loss_eps / loss_x0 / loss_v</code> 写日志，便于跨配置对照（不参与反传）。</div>
+
+  <!-- ============ 3 DATA ============ -->
+  <h2 class="sec" id="data">3 · 数据 & 增强</h2>
+  <div class="grid grid2">
+    <div class="card"><h4>数据集</h4>
+      <ul>
+        <li><code>cifar10</code> / <code>mnist</code> / <code>imagefolder</code> / <code>tiny-imagenet</code></li>
+        <li>transform：resize+center-crop 到 <code>image_size</code> → tensor → 映射到 <code>[-1, 1]</code></li>
+        <li>CIFAR10 root：<code>/root/data/cifar10_data</code>，<code>download:false</code></li>
+      </ul></div>
+    <div class="card"><h4>增强 augment <span class="tag">aug/</span></h4>
+      <ul>
+        <li><code>name</code>：none / geom / dit / strongaugment</li>
+        <li><code>mode: data_only</code> —— 只增强干净 x0，不碰 x_t</li>
+        <li>CIFAR10 默认：<code>geom</code>，仅 <code>hflip_prob=0.5</code>，无平移/裁剪</li>
+        <li><code>strongaugment</code> 额外支持 crop/color jitter/grayscale/erasing</li>
+      </ul></div>
+  </div>
+  <div class="card"><h4>CFG label dropout</h4>
+    <code>class_dropout_prob=0.1</code> 时，把 10% 样本标签替换为 null 类 id（<code>=num_classes</code>），
+    使模型同时学到条件与无条件分布，供采样期 classifier-free guidance 使用。</div>
+
+  <!-- ============ 4 TIME SAMPLER ============ -->
+  <h2 class="sec" id="tsample">4 · 时间采样 t <span class="tag b">core/time_sampling.py</span></h2>
+  <p>训练时 <code>t ∈ (0,1]</code> 由 <code>time_sampler.sample(B)</code> 产生（与 schedule 解耦）。所有采样器最终 clamp 到合法区间。</p>
+
+  <table>
+    <tr><th>name</th><th>采样公式</th><th>用途 / 特性</th></tr>
+    <tr><td><code>legacy / schedule</code></td><td>diffusion: <code>t=randint(1,N)/N</code>；flow: <code>U(0,1)</code></td><td>schedule 驱动的旧默认</td></tr>
+    <tr><td><code>uniform_continuous</code></td><td><code>t = min_t + (max_t−min_t)·U(0,1)</code></td><td>flow matching 主推；均匀</td></tr>
+    <tr><td><code>uniform_discrete</code></td><td><code>t = randint(min,max)/num_steps</code></td><td>离散步训练</td></tr>
+    <tr><td><code>logit_normal</code></td><td><code>z~N(μ,σ); t=sigmoid(z)</code></td><td><b>μ=0,σ=1 集中中段</b>；当前最强基线用</td></tr>
+    <tr><td><code>beta</code></td><td><code>t~Beta(α,β)→[min,max]</code></td><td>α,β&lt;1 偏端点；&gt;1 偏中段</td></tr>
+  </table>
+
+  <h4>Flow solver-grid 混合 <span class="tag b">MixedTimeSampler</span></h4>
+  <p>仅 flow 可用。每个样本独立地：以 <code>1−p</code> 概率走 base 采样器，以 <code>p=grid_mix_prob</code> 概率从「采样器网格时间」取样，
+  让训练 t 分布对齐推理时实际会落到的离散时刻。</p>
+  <div class="formula">grid_steps=[50,20] → { 1/50, 2/50, …, 1 } ∪ { 1/20, 2/20, …, 1 }  &nbsp;(默认不含 t=0)</div>
+<pre>time_sampler:
+  <span class="k">name</span>: logit_normal
+  <span class="k">mean</span>: -0.8
+  <span class="k">std</span>: 0.8
+  <span class="k">grid_mix_prob</span>: 0.2
+  <span class="k">grid_steps</span>: [50, 20]
+  <span class="k">grid_include_t0</span>: false   <span class="c"># 只有目标在 t=0 稳定时才设 true</span></pre>
+
+  <!-- ============ 5 JITTER ============ -->
+  <h2 class="sec" id="jitter">5 · 时间条件 jitter <span class="tag p">denoiser.training_time_condition</span></h2>
+  <p>训练期可对「<b>喂给模型的条件时间</b>」加扰动，但物理时间 <code>fb.t</code> 保持不变。这是关键的双时间设计。</p>
+  <div class="formula">δ = N(μ, σ)<br>t_model = clamp(t + δ, min_t, max_t)  &nbsp;&nbsp;<span class="c"># prob&lt;1 时按概率逐样本启用</span></div>
+  <div class="warnbox"><b>严格边界</b>（见 <code>gan_…_design.md §2</code>）：物理时间 <code>fb.t</code> 必须用于
+  forward_sample、target 转换、loss 权重、t-bin 指标、GAN 的 real/fake 配对与 D 条件时间；
+  <b>jitter 后的 <code>t_model</code> 只能进 backbone 前向</b>，绝不参与 target conversion / loss weighting / GAN pairing。</div>
+<pre>time_condition_jitter:
+  <span class="k">enabled</span>: true
+  <span class="k">prob</span>: 1.0      <span class="c"># 逐样本启用概率</span>
+  <span class="k">mean</span>: 0.0
+  <span class="k">std</span>: 0.05
+  <span class="k">min_t</span>: 1.0e-5
+  <span class="k">max_t</span>: 0.99999</pre>
+
+  <!-- ============ 6 PROCESS ============ -->
+  <h2 class="sec" id="process">6 · 前向过程 & schedule</h2>
+  <p>统一写成 <code>x_t = α(t)·x0 + σ(t)·eps</code>，diffusion 与 flow 只是 α/σ 几何不同。</p>
+  <div class="grid grid2">
+    <div class="card"><h4>Flow（线性插值）</h4>
+      <div class="formula">α(t) = 1 − t<br>σ(t) = t<br>α + σ = 1</div>
+      sampler：<code>euler</code> / <code>heun</code>。t=1 高斯端，t=0 数据端。</div>
+    <div class="card"><h4>Diffusion（VP-SDE）</h4>
+      <div class="formula">∫β = β_min·t + ½(β_max−β_min)t²<br>α(t) = exp(−½∫β)<br>σ(t) = √(1−α²)</div>
+      α²+σ²=1。sampler：<code>ddim</code> / <code>posterior</code>。</div>
+  </div>
+  <div class="formula">snr(t) = α(t)² / σ(t)²&nbsp;&nbsp;<span class="c"># 供 loss 权重 snr/inv_snr/logsnr/min_snr 使用</span></div>
+  <p>flow <code>forward_sample</code>：抽 <code>eps~N(0,I)</code> → <code>x_t = (1−t)x0 + t·eps</code>，返回 <code>ForwardBatch(x0,t,xt,eps)</code>。</p>
+
+  <!-- ============ 7 TARGET ============ -->
+  <h2 class="sec" id="target">7 · 目标参数化 & 互转 <span class="tag g">process_base.py</span></h2>
+  <p>模型直接输出 <code>output_target ∈ {eps,x0,v}</code>，训练侧统一用下面三个函数从同一个 <code>out</code> 还原任意空间，
+  因此 loss 空间与输出空间完全解耦。</p>
+  <table>
+    <tr><th>还原</th><th>out=x0</th><th>out=eps</th><th>out=v</th></tr>
+    <tr><td><b>x0̂</b></td><td><code>out</code></td><td><code>(x_t − σ·out)/α</code></td><td><code>(x_t − σ·out)/(α+σ)</code></td></tr>
+    <tr><td><b>epŝ</b></td><td><code>(x_t − α·out)/σ</code></td><td><code>out</code></td><td><code>(x_t + α·out)/(α+σ)</code></td></tr>
+    <tr><td><b>v̂</b></td><td colspan="3"><code>v = epŝ − x0̂</code>（当 out=v 时直接返回 out）</td></tr>
+  </table>
+  <p>对应 target：<code>x0_target = x0</code>，<code>eps_target = eps</code>，<code>v_target = eps − x0</code>。</p>
+  <div class="note">当前 CIFAR10 主配置：<b>output_target = x0</b>，但 loss 在 <b>v 空间</b>计算
+  —— 即模型预测干净图 x0，loss 监督由 x0̂、eps 反推出的速度 v̂ 对齐 <code>eps−x0</code>。</div>
+
+  <!-- ============ 8 LOSS ============ -->
+  <h2 class="sec" id="loss">8 · Loss 设计 <span class="tag p">losses/spec.py · atomic.py · weighted.py</span></h2>
+  <div class="formula">inner = Σ_i c_i · <span style="color:var(--accent2)">w_i(t)</span> · L_i(pred_i, target_i)<br>
+  loss = <span style="color:var(--purple)">w_outer(t)</span> · inner</div>
+
+  <h4>term 字段</h4>
+<pre>loss:
+  <span class="k">outer_weight</span>: target          <span class="c"># 见下表</span>
+  <span class="k">outer_weight_power</span>: 1.0
+  <span class="k">outer_weight_floor</span>: 0.0
+  <span class="k">terms</span>:
+    - {<span class="k">target</span>: v, <span class="k">formula</span>: mse, <span class="k">coef</span>: 1.0, <span class="k">weight</span>: none}</pre>
+  <ul>
+    <li><code>target</code>：eps / x0 / v</li>
+    <li><code>formula</code>：mse / l1 / huber（huber 用 <code>delta</code>）</li>
+    <li><code>weight</code>：per-term t 权重，是 escape hatch，一般留 none，优先用 outer_weight</li>
+  </ul>
+
+  <h4>outer_weight 选项</h4>
+  <table>
+    <tr><th>name</th><th>w(t)（均值归一化后）</th><th>直觉</th></tr>
+    <tr><td><code>none</code></td><td>1</td><td>无加权基线</td></tr>
+    <tr><td><code>x0</code></td><td><code>floor+(1−floor)(1−t)^p</code>，如 p=2 → <code>3(1−t)²</code></td><td>重 t→0（干净端）</td></tr>
+    <tr><td><code>eps</code></td><td><code>base=t</code></td><td>重 t→1（噪声端）</td></tr>
+    <tr><td><code>v</code></td><td><code>base=1−|2t−1|</code>，p=1 → <code>2(1−|2t−1|)</code></td><td>三角，重中段 t=0.5</td></tr>
+    <tr><td><code>target</code></td><td>单 term 时取该 term 对应的 x0/eps/v 多项式；多 term 退化为 1</td><td>自动匹配主目标</td></tr>
+    <tr><td><code>snr / inv_snr / logsnr</code></td><td><code>snr(t)</code> / <code>1/snr</code> / <code>log snr</code></td><td>schedule 诱导</td></tr>
+    <tr><td><code>min_snr</code></td><td><code>min(snr,γ)/snr</code>，<code>min_snr_gamma</code></td><td>压高 SNR 区，常用 eps/diffusion</td></tr>
+    <tr><td><code>balance_weights</code></td><td><code>(1−bf)+bf·α(t)·mean(1/α)</code></td><td>α 平衡，<code>balance_factor</code></td></tr>
+  </table>
+  <p class="small">多项式权重默认对 uniform t 做均值归一（均值≈1）。<code>weight_power/weight_floor</code> 缺省回退到 <code>outer_weight_power/floor</code>。</p>
+  <div class="ok"><b>当前主基线 loss</b>：<code>outer_weight=target, power=1.0, floor=0.0</code>，单 term <code>{v, mse, 1.0}</code>
+  → 实际权重是「重中段的三角」乘 v 空间 MSE。</div>
+
+  <!-- ============ 9 GAN ============ -->
+  <h2 class="sec" id="gan">9 · GAN 对抗训练 <span class="tag o">losses/adversarial.py · models/discriminator.py</span></h2>
+  <p>目标：模型已从 x_t 预测出 <code>x0̂</code> 后，用轻量判别器把 <code>x0̂</code> 拉回自然图像流形 —— <b>增强而非替代</b>回归目标。
+  GAN 不并入 <code>CompositeLoss</code>，因为它需要独立 D、detach、独立 optimizer、独立 checkpoint。</p>
+
+  <h4>9.1 判别器结构 <span class="tag o">X0Discriminator</span></h4>
+  <div class="flow">
+    <div class="fbox o"><div class="t">输入</div><div class="d">x_candidate [B,3,32,32], t [B], cond [B] 可选</div></div>
+    <div class="arr"></div>
+    <div class="fbox"><div class="t">stem</div><div class="d">SN-Conv3×3 3→16</div></div>
+    <div class="arr"></div>
+    <div class="fbox"><div class="t">4× ResDiscBlock</div><div class="d">16→32↓ → 32→64↓ → 64→128↓ → 128→128 · LeakyReLU0.2 · 每块 (h+skip)/√2</div></div>
+    <div class="arr"></div>
+    <div class="fbox"><div class="t">head</div><div class="d">LeakyReLU → 空间求和池化 [B,128] → Linear→标量 logit</div></div>
+    <div class="arr"></div>
+    <div class="fbox o"><div class="t">投影条件</div><div class="d">logit += ⟨h, time_proj(t_embed)⟩/√C + ⟨h, class_embed(y)⟩/√C</div></div>
+  </div>
+  <ul>
+    <li>全程 <code>spectral_norm</code>，无 BatchNorm，无 FiLM（避免 D 过强）</li>
+    <li>条件用 projection 方式（time + class embedding）</li>
+    <li><code>base_channels=16</code> 约 0.4–0.5M 参数</li>
+  </ul>
+
+  <h4>9.2 判别空间</h4>
+  <div class="formula">real: D(x0,   t, cond)&nbsp;&nbsp;&nbsp;fake: D(x0̂, t, cond)</div>
+  <p class="small">real 也喂同一 batch 的 t（x0 本身与 t 无关），避免条件判别器把 real/fake 条件分布差当捷径。
+  第一版只判别 clean manifold，不输入 x_t（否则退化成 endpoint-consistency critic，低 t 走捷径）。</p>
+
+  <h4>9.3 Loss（hinge，默认）</h4>
+  <div class="grid grid2">
+    <div class="card"><b>D-step</b>（fake 必须 detach）
+      <div class="formula">L_D_real = relu(1 − D(x0))<br>L_D_fake = relu(1 + D(x0̂.detach()))<br>L_D = E_w[L_real+L_fake] + ½γ·int·R1</div></div>
+    <div class="card"><b>G-step</b>（冻结 D 参数，保留到 x0̂ 的梯度）
+      <div class="formula">L_G_adv = −D(x0̂)<br>fwd.loss += λ_adv(step) · E_w[ w(t)·L_G_adv ]</div></div>
+  </div>
+  <p>可选 logistic non-saturating：<code>L_D=softplus(−D_real)+softplus(D_fake)</code>，<code>L_G=softplus(−D_fake)</code>。</p>
+
+  <h4>9.4 R1 梯度惩罚（lazy）</h4>
+  <div class="formula">R1 = ‖∇_{x0} D(x0)‖²&nbsp;&nbsp;<span class="c"># 每 r1_interval=16 步算一次, loss 乘 ½·γ·interval 补偿</span></div>
+
+  <h4>9.5 λ_adv 调度</h4>
+  <div class="formula">step &lt; start_step → 0<br>否则 λ = weight · min((step−start+1)/warmup, 1)</div>
+  <p class="small">默认 <code>start_step=10000, warmup_steps=10000, weight≈0.02</code>，D:G=1:1。</p>
+
+  <h4>9.6 t-aware 对抗权重 w(t) <span class="tag o">adversarial.t_weight</span></h4>
+  <p>核心：t 大时 x_t≈噪声，x0̂ 很难像自然图，让这些样本强训 GAN 会逼模型「从纯噪声硬 hallucinate」，破坏回归。
+  所以对抗 loss 主要作用在 x0̂ 已有结构的中低 t 区。</p>
+  <table>
+    <tr><th>piecewise 默认 bins</th><th>w</th></tr>
+    <tr><td>[0.00, 0.05)</td><td>0.25</td></tr>
+    <tr><td>[0.05, 0.35)</td><td>1.00</td></tr>
+    <tr><td>[0.35, 0.65)</td><td>0.50</td></tr>
+    <tr><td>[0.65, 1.00]</td><td>0.05</td></tr>
+  </table>
+  <p>或 <code>smooth</code> gate：<code>w = (1−t)^p · sigmoid((t−t_min)/τ) · sigmoid((t_max−t)/τ)</code>，可 mean 归一。
+  D 与 G 共用同一 <code>w(t)</code>（D 过强时可单独降高 t 权重）。</p>
+
+  <h4>9.7 更新与 detach 顺序 <span class="tag o">engine.maybe_apply_adversarial</span></h4>
+<pre><span class="c"># 每 update_every 步：D-step</span>
+<span class="k">for</span> _ <span class="k">in</span> range(d_steps):
+    <span class="k">with</span> no_grad: fake_d = x0_from_output(xt, t, out.<b>detach()</b>)
+    use_r1 = (step % r1_interval == 0)
+    real = x0.detach().requires_grad_(use_r1)
+    real_logits = D(real, t, cond);  fake_logits = D(fake_d, t, cond)
+    per_d, per_real, per_fake = discriminator_loss(...)   <span class="c"># hinge</span>
+    d_loss = weighted_mean(per_d, w(t)) (+ R1)
+    d_loss.backward();  d_optimizer.step()
+
+<span class="c"># G-step（每步）</span>
+set_requires_grad(D, False)
+fake_g = x0_from_output(xt, t, out)        <span class="c"># 不 detach</span>
+g_adv  = weighted_mean(-D(fake_g, t, cond), w(t))
+fwd.loss = fwd.loss + λ_adv(step) · g_adv  <span class="c"># 并入主 backward</span>
+set_requires_grad(D, True)</pre>
+
+  <h4>9.8 GAN 配置草案 + 首轮实验矩阵</h4>
+  <div class="grid grid2">
+    <div class="card">
+<pre>adversarial:
+  <span class="k">enabled</span>: true
+  <span class="k">fake_space</span>: x0_hat
+  <span class="k">loss</span>: hinge
+  <span class="k">weight</span>: 0.02
+  <span class="k">start_step</span>: 10000
+  <span class="k">warmup_steps</span>: 10000
+  <span class="k">update_every</span>: 1
+  <span class="k">d_steps</span>: 1
+  <span class="k">clamp_fake_for_d</span>: false
+  <span class="k">t_weight</span>: {name: piecewise}
+  <span class="k">r1</span>: {gamma: 1.0, interval: 16}
+
+discriminator:
+  <span class="k">name</span>: x0_resnet
+  <span class="k">base_channels</span>: 16
+  <span class="k">spectral_norm</span>: true
+  <span class="k">time_projection</span>: true
+  <span class="k">class_projection</span>: true
+  <span class="k">lr</span>: 2.0e-4
+  <span class="k">weight_decay</span>: 0.0
+  <span class="k">betas</span>: [0.0, 0.99]</pre>
+    </div>
+    <div class="card"><b>首轮 5 实验</b>（基于最强 baseline）
+      <table>
+        <tr><th>ID</th><th>adv w</th><th>t 权重</th></tr>
+        <tr><td>gan_w0p01_piecewise</td><td>0.01</td><td>默认</td></tr>
+        <tr><td>gan_w0p02_piecewise</td><td>0.02</td><td>默认（主）</td></tr>
+        <tr><td>gan_w0p05_piecewise</td><td>0.05</td><td>默认（上限）</td></tr>
+        <tr><td>gan_w0p02_lowt</td><td>0.02</td><td>只 [0.05,0.35]=1</td></tr>
+        <tr><td>gan_w0p02_nohigh</td><td>0.02</td><td>高 t=0</td></tr>
+      </table>
+      <p class="small">脚本：<code>run_jit_logitnormal_target_weight_gan_sequential.sh</code></p>
+    </div>
+  </div>
+
+  <h4>9.9 必记指标 & 失败信号</h4>
+  <div class="grid grid2">
+    <div class="card"><b>日志</b>
+      <p class="small"><code>gan/d_loss · g_adv_loss · d_real_loss · d_fake_loss · d_real/fake_logit_mean · d_real/fake_prob_mean ·
+      d_acc_real/fake/total · g_weight · d_lr · r1_penalty · enabled_t_fraction</code>；
+      t-bin：<code>advw · drl · dfl · dacc · gadv</code>。</p></div>
+    <div class="card"><b>失败信号</b>
+      <ul class="small">
+        <li>任意 GAN loss/logit/grad NaN/Inf；grad_norm 持续爆炸</li>
+        <li><code>d_acc_total &gt; 0.90</code> 持续 → 判别器过强</li>
+        <li>FID 降但 recall 明显降 → 模式收缩</li>
+        <li>GAN loss 变好但 eval denoise loss 变差 → 目标偏离</li>
+        <li><code>img_s</code> 比 baseline 降 &gt;40–50% 且无收益</li>
+      </ul></div>
+  </div>
+
+  <!-- ============ 10 OPT ============ -->
+  <h2 class="sec" id="opt">10 · 优化 / EMA / LR 调度</h2>
+  <div class="grid grid3">
+    <div class="card"><h4>Optimizer</h4>
+      <code>AdamW(betas=(0.9,0.95), wd=0.04)</code><br>D 用独立 <code>AdamW(betas=(0.0,0.99), wd=0)</code></div>
+    <div class="card"><h4>LR 调度</h4>
+      cosine：<code>warmup 10000 → cosine 100000</code><br>max 1e-4 → min 3e-5</div>
+    <div class="card"><h4>梯度裁剪</h4>
+      <code>max_clip_grad=10</code><br><b>前 10000 步关闭裁剪</b>（clip=0）</div>
+    <div class="card"><h4>EMA</h4>
+      <code>decay=0.999</code>，仅在 optimizer step 后更新；采样/gen_eval 用 EMA 权重</div>
+    <div class="card"><h4>混合精度</h4>
+      bf16 autocast；fp16 时启用 GradScaler</div>
+    <div class="card"><h4>grad accumulation</h4>
+      <code>gradient_accumulation_steps</code>；loss 除以当前累计步数</div>
+  </div>
+
+  <!-- ============ 11 SAMPLING ============ -->
+  <h2 class="sec" id="sampling">11 · 采样 / CFG <span class="tag g">flow_process.sample</span></h2>
+  <p>从 t=1 高斯端积分回 t=0。时间网格 <code>linspace(1,0,steps+1)</code>，dt 为负。</p>
+  <div class="grid grid2">
+    <div class="card"><h4>Euler</h4>
+      <div class="formula">v = epŝ − x0̂<br>x ← x + dt·v</div></div>
+    <div class="card"><h4>Heun（预测-校正）</h4>
+      <div class="formula">x_e = x + dt·v(t)<br>x ← x + dt·½(v(t)+v(x_e,s))</div>
+      <p class="small">最后一步退回 Euler：在 t=0 评估 x0 模型会触发不稳的 eps 反推。</p></div>
+  </div>
+  <h4>Classifier-free guidance</h4>
+  <div class="formula">out = out_uncond + g·(out_cond − out_uncond)</div>
+  <ul class="small">
+    <li><code>num_classes≤0</code> → 关闭条件</li>
+    <li><code>guidance_scale==1.0</code> → 关闭 CFG（即使有标签）</li>
+    <li><code>&gt;1.0</code> → 同时跑 cond 与 null-label uncond 再组合</li>
+    <li>训练期 sample grid 用 <code>g=1.0</code>；gen_eval 用 <code>g=3.0</code></li>
+  </ul>
+
+  <!-- ============ 12 EVAL ============ -->
+  <h2 class="sec" id="eval">12 · Eval & gen_eval</h2>
+  <div class="grid grid2">
+    <div class="card"><h4>eval（验证 loss）<span class="tag g">每 1000 步</span></h4>
+      <ul class="small">
+        <li>max_batches=8，bf16，无梯度</li>
+        <li>日志：<code>eval/loss_weighted · loss_no_weight · loss_outer_weight · loss_eps · loss_x0 · loss_v</code></li>
+      </ul></div>
+    <div class="card"><h4>gen_eval（生成指标）<span class="tag g">每 10000 步</span></h4>
+      <ul class="small">
+        <li>5000 张 · Heun 20 步 · g=3.0</li>
+        <li>torch-fidelity：ISC / FID / KID / PRC / MIND（PPL 关）</li>
+        <li>input2=cifar10-train；结果追加到 <code>gen_eval_metrics_*.jsonl</code></li>
+      </ul></div>
+  </div>
+  <div class="ok"><b>final gen_eval</b>（训练结束）：20000 张 · Heun 50 步 · 完整 FID/KID/IS/PRC，作为最终报告口径。</div>
+
+  <!-- ============ 13 TBIN ============ -->
+  <h2 class="sec" id="metrics">13 · t-bin 指标 <span class="tag">training/metrics.py</span></h2>
+  <p>把每个 batch 的 per-sample loss / 权重 / GAN 量按 t 分桶（默认 20 桶）累计，日志窗口结束时输出 summary。
+  既看整体 loss，也能定位「是哪个 t 区间在恶化」。</p>
+  <div class="formula">idx = bucketize(t, linspace(0,1,bins+1))<br>每桶累计：count · Σloss · Σweight · Σ(GAN: advw/drl/dfl/dacc/gadv)</div>
+
+  <!-- ============ 14 ABLATION ============ -->
+  <h2 class="sec" id="ablation">14 · 消融基建 <span class="tag">train_run/ablations/</span></h2>
+  <p>统一 launcher <code>_run_ablation.sh</code>：固定 epochs/sampler/gen_eval，输出强制到
+  <code>runs/ablations/cifar10_flow_x0_vloss/{model}/{tag}/{ts}/</code>，训练后自动出图。
+  <code>run_*_sequential.sh</code> 串行跑一组实验（等前一个 pid 退出且 status=0 再起下一个）。</p>
+  <table>
+    <tr><th>ablation</th><th>含义</th></tr>
+    <tr><td><code>unweighted</code></td><td>outer_weight=none + uniform 连续时间</td></tr>
+    <tr><td><code>v_weight</code></td><td>outer_weight=target（v 三角）</td></tr>
+    <tr><td><code>x0_weight</code></td><td>outer_weight=x0，重低噪时刻</td></tr>
+    <tr><td><code>logitnormal_time</code></td><td>unweighted + logit_normal(0,1)</td></tr>
+    <tr><td><code>logitnormal_target_weight</code></td><td>target 权重 + logit_normal —— <b>最强基线</b></td></tr>
+    <tr><td><code>…_gridmix_p0p3/5/8</code></td><td>叠加 solver-grid 混合 p=0.3/0.5/0.8</td></tr>
+    <tr><td><code>…_pmean_*_pstd_*</code></td><td>logit_normal 的 mean/std 扫描</td></tr>
+    <tr><td><code>…_gan_*</code></td><td>在最强基线上叠加 GAN（§9）</td></tr>
+  </table>
+
+  <!-- ============ 15 CONFIG ============ -->
+  <h2 class="sec" id="config">15 · 当前配置 & 最强基线</h2>
+  <div class="grid grid2">
+    <div class="card"><h4>模型（JiT）</h4>
+<pre><span class="k">name</span>: jit
+<span class="k">image_size</span>: 32, <span class="k">patch_size</span>: 4
+<span class="k">dim</span>: 512, <span class="k">depth</span>: 12, <span class="k">heads</span>: 8
+<span class="k">mlp_ratio</span>: 4.0, <span class="k">num_classes</span>: 10
+<span class="k">bottleneck_dim</span>: 128
+<span class="k">in_context_len</span>: 32, <span class="k">in_context_start</span>: 4</pre>
+    </div>
+    <div class="card"><h4>过程 / loss / 采样</h4>
+<pre><span class="k">process</span>: flow, output_target=x0, heun
+<span class="k">schedule</span>: flow
+<span class="k">time_sampler</span>: logit_normal(0,1)
+<span class="k">loss</span>: outer=target,p=1, term {v,mse,1}
+<span class="k">train</span>: bs256, ep300, lr1e-4(cos)
+        wd0.04, ema0.999, clip10</pre>
+    </div>
+  </div>
+  <div class="ok"><h4>当前最强完整结果（JiT / logitnormal_target_weight / no-grid @58.5k）</h4>
+    <div class="row" style="justify-content:flex-start">
+      <span class="tag g" style="font-size:14px">FID 10.187</span>
+      <span class="tag g" style="font-size:14px">IS 9.577</span>
+      <span class="tag g" style="font-size:14px">precision 0.387</span>
+      <span class="tag g" style="font-size:14px">recall 0.745</span>
+    </div>
+    <p class="small">第一轮 GAN 实验应以此为唯一基线，<b>不要</b>同时混入 gridmix / time-jitter，否则变量耦合无法判断 GAN 是否有效。
+    判定标准不只看 FID：FID&lt;10.0 且 KID 改善、recall 不显著下降才算明确有效。</p>
+  </div>
+
+  <hr>
+  <p class="small">源码主线：<code>x0loop/training/engine.py</code> ·
+  <code>models/denoiser.py</code> · <code>core/time_sampling.py</code> · <code>core/process_base.py</code> ·
+  <code>processes/flow_process.py</code> · <code>losses/spec.py</code> · <code>losses/adversarial.py</code> ·
+  <code>models/discriminator.py</code>。
+  相关设计文档：<a href="loss_design_and_decoupling.md">loss_design_and_decoupling.md</a> ·
+  <a href="gan_x0_adversarial_training_design.md">gan_x0_adversarial_training_design.md</a> ·
+  <a href="yaml_config_guide.md">yaml_config_guide.md</a>。</p>
+</main>
+</div>
+</body>
+</html>
