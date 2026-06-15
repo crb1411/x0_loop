@@ -1,7 +1,9 @@
 import torch
 
 from x0loop.core.schedules import TimeSchedule
+from x0loop.losses.atomic import AtomicLoss, CompositeLoss
 from x0loop.processes.flow_process import FlowProcess
+from x0loop.training.metrics import TimeBinAccumulator
 
 
 class ConstantX0Model(torch.nn.Module):
@@ -31,6 +33,27 @@ def test_flow_euler_and_heun_reach_constant_x0():
             device=torch.device("cpu"),
             dtype=torch.float32,
             sampler=sampler,
+            return_trace=True,
         )
         assert torch.allclose(result["x"], target, atol=1e-5)
         assert model.calls == expected_calls
+        assert "x" in result["trace"][0]
+        assert result["trace"][0]["x"].shape == target.shape
+
+
+def test_standard_flow_tbin_summary_uses_eps_label():
+    shape = (2, 3, 4, 4)
+    schedule = TimeSchedule(mode="flow", num_steps=1000)
+    process = FlowProcess(schedule=schedule, output_target="x0")
+    x0 = torch.randn(shape)
+    t = torch.tensor([0.25, 0.75])
+    fb = process.forward_sample(x0=x0, t=t)
+    out = torch.randn(shape)
+    loss_fn = CompositeLoss([AtomicLoss(target="x0", formula="mse")])
+
+    acc = TimeBinAccumulator(num_bins=2, device=x0.device)
+    acc.update(schedule=schedule, process=process, loss_fn=loss_fn, fb=fb, out=out)
+    summary = acc.summary(is_distributed=False)
+
+    assert "leps=" in summary
+    assert "lz=" not in summary

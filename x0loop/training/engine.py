@@ -18,7 +18,7 @@ from x0loop.models.denoiser import Denoiser
 from x0loop.training.context import ForwardBatch as TrainForwardBatch
 from x0loop.training.context import LoopConfig, ModelContext, ResumeState, RuntimeContext
 from x0loop.training.factories import build_augment, build_data_context, build_discriminator, build_model_context, build_process, build_schedule, init_runtime, load_resume_state
-from x0loop.training.metrics import TimeBinAccumulator
+from x0loop.training.metrics import TimeBinAccumulator, endpoint_loss_label
 from x0loop.training.optimization import amp_dtype_for_precision, build_step_lr_schedule, maybe_make_scaler
 from x0loop.training.evaluation import run_eval_if_due
 from x0loop.training.generative_eval import run_final_generative_eval, run_generative_eval_if_due
@@ -54,8 +54,9 @@ def log_loop_config(logger: Logger, loop_cfg: LoopConfig) -> None:
 
 
 def _diagnostic_losses(process: BaseProcess, fb: ProcessForwardBatch, out: torch.Tensor) -> dict[str, torch.Tensor]:
+    terminal_label = endpoint_loss_label(process)
     diag = {
-        "eps": regress("mse", process.eps_from_output(fb.xt, fb.t, out, aux={}), process.eps_target(fb)).mean(),
+        terminal_label: regress("mse", process.eps_from_output(fb.xt, fb.t, out, aux={}), process.eps_target(fb)).mean(),
         "x0": regress("mse", process.x0_from_output(fb.xt, fb.t, out, aux={}), process.x0_target(fb)).mean(),
         "v": regress("mse", process.v_from_output(fb.xt, fb.t, out, aux={}), process.v_target(fb)).mean(),
     }
@@ -279,7 +280,7 @@ def train(cfg: dict) -> None:
     model_ctx = build_model_context(cfg, runtime)
     schedule = build_schedule(cfg)
     time_sampler = build_time_sampler(cfg, schedule)
-    process = build_process(cfg, schedule)
+    process = build_process(cfg, schedule).to(runtime.device)
     loss_fn = build_loss(cfg["loss"], schedule)
     discriminator = build_discriminator(cfg, runtime)
     denoiser = Denoiser(

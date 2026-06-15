@@ -91,6 +91,7 @@ class FlowProcess(BaseProcess):
         for index, (t_scalar, s_scalar) in enumerate(pairs):
             t = torch.full((shape[0],), float(t_scalar.item()), device=device, dtype=torch.float32)
             out = self._model_output(model, x, t, cond, null_cond, guidance_scale)
+            xt = x
             x0_hat = self.x0_from_output(x, t, out, aux={})
             velocity = self._velocity(x, t, out)
             # iter_pairs moves from t=1 to t=0, so dt is negative.
@@ -110,7 +111,7 @@ class FlowProcess(BaseProcess):
 
             last_x0_hat = x0_hat
             if return_trace:
-                trace.append({"t": t_scalar.detach().cpu(), "x0_hat": x0_hat.detach().cpu()})
+                trace.append({"t": t_scalar.detach().cpu(), "x": xt.detach().cpu(), "x0_hat": x0_hat.detach().cpu()})
 
         result: dict[str, Any] = {"x": x, "x0_hat": last_x0_hat}
         if return_trace:
@@ -212,5 +213,6 @@ class LearnableEndpointFlowProcess(FlowProcess):
         return self._mu_output(model_out)
 
     def mudata_target(self, fb: ForwardBatch) -> torch.Tensor:
-        target = self.mu_data.expand(fb.x0.shape[0], -1, -1, -1)
+        mu = self.mu_data.to(device=fb.x0.device, dtype=fb.x0.dtype)
+        target = mu.expand(fb.x0.shape[0], -1, -1, -1)
         return target.detach() if self.detach_mudata_target else target

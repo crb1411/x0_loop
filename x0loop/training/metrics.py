@@ -7,6 +7,11 @@ from x0loop.core.process_base import BaseProcess, ForwardBatch
 from x0loop.core.schedules import TimeSchedule
 from x0loop.losses.atomic import CompositeLoss, regress
 
+
+def endpoint_loss_label(process: BaseProcess) -> str:
+    return "z" if hasattr(process, "mu_data") else "eps"
+
+
 def bucket_losses(t: torch.Tensor, per_example_loss: torch.Tensor) -> dict[str, float]:
     edges = [0.0, 0.1, 0.3, 0.7, 1.0]
     out = {}
@@ -71,6 +76,7 @@ def format_tbin_summary(
     avg_x0: torch.Tensor,
     avg_v: torch.Tensor,
     extra_avgs: dict[str, torch.Tensor] | None = None,
+    endpoint_label: str = "eps",
 ) -> str:
     parts = []
     n = counts.numel()
@@ -83,7 +89,7 @@ def format_tbin_summary(
             f"n={cnt}",
             f"a={float(avg_a[i].item()):.4g}",
             f"w={float(avg_w[i].item()):.4g}",
-            f"leps={float(avg_eps[i].item()):.4g}",
+            f"l{endpoint_label}={float(avg_eps[i].item()):.4g}",
             f"lx0={float(avg_x0[i].item()):.4g}",
             f"lv={float(avg_v[i].item()):.4g}",
         ]
@@ -103,6 +109,7 @@ class TimeBinAccumulator:
         self.sum_eps = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
         self.sum_x0 = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
         self.sum_v = torch.zeros(self.num_bins, device=device, dtype=torch.float64)
+        self.endpoint_label = "eps"
         self.extra_counts: dict[str, torch.Tensor] = {}
         self.extra_sums: dict[str, torch.Tensor] = {}
 
@@ -133,8 +140,9 @@ class TimeBinAccumulator:
     ) -> None:
         t = fb.t.detach()
         out_d = out.detach()
+        self.endpoint_label = endpoint_loss_label(process)
 
-        # Per-example unweighted MSE for eps/x0/v (diagnostic, always MSE regardless of training formula).
+        # Per-example unweighted MSE for terminal endpoint/x0/v (diagnostic, always MSE regardless of training formula).
         eps_u = regress("mse", process.eps_from_output(fb.xt, t, out_d, aux={}), process.eps_target(fb).detach())
         x0_u = regress("mse", process.x0_from_output(fb.xt, t, out_d, aux={}), process.x0_target(fb).detach())
         v_u = regress("mse", process.v_from_output(fb.xt, t, out_d, aux={}), process.v_target(fb).detach())
@@ -203,6 +211,7 @@ class TimeBinAccumulator:
             rsa / denom, rsw / denom,
             rse / denom, rsxl / denom, rsvl / denom,
             extra_avgs,
+            self.endpoint_label,
         )
 
     def reset(self) -> None:

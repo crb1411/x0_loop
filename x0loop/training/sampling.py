@@ -155,9 +155,13 @@ def save_trace_large_images(
     labels: torch.Tensor | None = None,
     label_names: tuple[str, ...] | None = None,
     cfg: dict | None = None,
+    image_key: str = "x0_hat",
+    filename_suffix: str = "x0loop",
 ):
     if not trace:
         return
+    if image_key not in trace[0]:
+        raise KeyError(f"Trace item does not contain image_key={image_key!r}. Available keys: {sorted(trace[0].keys())}")
     try:
         from PIL import Image, ImageDraw
     except Exception as exc:
@@ -165,11 +169,11 @@ def save_trace_large_images(
 
     os.makedirs(out_dir, exist_ok=True)
     steps = len(trace)
-    bsz = int(trace[0]["x0_hat"].shape[0])
+    bsz = int(trace[0][image_key].shape[0])
     label_ids = labels.detach().cpu().flatten().tolist() if labels is not None else None
     if label_ids is not None and len(label_ids) != bsz:
         raise ValueError(f"Expected {bsz} sample labels, got {len(label_ids)}.")
-    _, h, w = trace[0]["x0_hat"][0].shape
+    _, h, w = trace[0][image_key][0].shape
     cols = int(math.ceil(math.sqrt(steps)))
     rows = int(math.ceil(steps / cols))
     pad = 4
@@ -186,8 +190,8 @@ def save_trace_large_images(
         for si, item in enumerate(trace):
             row = si // cols
             col = si % cols
-            x0_hat = item["x0_hat"][bi]
-            arr = _tensor_chw_to_uint8_rgb(x0_hat, cfg=cfg)
+            image_tensor = item[image_key][bi]
+            arr = _tensor_chw_to_uint8_rgb(image_tensor, cfg=cfg)
             img = Image.fromarray(arr)
             x0 = col * cell_w + pad
             y0 = row * cell_h + pad
@@ -195,7 +199,7 @@ def save_trace_large_images(
             draw.text((x0, y0 + h + 1), f"t={t_values[si]:.3f}", fill=(0, 0, 0))
 
         label_tag = _label_tag(label_ids[bi], label_names) if label_ids is not None else ""
-        out_path = os.path.join(out_dir, f"{prefix}_sample_{bi:03d}{label_tag}_x0loop.png")
+        out_path = os.path.join(out_dir, f"{prefix}_sample_{bi:03d}{label_tag}_{filename_suffix}.png")
         canvas.save(out_path)
 
 
@@ -270,6 +274,17 @@ def run_sampling_if_due(
                 label_names=build_sample_label_names(cfg),
                 cfg=cfg,
             )
+            if hasattr(process, "mu_data"):
+                save_trace_large_images(
+                    result.get("trace", []),
+                    sample_dir,
+                    f"step_{resume.global_step:08d}",
+                    labels=sample_cond,
+                    label_names=build_sample_label_names(cfg),
+                    cfg=cfg,
+                    image_key="x",
+                    filename_suffix="zloop",
+                )
             if bool(cfg["sample"].get("save_trace", False)) and "trace" in result:
                 trace_path = os.path.join(sample_dir, f"step_{resume.global_step:08d}_trace.pt")
                 os.makedirs(os.path.dirname(trace_path), exist_ok=True)

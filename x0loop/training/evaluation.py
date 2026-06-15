@@ -8,7 +8,7 @@ from x0loop.core.schedules import TimeSchedule
 from x0loop.core.time_sampling import TimeSampler
 from x0loop.losses.atomic import CompositeLoss, regress
 from x0loop.training.context import DataContext, ModelContext, ResumeState, RuntimeContext
-from x0loop.training.metrics import TimeBinAccumulator
+from x0loop.training.metrics import TimeBinAccumulator, endpoint_loss_label
 from x0loop.training.optimization import amp_dtype_for_precision
 
 
@@ -59,11 +59,12 @@ def compute_eval_forward(
         out = model(fb.xt, fb.t, cond=cond)
         loss_dict = loss_fn(process, fb, out)
         p = process
+        terminal_label = endpoint_loss_label(p)
         diag = {
             "loss_weighted": loss_dict["loss_weighted"].detach(),
             "loss_no_weight": loss_dict["loss_no_weight"].detach(),
             "loss_outer_weight": loss_dict["weight"].detach(),
-            "loss_eps": regress("mse", p.eps_from_output(fb.xt, fb.t, out, aux={}), p.eps_target(fb)).detach(),
+            f"loss_{terminal_label}": regress("mse", p.eps_from_output(fb.xt, fb.t, out, aux={}), p.eps_target(fb)).detach(),
             "loss_x0": regress("mse", p.x0_from_output(fb.xt, fb.t, out, aux={}), p.x0_target(fb)).detach(),
             "loss_v": regress("mse", p.v_from_output(fb.xt, fb.t, out, aux={}), p.v_target(fb)).detach(),
         }

@@ -141,6 +141,7 @@ class BaseProcess(nn.Module):
             if cond is not None and null_cond is not None and float(guidance_scale) != 1.0:
                 out_uncond = model(x, t, cond=null_cond)
                 out = out_uncond + float(guidance_scale) * (out - out_uncond)
+            xt = x
             x0_hat = self.x0_from_output(x, t, out, aux={})
             step_aux: dict[str, Any] = {}
             if sampler is not None:
@@ -150,7 +151,7 @@ class BaseProcess(nn.Module):
             x = self.step(x, t, s_scalar, out, aux=step_aux)
             last_x0_hat = x0_hat
             if return_trace:
-                trace.append({"t": t_scalar.detach().cpu(), "x0_hat": x0_hat.detach().cpu()})
+                trace.append({"t": t_scalar.detach().cpu(), "x": xt.detach().cpu(), "x0_hat": x0_hat.detach().cpu()})
         result = {"x": x, "x0_hat": last_x0_hat}
         if return_trace:
             result["trace"] = trace

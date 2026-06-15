@@ -15,3 +15,9 @@ def test_trace_filename_supports_unconditional_samples(tmp_path):
     trace = [{"t": torch.tensor(1.0), "x0_hat": torch.zeros(1, 3, 4, 4)}]
     save_trace_large_images(trace, str(tmp_path), "step_00000001")
     assert (tmp_path / "step_00000001_sample_000_x0loop.png").is_file()
+
+
+def test_trace_filename_supports_zloop_suffix(tmp_path):
+    trace = [{"t": torch.tensor(1.0), "x": torch.zeros(1, 3, 4, 4), "x0_hat": torch.ones(1, 3, 4, 4)}]
+    save_trace_large_images(trace, str(tmp_path), "step_00000001", image_key="x", filename_suffix="zloop")
+    assert (tmp_path / "step_00000001_sample_000_zloop.png").is_file()
