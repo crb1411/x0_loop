@@ -8,7 +8,7 @@ Common setup:
 - `process.output_target=x0`
 - main loss term: `v` MSE
 - `time_sampler=logit_normal(mean=0, std=1)`
-- target outer weight with power `1.0`
+- skew triangular outer weight with power `1.0`
 - `time_condition_jitter mean=0.02 std=0.02`
 - learnable terminal endpoint `z = (1 - beta) * mu_data + beta * eps`
 - CIFAR10 standard normalization with inverse normalization before sample/FID image export
@@ -33,3 +33,7 @@ Run one experiment manually:
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash train_run/ablations/615_learnable_endpoint/scheme2_beta0p5/run.sh
 ```
+
+The per-experiment `run.sh` scripts start silently in the background by
+default. Logs and `launcher.pid` are written under
+`runs/ablations/cifar10_flow_x0_vloss/jit/learnable_endpoint/<run>/<timestamp>/logs/`.

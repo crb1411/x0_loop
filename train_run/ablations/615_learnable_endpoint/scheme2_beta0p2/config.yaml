@@ -38,6 +38,8 @@ time_sampler:
   name: logit_normal
   mean: 0.0
   std: 1.0
+  min_t: 1.0e-3
+  max_t: 0.999
 
 time_condition_jitter:
   enabled: true
@@ -48,9 +50,10 @@ time_condition_jitter:
   max_t: 0.99999
 
 loss:
-  outer_weight: triangular
+  outer_weight: skew_triangular
   outer_weight_power: 1.0
   outer_weight_floor: 0.0
+  outer_weight_skew: 0.2  # or 0.5 / 0.8
   terms:
     - {target: v, formula: mse, coef: 1.0}
 
@@ -109,7 +112,7 @@ gen_eval:
   enabled: true
   every_steps: 10000
   num_samples: 5000
-  batch_size: 128
+  batch_size: 256
   steps: 20
   sampler: heun
   guidance_scale: 3.0
@@ -127,6 +130,6 @@ gen_eval:
   final:
     enabled: true
     num_samples: 20000
-    batch_size: 128
+    batch_size: 256
     steps: 50
     sampler: heun

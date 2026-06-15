@@ -45,16 +45,17 @@ time_condition_jitter:
   mean: 0.02
   std: 0.02
   prob: 1.0
-  min_t: 1.0e-5
-  max_t: 0.99999
+  min_t: 1.0e-3
+  max_t: 0.999
 
 loss:
-  outer_weight: triangular
+  outer_weight: skew_triangular
   outer_weight_power: 1.0
   outer_weight_floor: 0.0
+  outer_weight_skew: 0.2  # or 0.5 / 0.8
   terms:
     - {target: v, formula: mse, coef: 1.0}
-    - {target: mudata, formula: mse, coef: 1.0}
+    - {target: mudata, formula: mse, coef: 0.3}
 
 augment:
   name: geom
