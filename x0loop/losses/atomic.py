@@ -68,8 +68,8 @@ class AtomicLoss:
         return unweighted, w
 
     def __call__(self, process, fb, out) -> torch.Tensor:
-        unweighted, w = self.per_example(process, fb, out)
-        return (w * unweighted).mean()
+        per_example_raw_loss, per_space_weight = self.per_example(process, fb, out)
+        return (self.coef * per_space_weight * per_example_raw_loss).mean()
 
     def __repr__(self) -> str:
         w = "none" if self.weight_fn is None else "weighted"
@@ -94,34 +94,42 @@ class CompositeLoss:
         return w.to(device=ref.device, dtype=ref.dtype)
 
     def per_example(self, process, fb, out) -> dict[str, torch.Tensor]:
-        inner: torch.Tensor | None = None
-        by_target_raw: dict[str, torch.Tensor] = {}
-        by_target_no_weight: dict[str, torch.Tensor] = {}
+        per_example_inner_loss: torch.Tensor | None = None
+        by_target_raw_loss: dict[str, torch.Tensor] = {}
+        by_target_no_outer_weight_loss: dict[str, torch.Tensor] = {}
         for atom in self.atoms:
-            raw, per_space_w = atom.per_example(process, fb, out)
-            term_no_outer_weight = atom.coef * per_space_w * raw
-            by_target_raw[atom.target] = raw if atom.target not in by_target_raw else by_target_raw[atom.target] + raw
-            by_target_no_weight[atom.target] = (
-                term_no_outer_weight
-                if atom.target not in by_target_no_weight
-                else by_target_no_weight[atom.target] + term_no_outer_weight
+            per_example_raw_loss, per_space_weight = atom.per_example(process, fb, out)
+            term_no_outer_weight_loss = atom.coef * per_space_weight * per_example_raw_loss
+            by_target_raw_loss[atom.target] = (
+                per_example_raw_loss
+                if atom.target not in by_target_raw_loss
+                else by_target_raw_loss[atom.target] + per_example_raw_loss
             )
-            inner = term_no_outer_weight if inner is None else inner + term_no_outer_weight
-        assert inner is not None
-        outer_w = self.outer_weight(fb, inner)
-        total = outer_w * inner
+            by_target_no_outer_weight_loss[atom.target] = (
+                term_no_outer_weight_loss
+                if atom.target not in by_target_no_outer_weight_loss
+                else by_target_no_outer_weight_loss[atom.target] + term_no_outer_weight_loss
+            )
+            per_example_inner_loss = (
+                term_no_outer_weight_loss
+                if per_example_inner_loss is None
+                else per_example_inner_loss + term_no_outer_weight_loss
+            )
+        assert per_example_inner_loss is not None
+        outer_weight = self.outer_weight(fb, per_example_inner_loss)
+        per_example_total_loss = outer_weight * per_example_inner_loss
         result: dict[str, torch.Tensor] = {
-            "loss_no_weight": inner,
-            "loss_weighted": total,
-            "inner": inner,
-            "weight": outer_w,
-            "total": total,
+            "loss_no_weight": per_example_inner_loss,
+            "loss_weighted": per_example_total_loss,
+            "inner": per_example_inner_loss,
+            "weight": outer_weight,
+            "total": per_example_total_loss,
         }
-        for k, v in by_target_no_weight.items():
-            result[k] = outer_w * v
+        for k, v in by_target_no_outer_weight_loss.items():
+            result[k] = outer_weight * v
             result[f"{k}_no_weight"] = v
-            result[f"{k}_weighted"] = outer_w * v
-        for k, v in by_target_raw.items():
+            result[f"{k}_weighted"] = outer_weight * v
+        for k, v in by_target_raw_loss.items():
             result[f"{k}_raw"] = v
         return result
 
