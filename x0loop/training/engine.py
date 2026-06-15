@@ -275,14 +275,24 @@ def log_training_step(*, runtime: RuntimeContext, loop_cfg: LoopConfig, resume: 
 
 
 def train(cfg: dict) -> None:
+    # Distributed/device setup: ranks, device, seeds, logger, out_dir.
     runtime = init_runtime(cfg)
+    # Dataset + dataloaders (train/eval) and the distributed sampler.
     data_ctx = build_data_context(cfg, runtime)
+    # The network and its runtime wrappers (DDP/FSDP, precision, EMA target).
     model_ctx = build_model_context(cfg, runtime)
+    # alpha(t)/sigma(t) time schedule shared by the process and loss weighting.
     schedule = build_schedule(cfg)
+    # How training timesteps t are drawn (here: logit-normal).
     time_sampler = build_time_sampler(cfg, schedule)
+    # Forward/reverse process: x_t = alpha x0 + sigma * endpoint, plus the sampler.
+    # .to(device) because it may hold learnable parameters (e.g. mu_data endpoint).
     process = build_process(cfg, schedule).to(runtime.device)
+    # Composite loss: target spaces (x0/endpoint/v/mudata) x formula x t-weighting.
     loss_fn = build_loss(cfg["loss"], schedule)
+    # Optional adversarial head (None unless gan/adversarial is configured).
     discriminator = build_discriminator(cfg, runtime)
+    # Bundle net+process+loss into one module; also applies the t-conditioning jitter.
     denoiser = Denoiser(
         model_ctx.model,
         process=process,
@@ -290,6 +300,7 @@ def train(cfg: dict) -> None:
         time_sampler=time_sampler,
         time_condition_jitter=cfg.get("time_condition_jitter", None),
     )
+    # Data augmentation pipeline and where it is applied (data_only here).
     augment, augment_mode = build_augment(cfg)
     if runtime.is_main:
         atom_descs = ", ".join(repr(atom) for atom in loss_fn.atoms)
