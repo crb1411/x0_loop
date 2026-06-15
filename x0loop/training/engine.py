@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import time
 from contextlib import nullcontext
+from types import SimpleNamespace
 
 import torch
 import torch.distributed as dist
@@ -51,6 +52,40 @@ def log_loop_config(logger: Logger, loop_cfg: LoopConfig) -> None:
     logger.log_text(f"[train] grad_clip={loop_cfg.grad_clip}")
     meta = loop_cfg.lr_sched_meta
     logger.log_text(f"[train] lr_scheduler={meta.get('name', 'constant')} meta={meta}")
+
+
+def _format_loss_weight_shape(loss_fn) -> list[str]:
+    t_points = torch.tensor([0.001, 0.25, 0.5, 0.75, 0.999], dtype=torch.float32)
+    t_grid = (torch.arange(2000, dtype=torch.float32) + 0.5) / 2000.0
+
+    def _as_vector(x: torch.Tensor) -> torch.Tensor:
+        if x.ndim > 1:
+            x = x.view(x.shape[0], -1).mean(dim=1)
+        return x.detach().float().cpu()
+
+    def _fmt_values(values: torch.Tensor) -> str:
+        return " ".join(f"{float(v):>9.4g}" for v in values)
+
+    def _line(name: str, fn) -> str:
+        point_values = _as_vector(fn(t_points))
+        grid_values = _as_vector(fn(t_grid))
+        return (
+            f"[loss_weight] {name:<18} {_fmt_values(point_values)} "
+            f"| mean={float(grid_values.mean()):.4g} min={float(grid_values.min()):.4g} max={float(grid_values.max()):.4g}"
+        )
+
+    lines = [f"[loss_weight] {'t':<18} {_fmt_values(t_points)}"]
+    lines.append(
+        _line(
+            "outer",
+            lambda t: loss_fn.outer_weight(SimpleNamespace(t=t), torch.ones_like(t)),
+        )
+    )
+    for atom_index, atom in enumerate(loss_fn.atoms):
+        if atom.weight_fn is None:
+            continue
+        lines.append(_line(f"term{atom_index}:{atom.target}", lambda t, atom=atom: atom.weight_fn(t, None)))
+    return lines
 
 
 def _diagnostic_losses(process: BaseProcess, fb: ProcessForwardBatch, out: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -306,6 +341,8 @@ def train(cfg: dict) -> None:
         atom_descs = ", ".join(repr(atom) for atom in loss_fn.atoms)
         runtime.logger.log_text(f"[process] name={cfg.get('process', {}).get('name')} output_target={process.output_target} schedule={schedule.mode}")
         runtime.logger.log_text(f"[loss] {atom_descs}")
+        for line in _format_loss_weight_shape(loss_fn):
+            runtime.logger.log_text(line)
         runtime.logger.log_text(f"[time_sampler] {cfg.get('time_sampler', {'name': 'legacy'})}")
         runtime.logger.log_text(f"[time_condition_jitter] {cfg.get('time_condition_jitter', {'enabled': False})}")
         runtime.logger.log_text(f"[adversarial] {cfg.get('adversarial', {'enabled': False})}")

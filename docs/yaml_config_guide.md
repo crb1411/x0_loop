@@ -348,31 +348,22 @@ loss:
 `outer_weight` options:
 
 - `none`
-- `x0`
-- `eps`
-- `v`
-- `target`
-- `snr`
-- `inv_snr`
-- `logsnr`
+- `triangular`
+- `skew_triangular`
+- `p2`
 - `min_snr`
-- `balance_weights`
-
-Aliases:
-
-- `t_x0`, `x0_t` -> `x0`
-- `t_eps`, `eps_t` -> `eps`
-- `t_mid`, `v_t` -> `v`
-- `target_default`, `auto_target` -> `target`
+- `edm`
 
 Weight parameters:
 
 ```yaml
 outer_weight_power: 2.0
 outer_weight_floor: 0.0
+outer_weight_skew: 0.5
+outer_weight_p2_k: 1.0
+outer_weight_p2_gamma: 1.0
+outer_weight_sigma_data: 0.5
 min_snr_gamma: 5.0
-balance_factor: 0.5
-balance_time: auto
 balance_integral_steps: 2000
 ```
 
@@ -381,18 +372,20 @@ For per-term `weight`, the same parameters are read as:
 ```yaml
 weight_power: 2.0
 weight_floor: 0.0
+weight_skew: 0.5
+p2_k: 1.0
+p2_gamma: 1.0
+sigma_data: 0.5
 gamma: 5.0
-balance_factor: 0.5
-balance_time: auto
 balance_integral_steps: 2000
 ```
 
 If `weight_power` / `weight_floor` are absent, the builder falls back to
 `outer_weight_power` / `outer_weight_floor`.
 
-### Polynomial Weights: `x0`, `eps`, `v`
+### Time Weights
 
-Polynomial weights use:
+All active loss weights are functions of `t`. Shape-based weights use:
 
 ```text
 raw(t) = floor + (1 - floor) * base(t)^power
@@ -401,95 +394,44 @@ raw(t) = floor + (1 - floor) * base(t)^power
 By default they are mean-normalized, so their average over uniform
 `t in [0,1]` is approximately `1`.
 
-`x0` weight:
-
-```text
-base(t) = 1 - t
-```
-
-Large near `t=0`, small near `t=1`.
-
-`eps` weight:
-
-```text
-base(t) = t
-```
-
-Small near `t=0`, large near `t=1`.
-
-`v` weight:
+`triangular`:
 
 ```text
 base(t) = 1 - |2t - 1|
 ```
 
-Triangular middle-time weight. Large near `t=0.5`, small near both endpoints.
+`skew_triangular`:
+
+```text
+base(t) = 1 - |2t - 1|
+w(t) = normalized(base(t)^power * (1 + skew * (2t - 1)))
+```
+
+Positive `skew` makes the high-`t` side larger; negative `skew` makes the
+low-`t` side larger.
 
 Example:
 
 ```yaml
 loss:
-  outer_weight: v
+  outer_weight: skew_triangular
   outer_weight_power: 1.0
   outer_weight_floor: 0.0
+  outer_weight_skew: 0.5
 ```
 
 Gives:
 
 ```text
-w(t) = 2 * (1 - |2t - 1|)
+w(t) approx 2 * (1 - |2t - 1|) * (1 + 0.5 * (2t - 1))
 ```
 
-because the unnormalized triangle has mean `0.5`.
+because the unnormalized triangle has mean about `0.5`.
 
-With:
-
-```yaml
-outer_weight: x0
-outer_weight_power: 2.0
-outer_weight_floor: 0.0
-```
-
-the normalized weight is:
+`p2`:
 
 ```text
-w(t) = 3 * (1 - t)^2
-```
-
-### `target`
-
-```yaml
-outer_weight: target
-```
-
-When there is exactly one loss term, `target` selects the polynomial weight
-matching that term target:
-
-- term `target: x0` -> `x0` weight
-- term `target: eps` -> `eps` weight
-- term `target: v` -> `v` weight
-
-When there are multiple terms, there is no single primary target, so `target`
-falls back to all-ones.
-
-### Schedule Weights
-
-`snr`:
-
-```text
-w(t) = snr(t)
-```
-
-`inv_snr`:
-
-```text
-w(t) = 1 / snr(t)
-```
-
-`logsnr`:
-
-```text
-w(t) = log(snr(t))
+w(t) = normalized((p2_k + snr(t))^-p2_gamma)
 ```
 
 `min_snr`:
@@ -510,26 +452,12 @@ or per-term:
 gamma: 5.0
 ```
 
-### `balance_weights`
-
-```yaml
-outer_weight: balance_weights
-balance_factor: 0.5
-balance_time: auto
-balance_integral_steps: 2000
-```
-
-This computes an alpha-based balancing factor:
+`edm`:
 
 ```text
-w(t) = (1 - balance_factor) + balance_factor * alpha(t) * mean(1 / alpha(t))
+sigma = sigma(t) / alpha(t)
+w(t) = normalized((sigma^2 + sigma_data^2) / (sigma * sigma_data)^2)
 ```
-
-`balance_time` options:
-
-- `auto`: infer whether batch times look discrete.
-- `discrete`: average over discrete schedule steps.
-- `continuous`: numerical integral over `balance_integral_steps` midpoint samples.
 
 ## `augment`
 
@@ -869,22 +797,22 @@ loss = mse(v_pred, eps - x0)
 
 and samples with Heun.
 
-### Mean-Normalized x0 Outer Weight
+### Mean-Normalized Triangular Outer Weight
 
 ```yaml
 loss:
-  outer_weight: x0
-  outer_weight_power: 2.0
+  outer_weight: triangular
+  outer_weight_power: 1.0
   outer_weight_floor: 0.0
   terms:
-    - {target: x0, formula: mse, coef: 1.0}
+    - {target: v, formula: mse, coef: 1.0}
 ```
 
 This gives:
 
 ```text
-w(t) = 3 * (1 - t)^2
-loss = w(t) * mse(x0_pred, x0)
+w(t) = 2 * (1 - |2t - 1|)
+loss = w(t) * mse(v_pred, eps - x0)
 ```
 
 ### Logit-Normal Time Sampling

@@ -32,16 +32,12 @@ loss:
   terms:
     - target: eps   # eps | x0 | v
       formula: mse  # mse | l1 | huber
-      weight: none  # none | snr | inv_snr | logsnr | balance_weights
-      balance_factor: 0.0
-      balance_time: auto
+      weight: none  # none | triangular | skew_triangular | p2 | min_snr | edm
       balance_integral_steps: 1000
       coef: 0.5
     - target: x0
       formula: mse
       weight: none
-      balance_factor: 0.0
-      balance_time: auto
       balance_integral_steps: 1000
       coef: 0.5
 

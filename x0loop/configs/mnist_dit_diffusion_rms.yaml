@@ -31,16 +31,12 @@ loss:
   terms:
     - target: eps
       formula: mse
-      weight: balance_weights
-      balance_factor: 0.2
-      balance_time: auto
+      weight: none
       balance_integral_steps: 1000
       coef: 0.5
     - target: x0
       formula: mse
-      weight: balance_weights
-      balance_factor: 0.2
-      balance_time: auto
+      weight: none
       balance_integral_steps: 1000
       coef: 0.5
 

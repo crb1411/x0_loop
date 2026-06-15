@@ -48,7 +48,7 @@ time_condition_jitter:
   max_t: 0.99999
 
 loss:
-  outer_weight: target
+  outer_weight: triangular
   outer_weight_power: 1.0
   outer_weight_floor: 0.0
   terms:

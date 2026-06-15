@@ -213,7 +213,7 @@ class LossConfig:
     coef_v: float = 0.0
 
     reduction: str = "mean"                  # mean over non-batch dims
-    weight_type: str = "none"                # none/snr/min_snr/logsnr/custom
+    weight_type: str = "none"                # none/triangular/skew_triangular/p2/min_snr/edm
     weight_space: str = "outer"              # outer/per_space
     min_snr_gamma: float | None = None
     eps: float = 1e-8

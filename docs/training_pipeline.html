@@ -286,7 +286,7 @@ cond = <span class="s">apply_classifier_free_label_dropout</span>(cond, null_id=
       <div class="formula">∫β = β_min·t + ½(β_max−β_min)t²<br>α(t) = exp(−½∫β)<br>σ(t) = √(1−α²)</div>
       α²+σ²=1。sampler：<code>ddim</code> / <code>posterior</code>。</div>
   </div>
-  <div class="formula">snr(t) = α(t)² / σ(t)²&nbsp;&nbsp;<span class="c"># 供 loss 权重 snr/inv_snr/logsnr/min_snr 使用</span></div>
+  <div class="formula">snr(t) = α(t)² / σ(t)²&nbsp;&nbsp;<span class="c"># 供 p2/min_snr/edm 等 loss 权重使用</span></div>
   <p>flow <code>forward_sample</code>：抽 <code>eps~N(0,I)</code> → <code>x_t = (1−t)x0 + t·eps</code>，返回 <code>ForwardBatch(x0,t,xt,eps)</code>。</p>
 
   <!-- ============ 7 TARGET ============ -->
@@ -310,7 +310,7 @@ cond = <span class="s">apply_classifier_free_label_dropout</span>(cond, null_id=
 
   <h4>term 字段</h4>
 <pre>loss:
-  <span class="k">outer_weight</span>: target          <span class="c"># 见下表</span>
+  <span class="k">outer_weight</span>: triangular      <span class="c"># 见下表</span>
   <span class="k">outer_weight_power</span>: 1.0
   <span class="k">outer_weight_floor</span>: 0.0
   <span class="k">terms</span>:
@@ -325,16 +325,14 @@ cond = <span class="s">apply_classifier_free_label_dropout</span>(cond, null_id=
   <table>
     <tr><th>name</th><th>w(t)（均值归一化后）</th><th>直觉</th></tr>
     <tr><td><code>none</code></td><td>1</td><td>无加权基线</td></tr>
-    <tr><td><code>x0</code></td><td><code>floor+(1−floor)(1−t)^p</code>，如 p=2 → <code>3(1−t)²</code></td><td>重 t→0（干净端）</td></tr>
-    <tr><td><code>eps</code></td><td><code>base=t</code></td><td>重 t→1（噪声端）</td></tr>
-    <tr><td><code>v</code></td><td><code>base=1−|2t−1|</code>，p=1 → <code>2(1−|2t−1|)</code></td><td>三角，重中段 t=0.5</td></tr>
-    <tr><td><code>target</code></td><td>单 term 时取该 term 对应的 x0/eps/v 多项式；多 term 退化为 1</td><td>自动匹配主目标</td></tr>
-    <tr><td><code>snr / inv_snr / logsnr</code></td><td><code>snr(t)</code> / <code>1/snr</code> / <code>log snr</code></td><td>schedule 诱导</td></tr>
+    <tr><td><code>triangular</code></td><td><code>base=1−|2t−1|</code>，p=1 → <code>2(1−|2t−1|)</code></td><td>三角，重中段 t=0.5</td></tr>
+    <tr><td><code>skew_triangular</code></td><td><code>triangular · (1 + skew(2t−1))</code></td><td>三角但可偏向高 t 或低 t</td></tr>
+    <tr><td><code>p2</code></td><td><code>(p2_k + snr)^(-p2_gamma)</code></td><td>P2/SNR 诱导</td></tr>
     <tr><td><code>min_snr</code></td><td><code>min(snr,γ)/snr</code>，<code>min_snr_gamma</code></td><td>压高 SNR 区，常用 eps/diffusion</td></tr>
-    <tr><td><code>balance_weights</code></td><td><code>(1−bf)+bf·α(t)·mean(1/α)</code></td><td>α 平衡，<code>balance_factor</code></td></tr>
+    <tr><td><code>edm</code></td><td><code>(σ²+σ_data²)/(σ·σ_data)²</code></td><td>EDM 风格权重</td></tr>
   </table>
   <p class="small">多项式权重默认对 uniform t 做均值归一（均值≈1）。<code>weight_power/weight_floor</code> 缺省回退到 <code>outer_weight_power/floor</code>。</p>
-  <div class="ok"><b>当前主基线 loss</b>：<code>outer_weight=target, power=1.0, floor=0.0</code>，单 term <code>{v, mse, 1.0}</code>
+  <div class="ok"><b>当前主基线 loss</b>：<code>outer_weight=triangular, power=1.0, floor=0.0</code>，单 term <code>{v, mse, 1.0}</code>
   → 实际权重是「重中段的三角」乘 v 空间 MSE。</div>
 
   <!-- ============ 9 GAN ============ -->
