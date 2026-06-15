@@ -39,6 +39,8 @@ time_sampler:
   name: logit_normal
   mean: 0.0
   std: 1.0
+  min_t: 1.0e-3
+  max_t: 0.999
 
 time_condition_jitter:
   enabled: true

@@ -46,8 +46,8 @@ time_condition_jitter:
   mean: 0.02
   std: 0.02
   prob: 1.0
-  min_t: 1.0e-5
-  max_t: 0.99999
+  min_t: 1.0e-3
+  max_t: 0.999
 
 loss:
   outer_weight: skew_triangular
