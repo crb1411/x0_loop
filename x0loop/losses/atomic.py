@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 
 
-VALID_LOSS_TARGETS = {"eps", "x0", "v"}
+VALID_LOSS_TARGETS = {"eps", "x0", "v", "mudata"}
 
 
 def normalize_loss_target(target: str) -> str:
@@ -12,7 +12,7 @@ def normalize_loss_target(target: str) -> str:
     if target in {"u", "flow", "flow_velocity", "velocity"}:
         target = "v"
     if target not in VALID_LOSS_TARGETS:
-        raise ValueError(f"target must be eps | x0 | v, got {target!r}")
+        raise ValueError(f"target must be eps | x0 | v | mudata, got {target!r}")
     return target
 
 
@@ -50,6 +50,8 @@ class AtomicLoss:
             return process.x0_from_output(fb.xt, fb.t, out, aux={}), process.x0_target(fb)
         if self.target == "v":
             return process.v_from_output(fb.xt, fb.t, out, aux={}), process.v_target(fb)
+        if self.target == "mudata":
+            return process.mudata_from_output(fb.xt, fb.t, out, aux={}), process.mudata_target(fb)
         raise AssertionError(f"Unexpected loss target={self.target!r}")
 
     def per_example(self, process, fb, out) -> tuple[torch.Tensor, torch.Tensor]:

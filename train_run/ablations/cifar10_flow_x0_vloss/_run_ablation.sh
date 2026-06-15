@@ -96,7 +96,7 @@ start_training() {
     --set "logging.out_dir=${OUT_DIR}" \
     "${EXTRA_SETS[@]}" \
     "${RESUME_ARGS[@]}" \
-    "${REMAINING_ARGS[@]}" >> "${LOG_FILE}" 2>&1 &
+    "${REMAINING_ARGS[@]}" &
   RUN_PID=$!
 }
 

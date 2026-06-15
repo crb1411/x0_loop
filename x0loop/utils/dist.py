@@ -24,9 +24,18 @@ def init_distributed(backend: str = "nccl") -> dict:
 
     is_distributed = world_size > 1
     if is_distributed and not dist.is_initialized():
-        torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend=backend, init_method="env://")
-        dist.barrier()
+        device_id = None
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            device_id = torch.device("cuda", local_rank)
+        try:
+            dist.init_process_group(backend=backend, init_method="env://", device_id=device_id)
+        except TypeError:
+            dist.init_process_group(backend=backend, init_method="env://")
+        if backend == "nccl" and torch.cuda.is_available():
+            dist.barrier(device_ids=[local_rank])
+        else:
+            dist.barrier()
 
     _DIST_INFO.update(
         {

@@ -38,13 +38,14 @@ launch_jit_tjitter_2gpu() {
 
   export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
   export NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
+  export RUNTIME_CONFIG="${RUNTIME_CONFIG:-x0loop/configs/runtime/ddp_checkpoint_compile.yaml}"
 
   MODEL_NAME="jit"
   ABLATION_TAG="612_2gpu_${TAG_SUFFIX}"
   CONFIG_PATH="train_run/configs/cifar10/cifar10_jit_flow_train_x0_vloss_heun.yaml"
   EXTRA_SETS=(
-    --set "train.batch_size=128"
-    --set "eval.batch_size=128"
+    --set "train.batch_size=256"
+    --set "eval.batch_size=256"
     --set "loss.outer_weight=target"
     --set "loss.outer_weight_power=1.0"
     --set "loss.outer_weight_floor=0.0"

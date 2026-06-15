@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import math
 import time
+from contextlib import nullcontext
 
 import torch
+import torch.distributed as dist
 from torch.utils.data import DataLoader
 
 from x0loop.aug.base import BaseAugment
@@ -57,6 +59,8 @@ def _diagnostic_losses(process: BaseProcess, fb: ProcessForwardBatch, out: torch
         "x0": regress("mse", process.x0_from_output(fb.xt, fb.t, out, aux={}), process.x0_target(fb)).mean(),
         "v": regress("mse", process.v_from_output(fb.xt, fb.t, out, aux={}), process.v_target(fb)).mean(),
     }
+    if hasattr(process, "mu_data") and getattr(process, "predict_mudata", False):
+        diag["mudata"] = regress("mse", process.mudata_from_output(fb.xt, fb.t, out, aux={}), process.mudata_target(fb)).mean()
     return diag
 
 
@@ -99,6 +103,13 @@ def should_step_optimizer(micro_step: int, loop_cfg: LoopConfig) -> bool:
     return ((micro_step + 1) % loop_cfg.gradient_accumulation_steps == 0) or (micro_step + 1 == loop_cfg.micro_steps_per_epoch)
 
 
+def maybe_no_sync(model: torch.nn.Module, *, enabled: bool):
+    no_sync = getattr(model, "no_sync", None)
+    if enabled and callable(no_sync):
+        return no_sync()
+    return nullcontext()
+
+
 def step_optimizer(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -114,6 +125,16 @@ def step_optimizer(
     grad_norm = clip_grad_norm(model, grad_clip) if grad_clip > 0 else clip_grad_norm(model, float("inf"))
     optimizer.step()
     return grad_norm
+
+
+def sync_process_grads(process: BaseProcess, *, world_size: int) -> None:
+    if world_size <= 1 or not (dist.is_available() and dist.is_initialized()):
+        return
+    for param in process.parameters():
+        if param.grad is None:
+            continue
+        dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+        param.grad.div_(float(world_size))
 
 
 def update_train_meters(
@@ -307,17 +328,19 @@ def train(cfg: dict) -> None:
                 update_step = accum_index == 0
                 remaining_micro_steps = loop_cfg.micro_steps_per_epoch - micro_step
                 current_accum_steps = min(loop_cfg.gradient_accumulation_steps, remaining_micro_steps)
+                did_optimizer_step = should_step_optimizer(micro_step, loop_cfg)
                 if update_step:
                     step_lr = float(loop_cfg.lr_for_step(resume.global_step))
                     for pg in optimizer.param_groups:
                         pg["lr"] = step_lr
                     optimizer.zero_grad(set_to_none=True)
-                fwd = compute_forward_batch(cfg=cfg, runtime=runtime, model_ctx=model_ctx, denoiser=denoiser, process=process, augment=augment, augment_mode=augment_mode, x0=x0, y=y, use_label_cond=use_label_cond)
-                maybe_apply_adversarial(cfg=cfg, fwd=fwd, process=process, discriminator=discriminator, d_optimizer=d_optimizer, scaler=scaler, step=resume.global_step)
-                backward_loss(fwd.loss, current_accum_steps=current_accum_steps, scaler=scaler)
-                did_optimizer_step = should_step_optimizer(micro_step, loop_cfg)
+                with maybe_no_sync(model_ctx.model, enabled=model_ctx.use_ddp and not did_optimizer_step):
+                    fwd = compute_forward_batch(cfg=cfg, runtime=runtime, model_ctx=model_ctx, denoiser=denoiser, process=process, augment=augment, augment_mode=augment_mode, x0=x0, y=y, use_label_cond=use_label_cond)
+                    maybe_apply_adversarial(cfg=cfg, fwd=fwd, process=process, discriminator=discriminator, d_optimizer=d_optimizer, scaler=scaler, step=resume.global_step)
+                    backward_loss(fwd.loss, current_accum_steps=current_accum_steps, scaler=scaler)
                 grad_norm = None
                 if did_optimizer_step:
+                    sync_process_grads(process, world_size=runtime.world_size)
                     effective_clip = 0.0 if resume.global_step < 10000 else loop_cfg.grad_clip
                     grad_norm = step_optimizer(denoiser, optimizer, scaler, effective_clip)
                 if did_optimizer_step and ema is not None:

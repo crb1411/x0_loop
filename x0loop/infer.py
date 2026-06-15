@@ -34,6 +34,7 @@ from x0loop.train import (
 )
 from x0loop.utils.checkpoint import load_checkpoint
 from x0loop.utils.ema import EMA
+from x0loop.core.image_normalization import image_to_display_minus_one_one
 
 
 def _save_grid_labeled(
@@ -241,7 +242,7 @@ def main():
         result = process.sample(
             model=model,
             steps=steps,
-            shape=(sample_num, model_cfg.out_channels, model_cfg.image_size, model_cfg.image_size),
+            shape=(sample_num, model_cfg.in_channels, model_cfg.image_size, model_cfg.image_size),
             device=device,
             dtype=torch.float32,
             return_trace=return_trace,
@@ -260,6 +261,7 @@ def main():
             prefix=step_tag,
             labels=sample_cond,
             label_names=build_sample_label_names(cfg),
+            cfg=cfg,
         )
         print(f"[infer] trace PNGs  → {out_dir}/{step_tag}_sample_*.png", flush=True)
 
@@ -274,10 +276,10 @@ def main():
             class_names[cid] if class_names and cid < len(class_names) else f"cls {cid}"
             for cid in cond_ids
         ]
-        _save_grid_labeled(imgs_cpu, label_strs, grid_path)
+        _save_grid_labeled(image_to_display_minus_one_one(imgs_cpu, cfg), label_strs, grid_path)
         print(f"[infer] grid PNG (labeled cfg={guidance}) → {grid_path}", flush=True)
     else:
-        save_sample_grid(imgs_cpu, grid_path)
+        save_sample_grid(imgs_cpu, grid_path, cfg=cfg)
         print(f"[infer] grid PNG    → {grid_path}", flush=True)
 
 

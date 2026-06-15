@@ -14,21 +14,37 @@ def _strip_state_dict_prefix(state_dict: dict, prefix: str) -> dict:
     return out
 
 
+def _replace_state_dict_prefix(state_dict: dict, old: str, new: str) -> dict:
+    olen = len(old)
+    out = {}
+    for k, v in state_dict.items():
+        nk = f"{new}{k[olen:]}" if k.startswith(old) else k
+        out[nk] = v
+    return out
+
+
 def _candidate_state_dicts(state_dict: dict) -> list[tuple[str, dict]]:
     # Try common wrapper prefixes from compile/DDP/FSDP2 stacks.
     cands: list[tuple[str, dict]] = [("none", state_dict)]
-    prefixes = [
-        "_orig_mod.",
-        "module.",
-        "_fsdp_wrapped_module.",
-        "model.",
-    ]
     seen = {tuple(state_dict.keys())}
-    for p in prefixes:
-        sd = _strip_state_dict_prefix(state_dict, p)
+
+    transforms = []
+    for p in ("_orig_mod.", "module.", "_fsdp_wrapped_module.", "model."):
+        transforms.append((p, _strip_state_dict_prefix(state_dict, p)))
+    for old, new in (
+        ("net.module._orig_mod.", "net."),
+        ("net.module.", "net."),
+        ("net._orig_mod.", "net."),
+        ("net.", "net.module."),
+        ("net.", "net.module._orig_mod."),
+        ("net._orig_mod.", "net.module._orig_mod."),
+    ):
+        transforms.append((f"{old}->{new}", _replace_state_dict_prefix(state_dict, old, new)))
+
+    for name, sd in transforms:
         key_sig = tuple(sd.keys())
         if key_sig not in seen:
-            cands.append((p, sd))
+            cands.append((name, sd))
             seen.add(key_sig)
     return cands
 

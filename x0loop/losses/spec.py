@@ -53,6 +53,6 @@ def build_loss(cfg_loss: dict, schedule) -> CompositeLoss:
     else:
         atoms = [_build_atom(cfg_loss, schedule)]
 
-    primary_target = atoms[0].target if len(atoms) == 1 else None
+    primary_target = str(cfg_loss["outer_weight_target"]).lower() if "outer_weight_target" in cfg_loss else (atoms[0].target if len(atoms) == 1 else None)
     outer_weight_fn = _make_weight_fn(cfg_loss, schedule, key="outer_weight", target=primary_target)
     return CompositeLoss(atoms, outer_weight_fn=outer_weight_fn)

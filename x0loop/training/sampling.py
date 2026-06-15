@@ -8,6 +8,7 @@ import torch
 from PIL import Image, ImageDraw
 
 from x0loop.core.process_base import BaseProcess
+from x0loop.core.image_normalization import image_to_display_minus_one_one
 from x0loop.training.context import LoopConfig, ModelContext, ResumeState, RuntimeContext
 from x0loop.utils import dist as dist_utils
 from x0loop.utils.ema import EMA
@@ -94,9 +95,10 @@ def apply_classifier_free_label_dropout(cond: torch.Tensor | None, *, null_class
     return torch.where(drop_mask, torch.full_like(cond, null_class_id), cond)
 
 
-def save_sample_grid(sample_tensor: torch.Tensor, out_path: str):
+def save_sample_grid(sample_tensor: torch.Tensor, out_path: str, *, cfg: dict | None = None):
     from torchvision.utils import make_grid, save_image
 
+    sample_tensor = image_to_display_minus_one_one(sample_tensor, cfg)
     x = (sample_tensor.clamp(-1, 1) + 1.0) * 0.5
     grid = make_grid(x, nrow=int(x.shape[0] ** 0.5))
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -111,6 +113,7 @@ def save_sample_images(
     indices: list[int] | None = None,
     labels: torch.Tensor | None = None,
     label_names: tuple[str, ...] | None = None,
+    cfg: dict | None = None,
 ) -> list[str]:
     os.makedirs(out_dir, exist_ok=True)
     if indices is not None and len(indices) != int(sample_tensor.shape[0]):
@@ -124,12 +127,13 @@ def save_sample_images(
         sample_index = indices[offset] if indices is not None else start_index + offset
         label_tag = _label_tag(int(label_ids[offset]), label_names) if label_ids is not None else ""
         out_path = os.path.join(out_dir, f"sample_{sample_index:06d}{label_tag}_x0loop.png")
-        Image.fromarray(_tensor_chw_to_uint8_rgb(x)).save(out_path)
+        Image.fromarray(_tensor_chw_to_uint8_rgb(x, cfg=cfg)).save(out_path)
         paths.append(out_path)
     return paths
 
 
-def _tensor_chw_to_uint8_rgb(x: torch.Tensor):
+def _tensor_chw_to_uint8_rgb(x: torch.Tensor, *, cfg: dict | None = None):
+    x = image_to_display_minus_one_one(x, cfg)
     x = ((x.detach().cpu().clamp(-1, 1) + 1.0) * 127.5).to(torch.uint8)
     if x.ndim != 3:
         raise ValueError(f"Expected CHW tensor, got shape={tuple(x.shape)}")
@@ -150,6 +154,7 @@ def save_trace_large_images(
     prefix: str,
     labels: torch.Tensor | None = None,
     label_names: tuple[str, ...] | None = None,
+    cfg: dict | None = None,
 ):
     if not trace:
         return
@@ -182,7 +187,7 @@ def save_trace_large_images(
             row = si // cols
             col = si % cols
             x0_hat = item["x0_hat"][bi]
-            arr = _tensor_chw_to_uint8_rgb(x0_hat)
+            arr = _tensor_chw_to_uint8_rgb(x0_hat, cfg=cfg)
             img = Image.fromarray(arr)
             x0 = col * cell_w + pad
             y0 = row * cell_h + pad
@@ -216,12 +221,17 @@ def run_sampling_if_due(
         should_run_sample = True
 
     if should_run_sample:
+        sample_ema = ema
+        if model_ctx.use_fsdp and ema is not None:
+            sample_ema = None
+            if runtime.is_main:
+                runtime.logger.log_text("[sample] EMA skipped for FSDP/DTensor model; using current weights.")
         was_training = model.training
         model.eval()
         with torch.no_grad():
-            if ema is not None:
-                ema.store(model)
-                ema.copy_to(model)
+            if sample_ema is not None:
+                sample_ema.store(model)
+                sample_ema.copy_to(model)
             sample_num = int(cfg["sample"].get("num", 16))
             sample_cond = build_sample_cond(
                 cfg,
@@ -237,7 +247,7 @@ def run_sampling_if_due(
             result = process.sample(
                 model=model,
                 steps=int(cfg["sample"].get("steps", 50)),
-                shape=(sample_num, model_ctx.model_cfg.out_channels, model_ctx.model_cfg.image_size, model_ctx.model_cfg.image_size),
+                shape=(sample_num, model_ctx.model_cfg.in_channels, model_ctx.model_cfg.image_size, model_ctx.model_cfg.image_size),
                 device=runtime.device,
                 dtype=torch.float32,
                 return_trace=True,
@@ -247,8 +257,8 @@ def run_sampling_if_due(
                 sampler=sample_sampler,
                 posterior_noise_scale=cfg["sample"].get("posterior_noise_scale", None),
             )
-            if ema is not None:
-                ema.restore(model)
+            if sample_ema is not None:
+                sample_ema.restore(model)
 
         if runtime.is_main:
             sample_dir = os.path.join(runtime.out_dir, "samples")
@@ -258,6 +268,7 @@ def run_sampling_if_due(
                 f"step_{resume.global_step:08d}",
                 labels=sample_cond,
                 label_names=build_sample_label_names(cfg),
+                cfg=cfg,
             )
             if bool(cfg["sample"].get("save_trace", False)) and "trace" in result:
                 trace_path = os.path.join(sample_dir, f"step_{resume.global_step:08d}_trace.pt")

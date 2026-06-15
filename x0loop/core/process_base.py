@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+import torch.nn as nn
 
 from x0loop.core.schedules import TimeSchedule
 from x0loop.core.types import expand_to_batch_image
@@ -17,7 +18,7 @@ class ForwardBatch:
     eps: torch.Tensor
 
 
-class BaseProcess:
+class BaseProcess(nn.Module):
     """Shared x_t = alpha(t) x0 + sigma(t) eps process utilities.
 
     output_target controls what the model directly predicts:
@@ -30,6 +31,7 @@ class BaseProcess:
     VALID_TARGETS = {"eps", "x0", "v"}
 
     def __init__(self, schedule: TimeSchedule, prior: str = "gaussian", output_target: str = "eps"):
+        super().__init__()
         self.schedule = schedule
         self.prior = prior
         self.output_target = self.normalize_target(output_target)
@@ -101,6 +103,12 @@ class BaseProcess:
 
     def velocity_target(self, fb: ForwardBatch) -> torch.Tensor:
         return self.v_target(fb)
+
+    def mudata_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
+        raise ValueError(f"{type(self).__name__} does not define a mudata prediction head.")
+
+    def mudata_target(self, fb: ForwardBatch) -> torch.Tensor:
+        raise ValueError(f"{type(self).__name__} does not define a mudata target.")
 
     def direct_target(self, fb: ForwardBatch) -> torch.Tensor:
         if self.output_target == "eps":

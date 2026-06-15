@@ -16,8 +16,13 @@ if [ "${1:-}" = "--" ]; then
 fi
 
 set +e
-"$@" >> "${LOG_FILE}" 2>&1
-TRAIN_STATUS=$?
+if command -v stdbuf >/dev/null 2>&1; then
+  PYTHONUNBUFFERED=1 stdbuf -oL -eL "$@" 2>&1 | tee -a "${LOG_FILE}"
+  TRAIN_STATUS=${PIPESTATUS[0]}
+else
+  PYTHONUNBUFFERED=1 "$@" 2>&1 | tee -a "${LOG_FILE}"
+  TRAIN_STATUS=${PIPESTATUS[0]}
+fi
 set -e
 
 {
@@ -48,6 +53,6 @@ set -e
   else
     echo "[x0loop] training failed or was interrupted; skip plotting"
   fi
-} >> "${LOG_FILE}" 2>&1
+} 2>&1 | tee -a "${LOG_FILE}"
 
 exit "${TRAIN_STATUS}"

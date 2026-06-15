@@ -101,7 +101,7 @@ def main():
         result = process.sample(
             model=model,
             steps=int(args.steps if args.steps is not None else cfg["sample"].get("steps", 50)),
-            shape=(sample_num, model_cfg.out_channels, model_cfg.image_size, model_cfg.image_size),
+            shape=(sample_num, model_cfg.in_channels, model_cfg.image_size, model_cfg.image_size),
             device=device,
             dtype=torch.float32,
             return_trace=bool(cfg["sample"].get("save_trace", False)),
@@ -120,7 +120,7 @@ def main():
 
     if is_main_process():
         out = args.out or os.path.join(cfg["logging"]["out_dir"], "sample.png")
-        save_sample_grid(result["x"].detach().cpu(), out)
+        save_sample_grid(result["x"].detach().cpu(), out, cfg=cfg)
         if "trace" in result:
             torch.save(result["trace"], out.replace(".png", "_trace.pt"))
 

@@ -138,6 +138,13 @@ class TimeBinAccumulator:
         eps_u = regress("mse", process.eps_from_output(fb.xt, t, out_d, aux={}), process.eps_target(fb).detach())
         x0_u = regress("mse", process.x0_from_output(fb.xt, t, out_d, aux={}), process.x0_target(fb).detach())
         v_u = regress("mse", process.v_from_output(fb.xt, t, out_d, aux={}), process.v_target(fb).detach())
+        if hasattr(process, "mu_data") and getattr(process, "predict_mudata", False):
+            lmu = regress(
+                "mse",
+                process.mudata_from_output(fb.xt, t, out_d, aux={}),
+                process.mudata_target(fb).detach(),
+            )
+            extra_values = {**(extra_values or {}), "lmu": lmu}
 
         # Prefer the actual outer objective weight; fall back to explicit per-space atom weight.
         if getattr(loss_fn, "outer_weight_fn", None) is not None:

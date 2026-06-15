@@ -1,0 +1,23 @@
+distributed:
+  mode: ddp
+  backend: nccl
+  fsdp: false
+  fsdp_mode: none
+  precision: bf16
+  grad_clip_norm: 3.0
+  activation_ckpt: false
+  ddp:
+    broadcast_buffers: false
+    find_unused_parameters: false
+    gradient_as_bucket_view: false
+    static_graph: false
+  checkpoint:
+    mode: full
+    every_steps: 50000
+
+compile:
+  enabled: true
+  allow_fsdp: false
+  mode: default
+  fullgraph: false
+  dynamic: false

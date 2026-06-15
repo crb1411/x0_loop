@@ -54,6 +54,8 @@ class ModelContext:
     use_fsdp: bool
     fsdp_mode: str
     precision: str
+    use_ddp: bool = False
+    distributed_mode: str = "none"
 
 
 @dataclass

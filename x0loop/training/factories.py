@@ -13,17 +13,19 @@ from x0loop.aug.identity import NoAug
 from x0loop.aug.base import BaseAugment
 from x0loop.aug.strong_augment import strongAugment
 from x0loop.core.config import dump_resolved_config, resolve_logging_output_dir
+from x0loop.core.image_normalization import resolve_image_normalization
 from x0loop.core.process_base import BaseProcess
 from x0loop.core.schedules import TimeSchedule
 from x0loop.models.factory import build_model
 from x0loop.models.denoiser import Denoiser
 from x0loop.models.discriminator import build_x0_discriminator
 from x0loop.processes.diffusion_process import DiffusionProcess
-from x0loop.processes.flow_process import FlowProcess
+from x0loop.processes.flow_process import FlowProcess, LearnableEndpointFlowProcess
 from x0loop.training.context import DataContext, ModelContext, ResumeState, RuntimeContext
 from x0loop.training.optimization import maybe_compile_model
 from x0loop.utils import dist as dist_utils
 from x0loop.utils.checkpoint import load_checkpoint
+from x0loop.utils.ddp import wrap_ddp
 from x0loop.utils.ema import EMA
 from x0loop.utils.fsdp import wrap_fsdp2
 from x0loop.utils.logger import Logger
@@ -39,7 +41,15 @@ def build_dataset(cfg: dict, *, train: bool = True):
     T, CIFAR10, MNIST, ImageFolder = _maybe_import_vision()
     ds_cfg = cfg["dataset"]
     img_size = int(cfg["model"]["image_size"])
-    tfm = T.Compose([T.Resize(img_size), T.CenterCrop(img_size), T.ToTensor(), T.Lambda(lambda x: x * 2.0 - 1.0)])
+    norm = resolve_image_normalization(cfg)
+    transforms = [T.Resize(img_size), T.CenterCrop(img_size), T.ToTensor()]
+    if norm.mode == "minus_one_one":
+        transforms.append(T.Lambda(lambda x: x * 2.0 - 1.0))
+    elif norm.mode == "standard":
+        transforms.append(T.Normalize(norm.mean, norm.std))
+    elif norm.mode != "zero_one":
+        raise AssertionError(f"Unexpected normalization mode={norm.mode!r}")
+    tfm = T.Compose(transforms)
     name = ds_cfg["name"].lower()
     root = ds_cfg["root"]
     if name == "cifar10":
@@ -67,6 +77,21 @@ def build_process(cfg: dict, schedule: TimeSchedule) -> BaseProcess:
     if name == "diffusion":
         return DiffusionProcess(schedule=schedule, output_target=output_target, sampler=str(pc.get("sampler", "ddim")), posterior_noise_scale=float(pc.get("posterior_noise_scale", 1.0)))
     if name == "flow":
+        endpoint = str(pc.get("endpoint", pc.get("terminal", "gaussian"))).lower()
+        if bool(pc.get("learnable_endpoint", False)) or endpoint in {"learnable", "learned", "learnable_mu", "learned_mu", "mudata"}:
+            model_cfg = cfg.get("model", {}) or {}
+            return LearnableEndpointFlowProcess(
+                schedule=schedule,
+                image_size=int(pc.get("image_size", model_cfg.get("image_size", 32))),
+                data_channels=int(pc.get("data_channels", model_cfg.get("in_channels", model_cfg.get("out_channels", 3)))),
+                beta=float(pc.get("endpoint_beta", pc.get("beta", 0.5))),
+                output_target=output_target,
+                sampler=str(pc.get("sampler", "euler")),
+                predict_mudata=bool(pc.get("predict_mudata", pc.get("predict_mu_data", False))),
+                mudata_init_mean=float(pc.get("mudata_init_mean", pc.get("mu_data_init_mean", 0.0))),
+                mudata_init_std=float(pc.get("mudata_init_std", pc.get("mu_data_init_std", 1.0))),
+                detach_mudata_target=bool(pc.get("detach_mudata_target", True)),
+            )
         return FlowProcess(schedule=schedule, output_target=output_target, sampler=str(pc.get("sampler", "euler")))
     raise ValueError(f"Unknown process: {name}")
 
@@ -149,7 +174,16 @@ def build_model_context(cfg: dict, runtime: RuntimeContext) -> ModelContext:
     model = model.to(runtime.device)
     if runtime.is_main:
         log_model_summary(runtime.logger, model, model_cfg, runtime.device)
-    use_fsdp = bool(runtime.distributed_cfg.get("fsdp", False) and runtime.is_distributed)
+    requested_mode = str(runtime.distributed_cfg.get("mode", "")).lower()
+    if not requested_mode:
+        requested_mode = "fsdp" if bool(runtime.distributed_cfg.get("fsdp", False)) else "none"
+    if requested_mode == "fsdp2":
+        requested_mode = "fsdp"
+    if requested_mode not in {"none", "fsdp", "ddp"}:
+        raise ValueError(f"distributed.mode must be one of none|fsdp|ddp, got {requested_mode!r}")
+    distributed_mode = requested_mode if runtime.is_distributed else "none"
+    use_fsdp = distributed_mode == "fsdp"
+    use_ddp = distributed_mode == "ddp"
     compile_enabled = bool(runtime.compile_cfg.get("enabled", False))
     allow_compile_with_fsdp = bool(runtime.compile_cfg.get("allow_fsdp", False))
     if compile_enabled and (not use_fsdp or allow_compile_with_fsdp):
@@ -159,14 +193,25 @@ def build_model_context(cfg: dict, runtime: RuntimeContext) -> ModelContext:
     fsdp_mode = "none"
     if use_fsdp:
         model, fsdp_mode = wrap_fsdp2(model, mixed_precision=runtime.distributed_cfg.get("precision", "bf16") in {"bf16", "fp16"}, precision=runtime.distributed_cfg.get("precision", "bf16"), use_compile=compile_enabled, activation_ckpt=bool(runtime.distributed_cfg.get("activation_ckpt", False)), device_id=runtime.local_rank)
+    elif use_ddp:
+        ddp_cfg = runtime.distributed_cfg.get("ddp", {}) or {}
+        model = wrap_ddp(
+            model,
+            device=runtime.device,
+            local_rank=runtime.local_rank,
+            broadcast_buffers=bool(ddp_cfg.get("broadcast_buffers", False)),
+            find_unused_parameters=bool(ddp_cfg.get("find_unused_parameters", False)),
+            gradient_as_bucket_view=bool(ddp_cfg.get("gradient_as_bucket_view", False)),
+            static_graph=bool(ddp_cfg.get("static_graph", False)),
+        )
     precision = str(runtime.distributed_cfg.get("precision", "bf16"))
     if runtime.device.type == "cpu" and precision in {"bf16", "fp16"}:
         if runtime.is_main:
             runtime.logger.log_text(f"precision={precision} is not stable on CPU here, fallback to fp32.")
         precision = "fp32"
     if runtime.is_main:
-        runtime.logger.log_text(f"[runtime] distributed={runtime.is_distributed}, world_size={runtime.world_size}, use_fsdp={use_fsdp}, fsdp_mode={fsdp_mode}, compile={compile_enabled}, precision={precision}")
-    return ModelContext(model=model, model_cfg=model_cfg, use_fsdp=use_fsdp, fsdp_mode=fsdp_mode, precision=precision)
+        runtime.logger.log_text(f"[runtime] distributed={runtime.is_distributed}, world_size={runtime.world_size}, distributed_mode={distributed_mode}, use_fsdp={use_fsdp}, fsdp_mode={fsdp_mode}, use_ddp={use_ddp}, compile={compile_enabled}, precision={precision}")
+    return ModelContext(model=model, model_cfg=model_cfg, use_fsdp=use_fsdp, fsdp_mode=fsdp_mode, precision=precision, use_ddp=use_ddp, distributed_mode=distributed_mode)
 
 
 def build_discriminator(cfg: dict, runtime: RuntimeContext) -> torch.nn.Module | None:

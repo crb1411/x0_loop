@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import torch
+import torch.nn as nn
 
 from x0loop.core.process_base import BaseProcess, ForwardBatch
 
@@ -115,3 +116,101 @@ class FlowProcess(BaseProcess):
         if return_trace:
             result["trace"] = trace
         return result
+
+
+class LearnableEndpointFlowProcess(FlowProcess):
+    """Flow process with a learnable terminal endpoint.
+
+    Training path:
+        z   = (1 - beta) * mu_data + beta * noise
+        x_t = (1 - t) * x0 + t * z
+
+    The existing process APIs keep the endpoint named `eps` for compatibility
+    with diagnostics and target conversions. In this process, `eps_target(fb)`
+    therefore means the learned/noisy terminal endpoint z, not raw Gaussian
+    noise.
+    """
+
+    def __init__(
+        self,
+        schedule,
+        *,
+        image_size: int,
+        data_channels: int = 3,
+        beta: float = 0.5,
+        prior: str = "gaussian",
+        output_target: str = "x0",
+        sampler: str = "euler",
+        predict_mudata: bool = False,
+        mudata_init_mean: float = 0.0,
+        mudata_init_std: float = 1.0,
+        detach_mudata_target: bool = True,
+    ):
+        super().__init__(schedule=schedule, prior=prior, output_target=output_target, sampler=sampler)
+        if not (0.0 <= float(beta) <= 1.0):
+            raise ValueError(f"learnable endpoint beta must be in [0, 1], got {beta}")
+        self.image_size = int(image_size)
+        self.data_channels = int(data_channels)
+        self.beta = float(beta)
+        self.predict_mudata = bool(predict_mudata)
+        self.detach_mudata_target = bool(detach_mudata_target)
+        init = torch.randn(1, self.data_channels, self.image_size, self.image_size) * float(mudata_init_std) + float(mudata_init_mean)
+        self.mu_data = nn.Parameter(init)
+
+    def _main_output(self, model_out: torch.Tensor) -> torch.Tensor:
+        return model_out[:, : self.data_channels]
+
+    def _mu_output(self, model_out: torch.Tensor) -> torch.Tensor:
+        if not self.predict_mudata:
+            raise ValueError("mudata output was requested but process.predict_mudata=false.")
+        if model_out.shape[1] < self.data_channels * 2:
+            raise ValueError(
+                f"predict_mudata=true requires at least {self.data_channels * 2} output channels, "
+                f"got {model_out.shape[1]}."
+            )
+        return model_out[:, self.data_channels : self.data_channels * 2]
+
+    def _terminal_endpoint(self, shape, device, dtype) -> torch.Tensor:
+        noise = torch.randn(shape, device=device, dtype=dtype)
+        mu = self.mu_data.to(device=device, dtype=dtype)
+        return (1.0 - self.beta) * mu.expand(shape[0], -1, -1, -1) + self.beta * noise
+
+    def prior_sample(self, shape, device, dtype) -> torch.Tensor:
+        if self.prior != "gaussian":
+            raise ValueError(f"Unsupported prior: {self.prior}")
+        if tuple(shape[1:]) != (self.data_channels, self.image_size, self.image_size):
+            raise ValueError(
+                "LearnableEndpointFlowProcess prior shape must match "
+                f"[B,{self.data_channels},{self.image_size},{self.image_size}], got {tuple(shape)}."
+            )
+        return self._terminal_endpoint(shape, device, dtype)
+
+    def forward_sample(self, x0: torch.Tensor, t: torch.Tensor, rng=None) -> ForwardBatch:
+        del rng
+        z = self._terminal_endpoint(x0.shape, x0.device, x0.dtype)
+        alpha = self.schedule.alpha(t)
+        sigma = self.schedule.sigma(t)
+        a = self._reshape_coeff(alpha, x0)
+        s = self._reshape_coeff(sigma, x0)
+        xt = a * x0 + s * z
+        return ForwardBatch(x0=x0, t=t, xt=xt, eps=z)
+
+    def x0_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
+        return self._to_x0(xt, t, self._main_output(model_out))
+
+    def eps_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
+        return self._to_eps(xt, t, self._main_output(model_out))
+
+    def v_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
+        return self._to_v(xt, t, self._main_output(model_out))
+
+    def velocity_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
+        return self.v_from_output(xt, t, model_out, aux)
+
+    def mudata_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
+        del xt, t, aux
+        return self._mu_output(model_out)
+
+    def mudata_target(self, fb: ForwardBatch) -> torch.Tensor:
+        target = self.mu_data.expand(fb.x0.shape[0], -1, -1, -1)
+        return target.detach() if self.detach_mudata_target else target

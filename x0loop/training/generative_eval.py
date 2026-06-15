@@ -154,7 +154,7 @@ def _export_fake_images(
         result = process.sample(
             model=model,
             steps=int(gen_cfg["steps"]),
-            shape=(len(indices), model_ctx.model_cfg.out_channels, model_ctx.model_cfg.image_size, model_ctx.model_cfg.image_size),
+            shape=(len(indices), model_ctx.model_cfg.in_channels, model_ctx.model_cfg.image_size, model_ctx.model_cfg.image_size),
             device=runtime.device,
             dtype=torch.float32,
             return_trace=False,
@@ -165,7 +165,7 @@ def _export_fake_images(
             posterior_noise_scale=gen_cfg["posterior_noise_scale"],
         )
         labels_cpu = cond.detach().cpu() if cond is not None else None
-        save_sample_images(result["x"].detach().cpu(), fake_dir, indices=indices, labels=labels_cpu, label_names=label_names)
+        save_sample_images(result["x"].detach().cpu(), fake_dir, indices=indices, labels=labels_cpu, label_names=label_names, cfg=cfg)
 
 
 def _calculate_metrics(cfg: dict, gen_cfg: dict[str, Any], fake_dir: str, runtime: RuntimeContext) -> dict:
@@ -229,14 +229,19 @@ def _run_generative_eval(
 
     was_training = model.training
     model.eval()
-    if ema is not None:
-        ema.store(model)
-        ema.copy_to(model)
+    gen_ema = ema
+    if model_ctx.use_fsdp and ema is not None:
+        gen_ema = None
+        if runtime.is_main:
+            runtime.logger.log_text("[gen_eval] EMA skipped for FSDP/DTensor model; using current weights.")
+    if gen_ema is not None:
+        gen_ema.store(model)
+        gen_ema.copy_to(model)
     try:
         _export_fake_images(cfg=cfg, gen_cfg=gen_cfg, model=model, runtime=runtime, model_ctx=model_ctx, process=process, fake_dir=fake_dir)
     finally:
-        if ema is not None:
-            ema.restore(model)
+        if gen_ema is not None:
+            gen_ema.restore(model)
         if was_training:
             model.train()
     if runtime.is_distributed:

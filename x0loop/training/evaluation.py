@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+import torch.distributed as dist
 
 from x0loop.core.process_base import BaseProcess
 from x0loop.core.schedules import TimeSchedule
@@ -9,6 +10,26 @@ from x0loop.losses.atomic import CompositeLoss, regress
 from x0loop.training.context import DataContext, ModelContext, ResumeState, RuntimeContext
 from x0loop.training.metrics import TimeBinAccumulator
 from x0loop.training.optimization import amp_dtype_for_precision
+
+
+def _reduce_eval_totals(
+    sums: dict[str, float],
+    total: int,
+    *,
+    device: torch.device,
+    is_distributed: bool,
+) -> tuple[dict[str, float], int]:
+    if not is_distributed or not dist.is_available() or not dist.is_initialized():
+        return sums, total
+
+    keys = sorted(sums)
+    values = [float(sums[k]) for k in keys]
+    values.append(float(total))
+    t = torch.tensor(values, dtype=torch.float64, device=device)
+    dist.all_reduce(t, op=dist.ReduceOp.SUM)
+    reduced_sums = {k: float(t[i].item()) for i, k in enumerate(keys)}
+    reduced_total = int(t[-1].item())
+    return reduced_sums, reduced_total
 
 
 def compute_eval_forward(
@@ -46,6 +67,8 @@ def compute_eval_forward(
             "loss_x0": regress("mse", p.x0_from_output(fb.xt, fb.t, out, aux={}), p.x0_target(fb)).detach(),
             "loss_v": regress("mse", p.v_from_output(fb.xt, fb.t, out, aux={}), p.v_target(fb)).detach(),
         }
+        if hasattr(p, "mu_data") and getattr(p, "predict_mudata", False):
+            diag["loss_mudata"] = regress("mse", p.mudata_from_output(fb.xt, fb.t, out, aux={}), p.mudata_target(fb)).detach()
     return {"diag": diag, "fb": fb, "out": out, "batch_size": bsz}
 
 
@@ -113,10 +136,18 @@ def run_eval_if_due(
     if was_training:
         model.train()
 
+    sums, total = _reduce_eval_totals(
+        sums,
+        total,
+        device=runtime.device,
+        is_distributed=runtime.is_distributed,
+    )
+    summary = tbin.summary(is_distributed=runtime.is_distributed)
+
     if total <= 0:
         return
     if runtime.is_main:
         kv = {f"eval/{k}": v / total for k, v in sums.items()}
         kv["eval/num_samples"] = total
-        kv["eval/summary"] = tbin.summary(is_distributed=runtime.is_distributed)
+        kv["eval/summary"] = summary
         runtime.logger.log_kv(resume.global_step, kv)
