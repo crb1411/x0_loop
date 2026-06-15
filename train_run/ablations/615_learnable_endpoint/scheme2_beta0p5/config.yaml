@@ -1,0 +1,132 @@
+dataset:
+  name: cifar10
+  root: /root/data/cifar10_data
+  download: false
+  normalization: standard
+
+model:
+  name: jit
+  image_size: 32
+  in_channels: 3
+  out_channels: 3
+  patch_size: 4
+  dim: 512
+  depth: 12
+  heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+  num_classes: 10
+  cond_dim: 0
+  bottleneck_dim: 128
+  in_context_len: 32
+  in_context_start: 4
+
+process:
+  name: flow
+  output_target: x0
+  sampler: heun
+  endpoint: learnable_mu
+  endpoint_beta: 0.5
+  predict_mudata: false
+  mudata_init_mean: 0.0
+  mudata_init_std: 1.0
+
+schedule:
+  mode: flow
+
+time_sampler:
+  name: logit_normal
+  mean: 0.0
+  std: 1.0
+
+time_condition_jitter:
+  enabled: true
+  mean: 0.02
+  std: 0.02
+  prob: 1.0
+  min_t: 1.0e-5
+  max_t: 0.99999
+
+loss:
+  outer_weight: target
+  outer_weight_power: 1.0
+  outer_weight_floor: 0.0
+  terms:
+    - {target: v, formula: mse, coef: 1.0}
+
+augment:
+  name: geom
+  mode: data_only
+  hflip_prob: 0.5
+  max_translation: 0
+  crop_min_scale: 1.0
+  enable_crop_resize: false
+
+train:
+  seed: 42
+  deterministic: false
+  epochs: 300
+  batch_size: 256
+  gradient_accumulation_steps: 1
+  class_dropout_prob: 0.1
+  num_workers: 8
+  lr: 1.0e-4
+  lr_scheduler:
+    name: cosine
+    max_lr: 1.0e-4
+    min_lr: 3.0e-5
+    warmup_steps: 10000
+    cosine_steps: 100000
+  weight_decay: 0.04
+  max_clip_grad: 10.0
+  use_ema: true
+  ema_decay: 0.999
+  resume: null
+
+logging:
+  log_every: 100
+  window_size: 100
+  use_tb: true
+  sample_every: 10000
+  sample_rank0_only: true
+  summary_include_x0: true
+
+eval:
+  enabled: true
+  every_steps: 1000
+  max_batches: 8
+  batch_size: 256
+  num_workers: 4
+
+sample:
+  steps: 50
+  num: 5
+  sampler: heun
+  guidance_scale: 1.0
+  save_trace: false
+
+gen_eval:
+  enabled: true
+  every_steps: 10000
+  num_samples: 5000
+  batch_size: 128
+  steps: 20
+  sampler: heun
+  guidance_scale: 3.0
+  input2: cifar10-train
+  datasets_root: /root/data/cifar10_data
+  datasets_download: false
+  keep_images: false
+  metrics:
+    isc: true
+    fid: true
+    kid: true
+    ppl: false
+    prc: true
+    mind: true
+  final:
+    enabled: true
+    num_samples: 20000
+    batch_size: 128
+    steps: 50
+    sampler: heun
