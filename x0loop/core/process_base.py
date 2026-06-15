@@ -15,7 +15,15 @@ class ForwardBatch:
     x0: torch.Tensor
     t: torch.Tensor
     xt: torch.Tensor
-    eps: torch.Tensor
+    # The second endpoint of the path x_t = alpha(t) x0 + sigma(t) endpoint.
+    # For standard flow/diffusion this is Gaussian noise; for a learnable-endpoint
+    # process it is the learned terminal point z.
+    endpoint: torch.Tensor
+
+    @property
+    def eps(self) -> torch.Tensor:
+        # Backward-compatible alias for code/tests that still read `.eps`.
+        return self.endpoint
 
 
 class BaseProcess(nn.Module):
@@ -83,8 +91,12 @@ class BaseProcess(nn.Module):
     def x0_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
         return self._to_x0(xt, t, model_out)
 
-    def eps_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
+    def endpoint_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
         return self._to_eps(xt, t, model_out)
+
+    def eps_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
+        # Backward-compatible alias for `endpoint_from_output`.
+        return self.endpoint_from_output(xt, t, model_out, aux)
 
     def v_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
         return self._to_v(xt, t, model_out)
@@ -95,11 +107,15 @@ class BaseProcess(nn.Module):
     def x0_target(self, fb: ForwardBatch) -> torch.Tensor:
         return fb.x0
 
+    def endpoint_target(self, fb: ForwardBatch) -> torch.Tensor:
+        return fb.endpoint
+
     def eps_target(self, fb: ForwardBatch) -> torch.Tensor:
-        return fb.eps
+        # Backward-compatible alias for `endpoint_target`.
+        return self.endpoint_target(fb)
 
     def v_target(self, fb: ForwardBatch) -> torch.Tensor:
-        return fb.eps - fb.x0
+        return fb.endpoint - fb.x0
 
     def velocity_target(self, fb: ForwardBatch) -> torch.Tensor:
         return self.v_target(fb)
@@ -112,7 +128,7 @@ class BaseProcess(nn.Module):
 
     def direct_target(self, fb: ForwardBatch) -> torch.Tensor:
         if self.output_target == "eps":
-            return self.eps_target(fb)
+            return self.endpoint_target(fb)
         if self.output_target == "x0":
             return self.x0_target(fb)
         return self.v_target(fb)

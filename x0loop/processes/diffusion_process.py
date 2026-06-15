@@ -22,12 +22,12 @@ class DiffusionProcess(BaseProcess):
         a = self._reshape_coeff(alpha, x0)
         s = self._reshape_coeff(sigma, x0)
         xt = a * x0 + s * eps
-        return ForwardBatch(x0=x0, t=t, xt=xt, eps=eps)
+        return ForwardBatch(x0=x0, t=t, xt=xt, endpoint=eps)
 
     def step(self, xt, t, s, model_out, aux, rng=None) -> torch.Tensor:
         # Decode the configured model target into both endpoints once per step.
         x0_hat  = self.x0_from_output(xt, t, model_out, aux)
-        eps_hat = self.eps_from_output(xt, t, model_out, aux)
+        eps_hat = self.endpoint_from_output(xt, t, model_out, aux)
         if s.ndim == 0:
             s = torch.full((xt.shape[0],), float(s.item()), device=xt.device)
         sampler = str(aux.get("sampler", self.sampler)).lower()

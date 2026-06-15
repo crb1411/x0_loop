@@ -56,7 +56,7 @@ def log_loop_config(logger: Logger, loop_cfg: LoopConfig) -> None:
 def _diagnostic_losses(process: BaseProcess, fb: ProcessForwardBatch, out: torch.Tensor) -> dict[str, torch.Tensor]:
     terminal_label = endpoint_loss_label(process)
     diag = {
-        terminal_label: regress("mse", process.eps_from_output(fb.xt, fb.t, out, aux={}), process.eps_target(fb)).mean(),
+        terminal_label: regress("mse", process.endpoint_from_output(fb.xt, fb.t, out, aux={}), process.endpoint_target(fb)).mean(),
         "x0": regress("mse", process.x0_from_output(fb.xt, fb.t, out, aux={}), process.x0_target(fb)).mean(),
         "v": regress("mse", process.v_from_output(fb.xt, fb.t, out, aux={}), process.v_target(fb)).mean(),
     }

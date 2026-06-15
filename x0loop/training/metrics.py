@@ -143,7 +143,7 @@ class TimeBinAccumulator:
         self.endpoint_label = endpoint_loss_label(process)
 
         # Per-example unweighted MSE for terminal endpoint/x0/v (diagnostic, always MSE regardless of training formula).
-        eps_u = regress("mse", process.eps_from_output(fb.xt, t, out_d, aux={}), process.eps_target(fb).detach())
+        eps_u = regress("mse", process.endpoint_from_output(fb.xt, t, out_d, aux={}), process.endpoint_target(fb).detach())
         x0_u = regress("mse", process.x0_from_output(fb.xt, t, out_d, aux={}), process.x0_target(fb).detach())
         v_u = regress("mse", process.v_from_output(fb.xt, t, out_d, aux={}), process.v_target(fb).detach())
         if hasattr(process, "mu_data") and getattr(process, "predict_mudata", False):

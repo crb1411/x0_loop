@@ -45,7 +45,7 @@ class AtomicLoss:
 
     def _pred_and_target(self, process, fb, out):
         if self.target == "eps":
-            return process.eps_from_output(fb.xt, fb.t, out, aux={}), process.eps_target(fb)
+            return process.endpoint_from_output(fb.xt, fb.t, out, aux={}), process.endpoint_target(fb)
         if self.target == "x0":
             return process.x0_from_output(fb.xt, fb.t, out, aux={}), process.x0_target(fb)
         if self.target == "v":

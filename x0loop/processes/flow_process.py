@@ -27,12 +27,12 @@ class FlowProcess(BaseProcess):
         a = self._reshape_coeff(alpha, x0)
         s = self._reshape_coeff(sigma, x0)
         xt = a * x0 + s * eps
-        return ForwardBatch(x0=x0, t=t, xt=xt, eps=eps)
+        return ForwardBatch(x0=x0, t=t, xt=xt, endpoint=eps)
 
     def step(self, xt, t, s, model_out, aux, rng=None) -> torch.Tensor:
         # Freeze the predicted endpoints and reconstruct the same path at time s.
         x0_hat  = self.x0_from_output(xt, t, model_out, aux)
-        eps_hat = self.eps_from_output(xt, t, model_out, aux)
+        eps_hat = self.endpoint_from_output(xt, t, model_out, aux)
         if s.ndim == 0:
             s = torch.full((xt.shape[0],), float(s.item()), device=xt.device)
         alpha_s = self.schedule.alpha(s)
@@ -54,7 +54,7 @@ class FlowProcess(BaseProcess):
     def _velocity(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor) -> torch.Tensor:
         # Along the linear path, dx_t / dt = eps - x0.
         x0_hat = self.x0_from_output(xt, t, model_out, aux={})
-        eps_hat = self.eps_from_output(xt, t, model_out, aux={})
+        eps_hat = self.endpoint_from_output(xt, t, model_out, aux={})
         return eps_hat - x0_hat
 
     @staticmethod
@@ -126,10 +126,10 @@ class LearnableEndpointFlowProcess(FlowProcess):
         z   = (1 - beta) * mu_data + beta * noise
         x_t = (1 - t) * x0 + t * z
 
-    The existing process APIs keep the endpoint named `eps` for compatibility
-    with diagnostics and target conversions. In this process, `eps_target(fb)`
-    therefore means the learned/noisy terminal endpoint z, not raw Gaussian
-    noise.
+    The path endpoint (``ForwardBatch.endpoint`` / ``endpoint_target(fb)``) here
+    is the learned, lightly-noised terminal point z, not raw Gaussian noise. The
+    legacy ``eps``-named aliases still resolve to this same z for compatibility
+    with diagnostics and target conversions.
     """
 
     def __init__(
@@ -194,12 +194,12 @@ class LearnableEndpointFlowProcess(FlowProcess):
         a = self._reshape_coeff(alpha, x0)
         s = self._reshape_coeff(sigma, x0)
         xt = a * x0 + s * z
-        return ForwardBatch(x0=x0, t=t, xt=xt, eps=z)
+        return ForwardBatch(x0=x0, t=t, xt=xt, endpoint=z)
 
     def x0_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
         return self._to_x0(xt, t, self._main_output(model_out))
 
-    def eps_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
+    def endpoint_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:
         return self._to_eps(xt, t, self._main_output(model_out))
 
     def v_from_output(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor, aux: dict) -> torch.Tensor:

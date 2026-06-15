@@ -109,7 +109,7 @@ gen_eval:
   enabled: true
   every_steps: 10000
   num_samples: 5000
-  batch_size: 128
+  batch_size: 256
   steps: 20
   sampler: heun
   guidance_scale: 3.0
@@ -127,6 +127,6 @@ gen_eval:
   final:
     enabled: true
     num_samples: 20000
-    batch_size: 128
+    batch_size: 256
     steps: 50
     sampler: heun

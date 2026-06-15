@@ -1,0 +1,81 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "X0Loop Train CIFAR-10",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "x0loop.train",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--config",
+                "x0loop/configs/cifar10_dit_diffusion_train.yaml",
+                "--runtime-config",
+                "x0loop/configs/runtime/fsdp_checkpoint_compile.yaml",
+                "--set", "compile.enabled=false"
+            ],
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "0",
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "justMyCode": true,
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "X0Loop Train (Single GPU)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "x0loop.train",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--config",
+                "x0loop/configs/default.yaml",
+                "--runtime-config",
+                "x0loop/configs/runtime/debug_runtime.yaml"
+            ],
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "0",
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "justMyCode": true,
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Debug 615 scheme2_beta0p8",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "x0loop.train",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--config",
+                "train_run/ablations/615_learnable_endpoint/scheme2_beta0p8/config.yaml",
+                "--runtime-config",
+                "x0loop/configs/runtime/ddp_checkpoint_compile.yaml",
+                "--set",
+                "logging.out_dir=${workspaceFolder}/runs/ablations/cifar10_flow_x0_vloss/jit/615_learnable_endpoint/scheme2_beta0p8/vscode_debug",
+                "--set",
+                "compile.enabled=false"
+            ],
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "0",
+                "PYTHONPATH": "${workspaceFolder}",
+                "X0LOOP_RUN_TIMESTAMP": "vscode_debug",
+                "MASTER_ADDR": "127.0.0.1",
+                "MASTER_PORT": "47452"
+            },
+            "justMyCode": false,
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "justMyCode": true,
+            "console": "integratedTerminal"
+        }
+    ]
+}
