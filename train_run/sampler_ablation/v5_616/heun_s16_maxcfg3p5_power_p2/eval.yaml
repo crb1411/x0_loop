@@ -1,0 +1,34 @@
+# Auto-generated v5_616 sampler-ablation eval override.
+distributed:
+  mode: none
+compile:
+  enabled: false
+eval:
+  enabled: false
+logging:
+  use_tb: false
+gen_eval:
+  enabled: true
+  num_samples: 10000
+  batch_size: 256
+  steps: 16
+  sampler: heun
+  guidance_scale: 3.5
+  guidance_schedule:
+    name: power_decay
+    min_scale: 1.0
+    power: 2.0
+  input2: cifar10-train
+  datasets_root: /root/data/cifar10_data
+  datasets_download: false
+  keep_images: false
+  keep_images_count: 100
+  metrics:
+    isc: true
+    fid: true
+    kid: true
+    prc: true
+    mind: false
+    ppl: false
+  final:
+    enabled: false
