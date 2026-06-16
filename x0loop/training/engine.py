@@ -23,7 +23,7 @@ from x0loop.training.metrics import TimeBinAccumulator, endpoint_loss_label
 from x0loop.training.optimization import amp_dtype_for_precision, build_step_lr_schedule, maybe_make_scaler
 from x0loop.training.evaluation import run_eval_if_due
 from x0loop.training.generative_eval import run_final_generative_eval, run_generative_eval_if_due
-from x0loop.training.checkpointing import save_checkpoint_if_due
+from x0loop.training.checkpointing import save_checkpoint_if_due, save_final_checkpoint
 from x0loop.training.sampling import apply_classifier_free_label_dropout, run_sampling_if_due
 from x0loop.utils.ema import EMA
 from x0loop.utils.fsdp import clip_grad_norm
@@ -365,6 +365,19 @@ def train(cfg: dict) -> None:
     if runtime.is_main:
         log_loop_config(runtime.logger, loop_cfg)
     tbin_stats = TimeBinAccumulator(num_bins=loop_cfg.tbin_count, device=runtime.device)
+    epoch = resume.start_epoch
+
+    def _save_final_checkpoint() -> None:
+        final_extra_state = None
+        if discriminator is not None:
+            final_extra_state = {"discriminator": discriminator.state_dict()}
+            if d_optimizer is not None:
+                final_extra_state["d_optimizer"] = d_optimizer.state_dict()
+        save_final_checkpoint(
+            cfg=cfg, denoiser=denoiser, runtime=runtime, optimizer=optimizer, scaler=scaler,
+            ema=ema, extra_state=final_extra_state, resume=resume, epoch=epoch,
+        )
+
     try:
         denoiser.train()
         iter_start = time.time()
@@ -412,6 +425,13 @@ def train(cfg: dict) -> None:
                         extra_state["d_optimizer"] = d_optimizer.state_dict()
                 save_checkpoint_if_due(cfg=cfg, denoiser=denoiser, runtime=runtime, optimizer=optimizer, scaler=scaler, ema=ema, extra_state=extra_state, loop_cfg=loop_cfg, resume=resume, epoch=epoch)
                 run_generative_eval_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, resume=resume)
+        # Always persist the latest state at end of training, regardless of cadence.
+        _save_final_checkpoint()
         run_final_generative_eval(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, resume=resume)
+    except KeyboardInterrupt:
+        if runtime.is_main:
+            runtime.logger.log_text("[checkpoint] KeyboardInterrupt: saving final checkpoint before exit")
+        _save_final_checkpoint()
+        raise
     finally:
         runtime.logger.close()
