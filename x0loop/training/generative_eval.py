@@ -94,6 +94,19 @@ def _json_ready(value: Any) -> Any:
     return value
 
 
+def _headline_metrics(metrics: dict) -> dict[str, Any]:
+    """Pull the most-watched scores to the front of each row for at-a-glance reading."""
+    priority = (
+        "frechet_inception_distance",
+        "inception_score_mean",
+        "kernel_inception_distance_mean",
+        "precision",
+        "recall",
+        "f_score",
+    )
+    return {k: metrics[k] for k in priority if k in metrics}
+
+
 def _metrics_path(runtime: RuntimeContext) -> str:
     timestamp = getattr(runtime.logger, "run_timestamp", time.strftime("%Y%m%d_%H%M%S", time.localtime()))
     return os.path.join(runtime.out_dir, f"gen_eval_metrics_{timestamp}.jsonl")
@@ -256,6 +269,7 @@ def _run_generative_eval(
             error = f"{type(exc).__name__}: {exc}"
             runtime.logger.log_text(f"[gen_eval] metrics_failed tag={tag}: {error}")
         row = {
+            **_headline_metrics(metrics),
             "step": int(resume.global_step),
             "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "tag": tag,
