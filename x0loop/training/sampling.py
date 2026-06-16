@@ -274,17 +274,16 @@ def run_sampling_if_due(
                 label_names=build_sample_label_names(cfg),
                 cfg=cfg,
             )
-            if hasattr(process, "mu_data"):
-                save_trace_large_images(
-                    result.get("trace", []),
-                    sample_dir,
-                    f"step_{resume.global_step:08d}",
-                    labels=sample_cond,
-                    label_names=build_sample_label_names(cfg),
-                    cfg=cfg,
-                    image_key="x",
-                    filename_suffix="zloop",
-                )
+            save_trace_large_images(
+                result.get("trace", []),
+                sample_dir,
+                f"step_{resume.global_step:08d}",
+                labels=sample_cond,
+                label_names=build_sample_label_names(cfg),
+                cfg=cfg,
+                image_key="x",
+                filename_suffix="xt",
+            )
             if bool(cfg["sample"].get("save_trace", False)) and "trace" in result:
                 trace_path = os.path.join(sample_dir, f"step_{resume.global_step:08d}_trace.pt")
                 os.makedirs(os.path.dirname(trace_path), exist_ok=True)
