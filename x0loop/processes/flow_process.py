@@ -1,11 +1,94 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import torch
 import torch.nn as nn
 
 from x0loop.core.process_base import BaseProcess, ForwardBatch
+
+
+class _UniPCSolver:
+    """UniPC (Unified Predictor-Corrector) for the flow ODE, data-prediction form.
+
+    Faithful port of diffusers' UniPCMultistepScheduler bh2 update with
+    predict_x0=True. One model eval per step: the eval at the current sample
+    both corrects the previous predictor output (UniC) and drives the next
+    predictor (UniP). Order ramps up at the start and down to 1 at the end.
+    """
+
+    def __init__(self, order: int = 2, variant: str = "bh2"):
+        self.order = int(order)
+        self.variant = variant
+        self.m_list: list[torch.Tensor] = []   # past data predictions x0_hat (recent last)
+        self.lam_list: list[float] = []         # past log-SNR lambdas
+        self.sig_list: list[float] = []          # past sigmas
+        self.last_sample: torch.Tensor | None = None
+        self.this_order = 1
+        self.lower_order_nums = 0
+
+    @staticmethod
+    def _solve(R: list[list[float]], b: list[float]) -> list[float]:
+        Rt = torch.tensor(R, dtype=torch.float64)
+        bt = torch.tensor(b, dtype=torch.float64)
+        return torch.linalg.solve(Rt, bt).tolist()
+
+    def _Rb(self, rks: list[float], hh: float, order: int, B_h: float):
+        R: list[list[float]] = []
+        b: list[float] = []
+        h_phi_1 = math.expm1(hh)
+        h_phi_k = h_phi_1 / hh - 1.0
+        factorial_i = 1.0
+        for i in range(1, order + 1):
+            R.append([rk ** (i - 1) for rk in rks])
+            b.append(h_phi_k * factorial_i / B_h)
+            factorial_i *= (i + 1)
+            h_phi_k = h_phi_k / hh - 1.0 / factorial_i
+        return R, b
+
+    def _B_h(self, hh: float) -> float:
+        return math.expm1(hh) if self.variant == "bh2" else hh
+
+    def correct(self, *, m_t, x_t, alpha_t, sigma_t, sigma_s0, lam_t, order):
+        m0 = self.m_list[-1]
+        lam_s0 = self.lam_list[-1]
+        h = lam_t - lam_s0
+        hh = -h
+        h_phi_1 = math.expm1(hh)
+        B_h = self._B_h(hh)
+        rks: list[float] = []
+        D1s: list[torch.Tensor] = []
+        for i in range(1, order):
+            rk = (self.lam_list[-(i + 1)] - lam_s0) / h
+            rks.append(rk)
+            D1s.append((self.m_list[-(i + 1)] - m0) / rk)
+        rks.append(1.0)
+        R, b = self._Rb(rks, hh, order, B_h)
+        rhos = [0.5] if order == 1 else self._solve(R, b)
+        x_t_ = (sigma_t / sigma_s0) * self.last_sample - alpha_t * h_phi_1 * m0
+        corr = sum((rhos[i] * D1s[i] for i in range(len(D1s))), start=torch.zeros_like(x_t))
+        return x_t_ - alpha_t * B_h * (corr + rhos[-1] * (m_t - m0))
+
+    def predict(self, *, m0, x, alpha_t, sigma_t, sigma_s0, lam_t, lam_s0, order):
+        h = lam_t - lam_s0
+        hh = -h
+        h_phi_1 = math.expm1(hh)
+        B_h = self._B_h(hh)
+        rks: list[float] = []
+        D1s: list[torch.Tensor] = []
+        for i in range(1, order):
+            rk = (self.lam_list[-(i + 1)] - lam_s0) / h
+            rks.append(rk)
+            D1s.append((self.m_list[-(i + 1)] - m0) / rk)
+        rks.append(1.0)
+        R, b = self._Rb(rks, hh, order, B_h)
+        x_t_ = (sigma_t / sigma_s0) * x - alpha_t * h_phi_1 * m0
+        pred = torch.zeros_like(x)
+        if D1s:
+            rhos = [0.5] if order == 2 else self._solve([row[:-1] for row in R[:-1]], b[:-1])
+            pred = sum((rhos[i] * D1s[i] for i in range(len(D1s))), start=torch.zeros_like(x))
+        return x_t_ - alpha_t * B_h * pred
 
 
 class FlowProcess(BaseProcess):
@@ -47,8 +130,18 @@ class FlowProcess(BaseProcess):
         # Keep old flow configs valid: their DDIM setting means Euler here.
         if name in {"auto", "ddim"}:
             return "euler"
-        if name not in {"euler", "heun"}:
-            raise ValueError(f"Unknown flow sampler: {sampler!r}. Use 'euler' or 'heun'.")
+        # DPM-Solver++(2M) and its common spellings.
+        if name in {"dpmpp", "dpmpp_2m", "dpm++", "dpm++2m", "dpm_solver++", "dpmsolver++"}:
+            return "dpmpp_2m"
+        # UniPC: "unipc" (2nd order) and "unipc3" (3rd order).
+        if name in {"unipc", "unipc2", "uni_pc"}:
+            return "unipc"
+        if name in {"unipc3", "unipc_3"}:
+            return "unipc3"
+        if name not in {"euler", "heun", "dpmpp_2m", "unipc", "unipc3"}:
+            raise ValueError(
+                f"Unknown flow sampler: {sampler!r}. Use 'euler', 'heun', 'dpmpp_2m', 'unipc' or 'unipc3'."
+            )
         return name
 
     def _velocity(self, xt: torch.Tensor, t: torch.Tensor, model_out: torch.Tensor) -> torch.Tensor:
@@ -88,26 +181,41 @@ class FlowProcess(BaseProcess):
         last_x0_hat = None
         pairs = self.schedule.iter_pairs(steps=steps, device=device)
 
+        prev_x0_hat = None   # dpmpp_2m carries the previous step's data prediction.
+        prev_lambda = None
+        unipc = _UniPCSolver(order=3 if method == "unipc3" else 2) if method in {"unipc", "unipc3"} else None
+        total = len(pairs)
         for index, (t_scalar, s_scalar) in enumerate(pairs):
             t = torch.full((shape[0],), float(t_scalar.item()), device=device, dtype=torch.float32)
             out = self._model_output(model, x, t, cond, null_cond, guidance_scale)
             xt = x
             x0_hat = self.x0_from_output(x, t, out, aux={})
-            velocity = self._velocity(x, t, out)
-            # iter_pairs moves from t=1 to t=0, so dt is negative.
-            dt = s_scalar - t_scalar
+            is_last = index == len(pairs) - 1
 
-            # Keep the final step Euler: evaluating an x0-predicting model at t=0
-            # would require an unstable eps reconstruction.
-            if method == "heun" and index < len(pairs) - 1:
-                # Heun averages the velocity before and after an Euler predictor.
-                x_euler = x + dt * velocity
-                s = torch.full((shape[0],), float(s_scalar.item()), device=device, dtype=torch.float32)
-                out_s = self._model_output(model, x_euler, s, cond, null_cond, guidance_scale)
-                velocity_s = self._velocity(x_euler, s, out_s)
-                x = x + dt * 0.5 * (velocity + velocity_s)
+            if unipc is not None:
+                x = self._unipc_step(unipc, x=x, x0_hat=x0_hat, t_scalar=t_scalar,
+                                     s_scalar=s_scalar, index=index, total=total)
+            elif method == "dpmpp_2m":
+                # Training-free multistep solver: 1 model eval per step, 2nd-order.
+                x, prev_x0_hat, prev_lambda = self._dpmpp_2m_step(
+                    x=x, t_scalar=t_scalar, s_scalar=s_scalar, x0_hat=x0_hat,
+                    prev_x0_hat=prev_x0_hat, prev_lambda=prev_lambda, is_last=is_last,
+                )
             else:
-                x = x + dt * velocity
+                velocity = self._velocity(x, t, out)
+                # iter_pairs moves from t=1 to t=0, so dt is negative.
+                dt = s_scalar - t_scalar
+                # Keep the final step Euler: evaluating an x0-predicting model at t=0
+                # would require an unstable eps reconstruction.
+                if method == "heun" and not is_last:
+                    # Heun averages the velocity before and after an Euler predictor.
+                    x_euler = x + dt * velocity
+                    s = torch.full((shape[0],), float(s_scalar.item()), device=device, dtype=torch.float32)
+                    out_s = self._model_output(model, x_euler, s, cond, null_cond, guidance_scale)
+                    velocity_s = self._velocity(x_euler, s, out_s)
+                    x = x + dt * 0.5 * (velocity + velocity_s)
+                else:
+                    x = x + dt * velocity
 
             last_x0_hat = x0_hat
             if return_trace:
@@ -117,6 +225,67 @@ class FlowProcess(BaseProcess):
         if return_trace:
             result["trace"] = trace
         return result
+
+    def _dpmpp_2m_step(self, *, x, t_scalar, s_scalar, x0_hat, prev_x0_hat, prev_lambda, is_last):
+        """One DPM-Solver++(2M) data-prediction step (training-free, 1 NFE/step).
+
+        Works in log-SNR lambda = log(alpha/sigma). The first-order update is
+        x_s = (sigma_s/sigma_t) x_t + (alpha_s - alpha_t sigma_s/sigma_t) x0_hat,
+        which equals the existing DDIM reconstruction; the multistep variant adds
+        a correction from the previous step's data prediction. The first and last
+        steps fall back to first order (lower_order_final) for stability.
+        """
+        a_t = float(self.schedule.alpha(t_scalar.reshape(1)))
+        s_t = float(self.schedule.sigma(t_scalar.reshape(1)))
+        a_s = float(self.schedule.alpha(s_scalar.reshape(1)))
+        s_s = float(self.schedule.sigma(s_scalar.reshape(1)))
+        lambda_t = math.log(a_t) - math.log(s_t)
+        lambda_s = math.log(a_s) - math.log(s_s)
+        h = lambda_s - lambda_t
+        ratio = s_s / s_t
+        coef = -a_s * (math.exp(-h) - 1.0)   # multiplies the data prediction
+
+        if prev_x0_hat is None or is_last:
+            x_next = ratio * x + coef * x0_hat
+        else:
+            r0 = (lambda_t - prev_lambda) / h
+            d1 = (x0_hat - prev_x0_hat) / r0
+            x_next = ratio * x + coef * (x0_hat + 0.5 * d1)
+        return x_next, x0_hat, lambda_t
+
+    def _asl(self, t_scalar):
+        """Return (alpha, sigma, lambda=log(alpha/sigma)) scalars at time t."""
+        a = float(self.schedule.alpha(t_scalar.reshape(1)))
+        s = float(self.schedule.sigma(t_scalar.reshape(1)))
+        return a, s, math.log(a) - math.log(s)
+
+    def _unipc_step(self, solver: _UniPCSolver, *, x, x0_hat, t_scalar, s_scalar, index, total):
+        """Drive one UniPC step: correct the previous predictor output, then predict."""
+        a_cur, s_cur, lam_cur = self._asl(t_scalar)
+        # Corrector reuses the current model eval to refine the previous prediction.
+        if solver.last_sample is not None:
+            x = solver.correct(
+                m_t=x0_hat, x_t=x, alpha_t=a_cur, sigma_t=s_cur,
+                sigma_s0=solver.sig_list[-1], lam_t=lam_cur, order=solver.this_order,
+            )
+        solver.m_list.append(x0_hat)
+        solver.lam_list.append(lam_cur)
+        solver.sig_list.append(s_cur)
+
+        # lower_order_final: shrink order near the end; ramp up at the start.
+        this_order = min(solver.order, total - index)
+        this_order = min(this_order, solver.lower_order_nums + 1)
+        solver.this_order = this_order
+        solver.last_sample = x
+
+        a_nxt, s_nxt, lam_nxt = self._asl(s_scalar)
+        x = solver.predict(
+            m0=x0_hat, x=x, alpha_t=a_nxt, sigma_t=s_nxt, sigma_s0=s_cur,
+            lam_t=lam_nxt, lam_s0=lam_cur, order=this_order,
+        )
+        if solver.lower_order_nums < solver.order:
+            solver.lower_order_nums += 1
+        return x
 
 
 class LearnableEndpointFlowProcess(FlowProcess):
