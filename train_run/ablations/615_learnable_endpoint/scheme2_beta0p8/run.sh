@@ -15,7 +15,7 @@ PID_FILE="${LOG_DIR}/launcher.pid"
 
 mkdir -p "${LOG_DIR}"
 export PYTHONPATH="${ROOT}:${PYTHONPATH:-}"
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export MASTER_PORT="${MASTER_PORT:-$((47000 + RANDOM % 10000))}"
 export X0LOOP_RUN_TIMESTAMP="${TIMESTAMP}"
@@ -50,6 +50,16 @@ if [ "${X0LOOP_RUN_BACKGROUND:-1}" = "1" ]; then
     echo "[x0loop] pid=${RUN_PID}"
     echo "[x0loop] log=${LOG_FILE}"
   } >> "${LOG_FILE}" 2>&1
+  cat <<EOF
+==================================================================
+[x0loop] ${RUN_NAME} 已在后台启动  (GPU=${CUDA_VISIBLE_DEVICES}, pid=${RUN_PID})
+  日志文件 : ${LOG_FILE}
+  实时查看 : tail -f ${LOG_FILE}
+  查看进程 : ps -fp ${RUN_PID}
+  杀掉训练 : kill -- -${RUN_PID}            # 杀整个进程组(含 torchrun/python 子进程)
+             kill \$(cat ${PID_FILE})        # 仅杀启动器
+==================================================================
+EOF
 else
   "${CMD[@]}" >/dev/null 2>&1
 fi
