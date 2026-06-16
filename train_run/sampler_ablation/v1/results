@@ -1,0 +1,14 @@
+experiment                sampler   steps  cfg       FID     IS       KID     P     R
+dpmpp_2m_s20_cfg2         dpmpp_2m     20  2.0      8.54  9.337   0.00242 0.506 0.711
+dpmpp_2m_s20_cfg3         dpmpp_2m     20  3.0      9.22  9.708   0.00197 0.437 0.761
+heun_s50_cfg1p5           heun         50  1.5      9.79  8.970   0.00399 0.559 0.668
+heun_s20_cfg1p5           heun         20  1.5      9.88  8.877   0.00421 0.558 0.671
+unipc_s50_cfg1p5          unipc        50  1.5      9.93  8.968   0.00404 0.559 0.665
+unipc3_s20_cfg1p5         unipc3       20  1.5     10.15  8.824   0.00443 0.554 0.674
+unipc_s20_cfg1p5          unipc        20  1.5     10.17  8.815   0.00445 0.555 0.675
+unipc_s16_cfg1p5          unipc        16  1.5     10.20  8.741   0.00467 0.552 0.672
+dpmpp_2m_s20_cfg1p5       dpmpp_2m     20  1.5     10.63  8.732   0.00485 0.545 0.675
+unipc_s10_cfg1p5          unipc        10  1.5     10.99  8.584   0.00603 0.541 0.663
+euler_s20_cfg1p5          euler        20  1.5     11.08  8.697   0.00584 0.530 0.672
+unipc_s06_cfg1p5          unipc         6  1.5     13.56  8.421   0.00918 0.493 0.645
+dpmpp_2m_s20_cfg1         dpmpp_2m     20  1.0     16.72  7.802   0.01118 0.587 0.614

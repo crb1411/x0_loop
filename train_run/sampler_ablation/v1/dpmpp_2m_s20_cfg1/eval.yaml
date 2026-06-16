@@ -1,0 +1,31 @@
+# Auto-generated sampler-ablation eval override (merged over the checkpoint's config).
+# Edit + re-run ./run.sh for a one-click single-GPU FID/IS/KID eval.
+distributed:
+  mode: none
+compile:
+  enabled: false
+eval:
+  enabled: false
+logging:
+  use_tb: false
+gen_eval:
+  enabled: true
+  num_samples: 10000
+  batch_size: 256
+  steps: 20
+  sampler: dpmpp_2m
+  guidance_scale: 1.0
+  input2: cifar10-train
+  datasets_root: /root/data/cifar10_data
+  datasets_download: false
+  keep_images: false
+  keep_images_count: 100
+  metrics:
+    isc: true
+    fid: true
+    kid: true
+    prc: true
+    mind: false
+    ppl: false
+  final:
+    enabled: false
