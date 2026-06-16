@@ -171,6 +171,7 @@ class FlowProcess(BaseProcess):
         cond=None,
         null_cond=None,
         guidance_scale: float = 1.0,
+        guidance_schedule=None,
         sampler: str | None = None,
         posterior_noise_scale: float | None = None,
     ) -> dict:
@@ -187,7 +188,8 @@ class FlowProcess(BaseProcess):
         total = len(pairs)
         for index, (t_scalar, s_scalar) in enumerate(pairs):
             t = torch.full((shape[0],), float(t_scalar.item()), device=device, dtype=torch.float32)
-            out = self._model_output(model, x, t, cond, null_cond, guidance_scale)
+            step_guidance_scale = self.guidance_scale_at_t(guidance_scale, t, guidance_schedule)
+            out = self._model_output(model, x, t, cond, null_cond, step_guidance_scale)
             xt = x
             x0_hat = self.x0_from_output(x, t, out, aux={})
             is_last = index == len(pairs) - 1
@@ -211,7 +213,8 @@ class FlowProcess(BaseProcess):
                     # Heun averages the velocity before and after an Euler predictor.
                     x_euler = x + dt * velocity
                     s = torch.full((shape[0],), float(s_scalar.item()), device=device, dtype=torch.float32)
-                    out_s = self._model_output(model, x_euler, s, cond, null_cond, guidance_scale)
+                    s_guidance_scale = self.guidance_scale_at_t(guidance_scale, s, guidance_schedule)
+                    out_s = self._model_output(model, x_euler, s, cond, null_cond, s_guidance_scale)
                     velocity_s = self._velocity(x_euler, s, out_s)
                     x = x + dt * 0.5 * (velocity + velocity_s)
                 else:
@@ -219,7 +222,12 @@ class FlowProcess(BaseProcess):
 
             last_x0_hat = x0_hat
             if return_trace:
-                trace.append({"t": t_scalar.detach().cpu(), "x": xt.detach().cpu(), "x0_hat": x0_hat.detach().cpu()})
+                trace.append({
+                    "t": t_scalar.detach().cpu(),
+                    "guidance_scale": float(step_guidance_scale),
+                    "x": xt.detach().cpu(),
+                    "x0_hat": x0_hat.detach().cpu(),
+                })
 
         result: dict[str, Any] = {"x": x, "x0_hat": last_x0_hat}
         if return_trace:

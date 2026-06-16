@@ -138,6 +138,37 @@ class BaseProcess(nn.Module):
             raise ValueError(f"Unsupported prior: {self.prior}")
         return torch.randn(shape, device=device, dtype=dtype)
 
+    @staticmethod
+    def guidance_scale_at_t(guidance_scale: float, t: torch.Tensor, guidance_schedule=None) -> float:
+        max_scale = float(guidance_scale)
+        if guidance_schedule is None:
+            return max_scale
+        if isinstance(guidance_schedule, str):
+            guidance_schedule = {"name": guidance_schedule}
+        if not isinstance(guidance_schedule, dict):
+            raise TypeError(f"guidance_schedule must be a string or dict, got {type(guidance_schedule).__name__}")
+
+        name = str(guidance_schedule.get("name", "constant")).lower()
+        if name in {"", "none", "constant"}:
+            return max_scale
+
+        max_scale = float(guidance_schedule.get("max_scale", max_scale))
+        min_scale = float(guidance_schedule.get("min_scale", 1.0))
+        t_value = float(t.flatten()[0].detach().cpu())
+        t_value = max(0.0, min(1.0, t_value))
+        if name in {"power", "power_decay", "t_power"}:
+            power = float(guidance_schedule.get("power", 1.0))
+            weight = t_value ** power
+        elif name in {"linear", "linear_decay"}:
+            weight = t_value
+        elif name in {"cosine", "cosine_decay"}:
+            import math
+
+            weight = 0.5 - 0.5 * math.cos(math.pi * t_value)
+        else:
+            raise ValueError(f"Unknown guidance_schedule.name={name!r}. Use constant|power_decay|linear_decay|cosine_decay.")
+        return min_scale + (max_scale - min_scale) * weight
+
     def forward_sample(self, x0: torch.Tensor, t: torch.Tensor, rng=None) -> ForwardBatch:
         raise NotImplementedError
 
@@ -147,16 +178,17 @@ class BaseProcess(nn.Module):
     @torch.no_grad()
     def sample(self, model, steps: int, shape, device, dtype, rng=None, return_trace: bool = False,
                cond=None, null_cond=None, guidance_scale: float = 1.0, sampler: str | None = None,
-               posterior_noise_scale: float | None = None) -> dict:
+               posterior_noise_scale: float | None = None, guidance_schedule=None) -> dict:
         x = self.prior_sample(shape=shape, device=device, dtype=dtype)
         trace = []
         last_x0_hat = None
         for t_scalar, s_scalar in self.schedule.iter_pairs(steps=steps, device=device):
             t = torch.full((shape[0],), float(t_scalar.item()), device=device, dtype=torch.float32)
             out = model(x, t, cond=cond)
-            if cond is not None and null_cond is not None and float(guidance_scale) != 1.0:
+            step_guidance_scale = self.guidance_scale_at_t(guidance_scale, t, guidance_schedule)
+            if cond is not None and null_cond is not None and float(step_guidance_scale) != 1.0:
                 out_uncond = model(x, t, cond=null_cond)
-                out = out_uncond + float(guidance_scale) * (out - out_uncond)
+                out = out_uncond + float(step_guidance_scale) * (out - out_uncond)
             xt = x
             x0_hat = self.x0_from_output(x, t, out, aux={})
             step_aux: dict[str, Any] = {}
@@ -167,7 +199,12 @@ class BaseProcess(nn.Module):
             x = self.step(x, t, s_scalar, out, aux=step_aux)
             last_x0_hat = x0_hat
             if return_trace:
-                trace.append({"t": t_scalar.detach().cpu(), "x": xt.detach().cpu(), "x0_hat": x0_hat.detach().cpu()})
+                trace.append({
+                    "t": t_scalar.detach().cpu(),
+                    "guidance_scale": float(step_guidance_scale),
+                    "x": xt.detach().cpu(),
+                    "x0_hat": x0_hat.detach().cpu(),
+                })
         result = {"x": x, "x0_hat": last_x0_hat}
         if return_trace:
             result["trace"] = trace

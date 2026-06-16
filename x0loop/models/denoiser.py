@@ -123,6 +123,7 @@ class Denoiser(nn.Module):
         cond=None,
         null_cond=None,
         guidance_scale: float = 1.0,
+        guidance_schedule=None,
         sampler: str | None = None,
         posterior_noise_scale: float | None = None,
     ) -> dict[str, Any]:
@@ -136,6 +137,7 @@ class Denoiser(nn.Module):
             cond=cond,
             null_cond=null_cond,
             guidance_scale=guidance_scale,
+            guidance_schedule=guidance_schedule,
             sampler=sampler,
             posterior_noise_scale=posterior_noise_scale,
         )

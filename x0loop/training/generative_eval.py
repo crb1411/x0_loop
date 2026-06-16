@@ -28,12 +28,14 @@ def _cfg(cfg: dict) -> dict[str, Any]:
         "steps": int(gen_cfg.get("steps", 20)),
         "sampler": str(gen_cfg.get("sampler", sample_cfg.get("sampler", "heun"))),
         "guidance_scale": float(gen_cfg.get("guidance_scale", 3.0)),
+        "guidance_schedule": gen_cfg.get("guidance_schedule", sample_cfg.get("guidance_schedule", None)),
         "posterior_noise_scale": gen_cfg.get("posterior_noise_scale", sample_cfg.get("posterior_noise_scale", None)),
         "input2": gen_cfg.get("input2", None),
         "fid_statistics_file": gen_cfg.get("fid_statistics_file", None),
         "datasets_root": gen_cfg.get("datasets_root", None),
         "datasets_download": bool(gen_cfg.get("datasets_download", False)),
         "keep_images": bool(gen_cfg.get("keep_images", False)),
+        "keep_images_count": int(gen_cfg.get("keep_images_count", 0)),
         "verbose": bool(gen_cfg.get("verbose", False)),
         "cache": bool(gen_cfg.get("cache", True)),
         "cache_root": gen_cfg.get("cache_root", None),
@@ -50,9 +52,10 @@ def _cfg(cfg: dict) -> dict[str, Any]:
         "num_samples": int(final_cfg.get("num_samples", gen_cfg.get("final_num_samples", 20000))),
         "batch_size": int(final_cfg.get("batch_size", gen_cfg.get("final_batch_size", out["batch_size"]))),
         "steps": int(final_cfg.get("steps", gen_cfg.get("final_steps", 50))),
-        "sampler": str(final_cfg.get("sampler", gen_cfg.get("final_sampler", out["sampler"]))),
-        "guidance_scale": float(final_cfg.get("guidance_scale", gen_cfg.get("final_guidance_scale", out["guidance_scale"]))),
-    }
+            "sampler": str(final_cfg.get("sampler", gen_cfg.get("final_sampler", out["sampler"]))),
+            "guidance_scale": float(final_cfg.get("guidance_scale", gen_cfg.get("final_guidance_scale", out["guidance_scale"]))),
+            "guidance_schedule": final_cfg.get("guidance_schedule", gen_cfg.get("final_guidance_schedule", out["guidance_schedule"])),
+        }
     return out
 
 
@@ -120,6 +123,20 @@ def _write_metrics_jsonl(runtime: RuntimeContext, row: dict[str, Any]) -> str:
     return path
 
 
+def _prune_fake_images(fake_dir: str, keep_count: int) -> int:
+    if keep_count <= 0:
+        return 0
+    paths = []
+    for name in os.listdir(fake_dir):
+        path = os.path.join(fake_dir, name)
+        if os.path.isfile(path):
+            paths.append(path)
+    paths.sort()
+    for path in paths[keep_count:]:
+        os.remove(path)
+    return min(len(paths), keep_count)
+
+
 @contextmanager
 def _torch_fidelity_load_compat():
     """Make older torch-fidelity cache loads work on PyTorch 2.6+.
@@ -174,6 +191,7 @@ def _export_fake_images(
             cond=cond,
             null_cond=null_cond,
             guidance_scale=float(gen_cfg["guidance_scale"]),
+            guidance_schedule=gen_cfg["guidance_schedule"],
             sampler=str(gen_cfg["sampler"]),
             posterior_noise_scale=gen_cfg["posterior_noise_scale"],
         )
@@ -235,7 +253,8 @@ def _run_generative_eval(
         runtime.logger.log_text(
             "[gen_eval] start: "
             f"tag={tag}, step={resume.global_step}, num_samples={gen_cfg['num_samples']}, "
-            f"steps={gen_cfg['steps']}, sampler={gen_cfg['sampler']}, guidance_scale={gen_cfg['guidance_scale']}"
+            f"steps={gen_cfg['steps']}, sampler={gen_cfg['sampler']}, "
+            f"guidance_scale={gen_cfg['guidance_scale']}, guidance_schedule={gen_cfg['guidance_schedule']}"
         )
     if runtime.is_distributed:
         dist_utils.barrier()
@@ -274,12 +293,14 @@ def _run_generative_eval(
             "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "tag": tag,
             "eval_dir": eval_dir,
-            "fake_dir": fake_dir if gen_cfg["keep_images"] else None,
+            "fake_dir": fake_dir if gen_cfg["keep_images"] or int(gen_cfg["keep_images_count"]) > 0 else None,
             "num_samples": int(gen_cfg["num_samples"]),
             "batch_size": int(gen_cfg["batch_size"]),
             "steps": int(gen_cfg["steps"]),
             "sampler": str(gen_cfg["sampler"]),
             "guidance_scale": float(gen_cfg["guidance_scale"]),
+            "guidance_schedule": gen_cfg["guidance_schedule"],
+            "keep_images_count": int(gen_cfg["keep_images_count"]),
             "metrics": metrics,
         }
         if error is not None:
@@ -288,7 +309,11 @@ def _run_generative_eval(
         runtime.logger.log_text(f"[gen_eval] metrics_jsonl={metrics_path}")
         if error is None:
             runtime.logger.log_text(f"[gen_eval] metrics={_json_ready(metrics)}")
-        if not gen_cfg["keep_images"]:
+        keep_count = int(gen_cfg["keep_images_count"])
+        if keep_count > 0:
+            kept = _prune_fake_images(fake_dir, keep_count)
+            runtime.logger.log_text(f"[gen_eval] kept_fake_images={kept} fake_dir={fake_dir}")
+        elif not gen_cfg["keep_images"]:
             shutil.rmtree(eval_dir, ignore_errors=True)
     if runtime.is_distributed:
         dist_utils.barrier()
