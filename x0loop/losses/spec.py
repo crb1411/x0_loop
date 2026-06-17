@@ -31,7 +31,18 @@ def _build_atom(term: dict, schedule) -> AtomicLoss:
 
     # Per-space weighting is kept only as an explicit escape hatch.
     weight_fn = _make_weight_fn(term, schedule, key="weight")
-    return AtomicLoss(target=target, formula=formula, delta=delta, weight_fn=weight_fn, coef=coef)
+    return AtomicLoss(
+        target=target,
+        formula=formula,
+        delta=delta,
+        weight_fn=weight_fn,
+        coef=coef,
+        block_size=int(term.get("block_size", 8)),
+        temperature=float(term.get("temperature", 0.5)),
+        eps=float(term.get("eps", 1e-6)),
+        channel_reduce=str(term.get("channel_reduce", "mean")).lower(),
+        name=term.get("name", None),
+    )
 
 
 def build_loss(cfg_loss: dict, schedule) -> CompositeLoss:
@@ -44,6 +55,7 @@ def build_loss(cfg_loss: dict, schedule) -> CompositeLoss:
           outer_weight_floor: 0.0
           terms:
             - {target: x0, formula: mse, coef: 1.0}
+            - {target: x0, formula: block_dual_softmax_kl, coef: 0.01, block_size: 8, temperature: 0.5}
 
     Backward-compatible per-term schema:
         loss:
