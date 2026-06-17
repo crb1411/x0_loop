@@ -1,0 +1,31 @@
+# 50k generative eval for the current best sampler setting.
+distributed:
+  mode: none
+compile:
+  enabled: false
+eval:
+  enabled: false
+logging:
+  use_tb: false
+gen_eval:
+  enabled: true
+  num_samples: 50000
+  batch_size: 256
+  steps: 20
+  sampler: heun
+  guidance_scale: 2.2
+  guidance_schedule: null
+  input2: cifar10-train
+  datasets_root: /root/data/cifar10_data
+  datasets_download: false
+  keep_images: false
+  keep_images_count: 100
+  metrics:
+    isc: true
+    fid: true
+    kid: true
+    prc: true
+    mind: false
+    ppl: false
+  final:
+    enabled: false
