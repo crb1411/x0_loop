@@ -124,7 +124,8 @@ def compute_forward_batch(
         batch = denoiser.compute_loss(x0, cond=cond)
         with torch.no_grad():
             unweighted = _diagnostic_losses(process, batch.fb, batch.out)
-    return TrainForwardBatch(loss=batch.loss_dict["total"], loss_by_target=unweighted, batch_size=bsz, cond=cond, fb=batch.fb, out=batch.out)
+    extra_metrics = {k: v for k, v in batch.loss_dict.items() if k != "total"}
+    return TrainForwardBatch(loss=batch.loss_dict["total"], loss_by_target=unweighted, batch_size=bsz, cond=cond, fb=batch.fb, out=batch.out, extra_metrics=extra_metrics)
 
 
 def backward_loss(loss: torch.Tensor, *, current_accum_steps: int, scaler: torch.amp.GradScaler | None) -> None:
