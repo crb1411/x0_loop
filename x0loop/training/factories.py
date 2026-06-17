@@ -12,7 +12,7 @@ from x0loop.aug.geom import GeomAugment
 from x0loop.aug.identity import NoAug
 from x0loop.aug.base import BaseAugment
 from x0loop.aug.strong_augment import strongAugment
-from x0loop.core.config import dump_resolved_config, resolve_logging_output_dir
+from x0loop.core.config import dump_launch_config, dump_resolved_config, resolve_logging_output_dir
 from x0loop.core.image_normalization import resolve_image_normalization
 from x0loop.core.process_base import BaseProcess
 from x0loop.core.schedules import TimeSchedule
@@ -135,6 +135,9 @@ def init_runtime(cfg: dict) -> RuntimeContext:
     logger = Logger(out_dir=out_dir, is_main=is_main, use_tb=bool(cfg["logging"].get("use_tb", True)))
     if is_main:
         logger.log_text(f"output_dir={out_dir}")
+        launch_config_path = dump_launch_config(cfg, out_dir)
+        if launch_config_path:
+            logger.log_text(f"launch_config={launch_config_path}")
         logger.log_text(f"resolved_config={dump_resolved_config(cfg, out_dir)}")
     local_rank = int(dist_info["local_rank"])
     device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")

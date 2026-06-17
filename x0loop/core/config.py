@@ -4,6 +4,7 @@ import copy
 import os
 from pathlib import Path
 import re
+import shutil
 import time
 
 import yaml
@@ -106,3 +107,19 @@ def dump_resolved_config(cfg: dict, out_dir: str, name: str = "resolved_config.y
     with path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)
     return str(path)
+
+
+def dump_launch_config(cfg: dict, out_dir: str, name: str = "launch_config.yaml") -> str | None:
+    """Copy the YAML passed to --config without reserializing it."""
+    config_path = cfg.get("_config_path")
+    if not config_path:
+        return None
+    src = Path(str(config_path))
+    if not src.is_file():
+        return None
+    dst = Path(out_dir) / name
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists() and src.resolve() == dst.resolve():
+        return str(dst)
+    shutil.copyfile(src, dst)
+    return str(dst)

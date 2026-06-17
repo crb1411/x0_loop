@@ -1,4 +1,4 @@
-from x0loop.core.config import resolve_logging_output_dir
+from x0loop.core.config import dump_launch_config, resolve_logging_output_dir
 
 
 def test_automatic_training_output_dir():
@@ -37,3 +37,24 @@ def test_flow_ddim_alias_is_named_euler():
     resolve_logging_output_dir(cfg, timestamp="20260602_120000")
 
     assert cfg["logging"]["out_dir"] == "runs/cifar10/flow/unet/x0target_vloss_euler/20260602_120000"
+
+
+def test_dump_launch_config_preserves_original_yaml_bytes(tmp_path):
+    source = tmp_path / "config.yaml"
+    source.write_bytes(
+        b"train:\n"
+        b"  # keep this comment\n"
+        b"  lr: 1.0e-4\n"
+        b"logging:\n"
+        b"  out_dir: null\n"
+    )
+    out_dir = tmp_path / "run"
+
+    copied = dump_launch_config({"_config_path": str(source)}, str(out_dir))
+
+    assert copied == str(out_dir / "launch_config.yaml")
+    assert (out_dir / "launch_config.yaml").read_bytes() == source.read_bytes()
+
+
+def test_dump_launch_config_returns_none_without_source(tmp_path):
+    assert dump_launch_config({}, str(tmp_path / "run")) is None
