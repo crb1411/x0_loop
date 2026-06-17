@@ -24,10 +24,96 @@ from x0loop.training.optimization import amp_dtype_for_precision, build_step_lr_
 from x0loop.training.evaluation import run_eval_if_due
 from x0loop.training.generative_eval import run_final_generative_eval, run_generative_eval_if_due
 from x0loop.training.checkpointing import save_checkpoint_if_due, save_final_checkpoint
-from x0loop.training.sampling import apply_classifier_free_label_dropout, run_sampling_if_due
+from x0loop.training.sampling import apply_classifier_free_label_dropout, run_mudata_observation_if_due, run_sampling_if_due
 from x0loop.utils.ema import EMA
 from x0loop.utils.fsdp import clip_grad_norm
 from x0loop.utils.logger import Logger, MetricLogger
+
+
+def _format_duration(seconds: float | None) -> str:
+    if seconds is None or not math.isfinite(float(seconds)):
+        return "n/a"
+    seconds_i = max(0, int(round(float(seconds))))
+    days, rem = divmod(seconds_i, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or parts:
+        parts.append(f"{hours}h")
+    if minutes or parts:
+        parts.append(f"{minutes}m")
+    parts.append(f"{secs}s")
+    return "".join(parts)
+
+
+class ProgressEstimator:
+    def __init__(self, cfg: dict, loop_cfg: LoopConfig, *, start_step: int):
+        self.cfg = cfg
+        self.loop_cfg = loop_cfg
+        self.start_step = int(start_step)
+        self.start_time = time.time()
+        self.gen_eval_durations: list[float] = []
+
+    def record_gen_eval(self, duration_s: float | None) -> None:
+        if duration_s is not None and duration_s > 0 and math.isfinite(float(duration_s)):
+            self.gen_eval_durations.append(float(duration_s))
+
+    def _future_periodic_gen_eval_count(self, step: int) -> int:
+        gen_cfg = self.cfg.get("gen_eval", {}) or {}
+        if not bool(gen_cfg.get("enabled", False)):
+            return 0
+        every_steps = int(gen_cfg.get("every_steps", 10000))
+        if every_steps <= 0:
+            return 0
+        next_step = ((int(step) // every_steps) + 1) * every_steps
+        if next_step > self.loop_cfg.total_steps:
+            return 0
+        return ((self.loop_cfg.total_steps - next_step) // every_steps) + 1
+
+    def _final_gen_eval_scale(self) -> float:
+        gen_cfg = self.cfg.get("gen_eval", {}) or {}
+        final_cfg = gen_cfg.get("final", {}) or {}
+        if not bool(gen_cfg.get("enabled", False)) or not bool(final_cfg.get("enabled", gen_cfg.get("final_enabled", True))):
+            return 0.0
+        base_work = int(gen_cfg.get("num_samples", gen_cfg.get("num", 5000))) * int(gen_cfg.get("steps", 20))
+        final_work = int(final_cfg.get("num_samples", gen_cfg.get("final_num_samples", 20000))) * int(final_cfg.get("steps", gen_cfg.get("final_steps", 50)))
+        if base_work <= 0 or final_work <= 0:
+            return 0.0
+        return float(final_work) / float(base_work)
+
+    def metrics(self, *, step: int, train_step_s: float | None) -> dict[str, float | int | str]:
+        now = time.time()
+        elapsed_s = max(0.0, now - self.start_time)
+        completed_since_start = max(1, int(step) - self.start_step)
+        fallback_step_s = elapsed_s / float(completed_since_start)
+        avg_train_step_s = float(train_step_s) if train_step_s is not None and float(train_step_s) > 0 else fallback_step_s
+        remaining_steps = max(0, self.loop_cfg.total_steps - int(step))
+        eta_train_s = remaining_steps * avg_train_step_s
+
+        avg_gen_eval_s = sum(self.gen_eval_durations) / len(self.gen_eval_durations) if self.gen_eval_durations else 0.0
+        eta_periodic_gen_s = self._future_periodic_gen_eval_count(step) * avg_gen_eval_s
+        eta_final_gen_s = avg_gen_eval_s * self._final_gen_eval_scale() if self.gen_eval_durations else 0.0
+        eta_geneval_s = eta_periodic_gen_s + eta_final_gen_s
+        eta_total_s = eta_train_s + eta_geneval_s
+        total_est_s = elapsed_s + eta_total_s
+
+        return {
+            "progress_pct": 100.0 * float(min(max(int(step), 0), self.loop_cfg.total_steps)) / max(1, self.loop_cfg.total_steps),
+            "elapsed_s": elapsed_s,
+            "eta_train_s": eta_train_s,
+            "eta_geneval_s": eta_geneval_s,
+            "eta_total_s": eta_total_s,
+            "total_est_s": total_est_s,
+            "elapsed": _format_duration(elapsed_s),
+            "eta_train": _format_duration(eta_train_s),
+            "eta_geneval": _format_duration(eta_geneval_s) if self.gen_eval_durations else "n/a",
+            "eta_total": _format_duration(eta_total_s),
+            "total_est": _format_duration(total_est_s),
+            "gen_eval_observations": len(self.gen_eval_durations),
+            "avg_gen_eval_s": avg_gen_eval_s,
+        }
 
 
 def build_loop_config(cfg: dict, loader: DataLoader, distributed_cfg: dict) -> LoopConfig:
@@ -292,7 +378,7 @@ def maybe_apply_adversarial(
     _set_requires_grad(discriminator, True)
 
 
-def log_training_step(*, runtime: RuntimeContext, loop_cfg: LoopConfig, resume: ResumeState, meters: MetricLogger, tbin_stats: TimeBinAccumulator, epoch: int, micro_step: int, current_accum_steps: int) -> None:
+def log_training_step(*, runtime: RuntimeContext, loop_cfg: LoopConfig, resume: ResumeState, meters: MetricLogger, tbin_stats: TimeBinAccumulator, epoch: int, micro_step: int, current_accum_steps: int, progress: ProgressEstimator | None = None) -> None:
     force_log = resume.run_step <= 20
     if not force_log and (resume.global_step % loop_cfg.log_every != 0):
         return
@@ -305,6 +391,8 @@ def log_training_step(*, runtime: RuntimeContext, loop_cfg: LoopConfig, resume: 
         kv["grad_clip"] = loop_cfg.grad_clip
     if torch.cuda.is_available():
         kv["gpu_mem_gb"] = torch.cuda.max_memory_allocated(device=runtime.device) / (1024**3)
+    if progress is not None:
+        kv.update(progress.metrics(step=resume.global_step, train_step_s=kv.get("iter_s")))
     kv["summary"] = tbin_stats.summary(is_distributed=runtime.is_distributed)
     runtime.logger.log_kv(resume.global_step, kv, total_steps=loop_cfg.total_steps)
     tbin_stats.reset()
@@ -365,6 +453,7 @@ def train(cfg: dict) -> None:
     loop_cfg = build_loop_config(cfg, data_ctx.loader, runtime.distributed_cfg)
     if runtime.is_main:
         log_loop_config(runtime.logger, loop_cfg)
+    progress = ProgressEstimator(cfg, loop_cfg, start_step=resume.global_step)
     tbin_stats = TimeBinAccumulator(num_bins=loop_cfg.tbin_count, device=runtime.device)
     epoch = resume.start_epoch
 
@@ -416,19 +505,26 @@ def train(cfg: dict) -> None:
                     continue
                 resume.global_step += 1
                 resume.run_step += 1
-                log_training_step(runtime=runtime, loop_cfg=loop_cfg, resume=resume, meters=meters, tbin_stats=tbin_stats, epoch=epoch, micro_step=micro_step, current_accum_steps=current_accum_steps)
+                log_training_step(runtime=runtime, loop_cfg=loop_cfg, resume=resume, meters=meters, tbin_stats=tbin_stats, epoch=epoch, micro_step=micro_step, current_accum_steps=current_accum_steps, progress=progress)
                 run_eval_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, schedule=schedule, time_sampler=time_sampler, process=process, loss_fn=loss_fn, data_ctx=data_ctx, resume=resume, use_label_cond=use_label_cond)
                 run_sampling_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, loop_cfg=loop_cfg, resume=resume, cond=fwd.cond, use_label_cond=use_label_cond)
+                run_mudata_observation_if_due(cfg=cfg, runtime=runtime, process=process, resume=resume)
                 extra_state = None
                 if discriminator is not None:
                     extra_state = {"discriminator": discriminator.state_dict()}
                     if d_optimizer is not None:
                         extra_state["d_optimizer"] = d_optimizer.state_dict()
                 save_checkpoint_if_due(cfg=cfg, denoiser=denoiser, runtime=runtime, optimizer=optimizer, scaler=scaler, ema=ema, extra_state=extra_state, loop_cfg=loop_cfg, resume=resume, epoch=epoch)
-                run_generative_eval_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, resume=resume)
+                gen_eval_duration = run_generative_eval_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, resume=resume)
+                progress.record_gen_eval(gen_eval_duration)
+                if gen_eval_duration is not None and runtime.is_main:
+                    runtime.logger.log_text(f"[progress] gen_eval_duration={_format_duration(gen_eval_duration)} ({gen_eval_duration:.3f}s)")
         # Always persist the latest state at end of training, regardless of cadence.
         _save_final_checkpoint()
-        run_final_generative_eval(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, resume=resume)
+        final_gen_eval_duration = run_final_generative_eval(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, resume=resume)
+        progress.record_gen_eval(final_gen_eval_duration)
+        if final_gen_eval_duration is not None and runtime.is_main:
+            runtime.logger.log_text(f"[progress] final_gen_eval_duration={_format_duration(final_gen_eval_duration)} ({final_gen_eval_duration:.3f}s)")
     except KeyboardInterrupt:
         if runtime.is_main:
             runtime.logger.log_text("[checkpoint] KeyboardInterrupt: saving final checkpoint before exit")

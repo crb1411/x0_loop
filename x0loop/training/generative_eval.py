@@ -328,13 +328,14 @@ def run_generative_eval_if_due(
     process: BaseProcess,
     ema: EMA | None,
     resume: ResumeState,
-) -> None:
+) -> float | None:
     gen_cfg = _cfg(cfg)
     if not gen_cfg["enabled"]:
-        return
+        return None
     every_steps = int(gen_cfg["every_steps"])
     if every_steps <= 0 or resume.global_step <= 0 or (resume.global_step % every_steps != 0):
-        return
+        return None
+    start = time.time()
     _run_generative_eval(
         cfg=cfg,
         gen_cfg=gen_cfg,
@@ -346,6 +347,7 @@ def run_generative_eval_if_due(
         resume=resume,
         tag=f"step_{resume.global_step:08d}",
     )
+    return time.time() - start
 
 
 def run_final_generative_eval(
@@ -357,12 +359,13 @@ def run_final_generative_eval(
     process: BaseProcess,
     ema: EMA | None,
     resume: ResumeState,
-) -> None:
+) -> float | None:
     gen_cfg = _cfg(cfg)
     final_cfg = dict(gen_cfg.pop("final"))
     if not gen_cfg["enabled"] or not final_cfg["enabled"]:
-        return
+        return None
     gen_cfg.update(final_cfg)
+    start = time.time()
     _run_generative_eval(
         cfg=cfg,
         gen_cfg=gen_cfg,
@@ -374,3 +377,4 @@ def run_final_generative_eval(
         resume=resume,
         tag=f"final_step_{resume.global_step:08d}",
     )
+    return time.time() - start

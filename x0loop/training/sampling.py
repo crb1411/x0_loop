@@ -105,6 +105,39 @@ def save_sample_grid(sample_tensor: torch.Tensor, out_path: str, *, cfg: dict | 
     save_image(grid, out_path)
 
 
+def run_mudata_observation_if_due(
+    *,
+    cfg: dict,
+    runtime: RuntimeContext,
+    process: BaseProcess,
+    resume: ResumeState,
+) -> None:
+    mudata_every = int((cfg.get("logging", {}) or {}).get("mudata_every", 3000))
+    if mudata_every <= 0 or resume.global_step <= 0 or (resume.global_step % mudata_every != 0):
+        return
+
+    mu_data = getattr(process, "mu_data", None)
+    if mu_data is None:
+        return
+    if not runtime.is_main:
+        return
+
+    with torch.no_grad():
+        image = mu_data.detach().float().cpu()
+    if image.ndim != 4:
+        raise ValueError(f"Expected process.mu_data to be BCHW, got shape={tuple(image.shape)}")
+
+    out_dir = os.path.join(runtime.out_dir, "mudata")
+    out_path = os.path.join(out_dir, f"step_{resume.global_step:08d}_mudata.png")
+    save_sample_grid(image, out_path, cfg=cfg)
+    runtime.logger.log_text(
+        "[mudata] saved "
+        f"step={resume.global_step} path={out_path} "
+        f"mean={float(image.mean()):.6g} std={float(image.std(unbiased=False)):.6g} "
+        f"min={float(image.min()):.6g} max={float(image.max()):.6g}"
+    )
+
+
 def save_sample_images(
     sample_tensor: torch.Tensor,
     out_dir: str,
