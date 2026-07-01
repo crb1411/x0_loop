@@ -36,22 +36,29 @@ time_sampler:
   std: 1.0
   min_t: 0.001
   max_t: 0.999
-time_condition_jitter:
-  enabled: true
-  mean: 0.02
-  std: 0.02
-  prob: 1.0
-  min_t: 0.001
-  max_t: 0.999
+# time_condition_jitter:
+#   enabled: true
+#   mean: 0.02
+#   std: 0.02
+#   prob: 1.0
+#   min_t: 0.001
+#   max_t: 0.999
 loss:
   outer_weight: skew_triangular
   outer_weight_power: 1.0
   outer_weight_floor: 0.0
-  outer_weight_skew: 0.22
+  outer_weight_skew: 0.3
   terms:
   - target: v
     formula: mse
     coef: 1.0
+  - target: v
+    formula: block_dual_softmax_kl
+    coef: 0.05
+    block_size: 8
+    temperature: 0.5
+    channel_reduce: mean
+    name: v_dual_b8_t0p5
 augment:
   name: geom
   mode: data_only
@@ -65,12 +72,12 @@ train:
   epochs: 300
   batch_size: 256
   gradient_accumulation_steps: 1
-  class_dropout_prob: 0.10
+  class_dropout_prob: 0.15
   num_workers: 8
-  lr: 0.00030
+  lr: 0.00015
   lr_scheduler:
     name: cosine
-    max_lr: 0.00030
+    max_lr: 0.00015
     min_lr: 5.0e-05
     warmup_steps: 10000
     cosine_steps: 50000
@@ -126,7 +133,7 @@ gen_eval:
     batch_size: 256
     steps: 20
     sampler: heun
-    guidance_scale: 0.0
+    guidance_scale: 2.2
     guidance_schedule: null
 distributed:
   mode: ddp
@@ -150,5 +157,5 @@ compile:
   mode: default
   fullgraph: false
   dynamic: false
-_config_path: /data/seek/aigc/x0_loop/train_run/ablations/615_learnable_endpoint/base/config.yaml
+_config_path: /data/seek/aigc/x0_loop/train_run/ablations/615_learnable_endpoint/base_mse_dual_v_b8_c0p05/config.yaml
 _runtime_config_path: /data/seek/aigc/x0_loop/x0loop/configs/runtime/ddp_checkpoint_compile.yaml

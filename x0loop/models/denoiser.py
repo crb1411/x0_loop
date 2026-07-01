@@ -35,6 +35,7 @@ class Denoiser(nn.Module):
         loss_fn: CompositeLoss | None = None,
         time_sampler: TimeSampler | None = None,
         time_condition_jitter: dict | None = None,
+        model_conditioning: dict | None = None,
     ):
         super().__init__()
         self.net = net
@@ -42,12 +43,20 @@ class Denoiser(nn.Module):
         self.loss_fn = loss_fn
         self.time_sampler = time_sampler
         self.time_condition_jitter = time_condition_jitter or {}
+        self.model_conditioning = model_conditioning or {}
 
     @property
     def output_target(self) -> str:
         return self.process.output_target
 
+    def model_time_condition(self, t: torch.Tensor) -> torch.Tensor:
+        cfg = self.model_conditioning
+        if not bool(cfg.get("ignore_time", False)):
+            return t
+        return torch.full_like(t, float(cfg.get("time_constant", 0.5)))
+
     def forward(self, xt: torch.Tensor, t: torch.Tensor, cond=None) -> torch.Tensor:
+        t = self.model_time_condition(t)
         return self.net(xt, t, cond=cond)
 
     def make_forward_batch(self, x0: torch.Tensor, t: torch.Tensor | None = None) -> ForwardBatch:
@@ -124,6 +133,7 @@ class Denoiser(nn.Module):
         null_cond=None,
         guidance_scale: float = 1.0,
         guidance_schedule=None,
+        time_condition_shift=None,
         sampler: str | None = None,
         posterior_noise_scale: float | None = None,
     ) -> dict[str, Any]:
@@ -138,6 +148,7 @@ class Denoiser(nn.Module):
             null_cond=null_cond,
             guidance_scale=guidance_scale,
             guidance_schedule=guidance_schedule,
+            time_condition_shift=time_condition_shift,
             sampler=sampler,
             posterior_noise_scale=posterior_noise_scale,
         )

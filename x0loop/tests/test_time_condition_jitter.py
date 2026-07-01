@@ -42,3 +42,33 @@ def test_time_condition_jitter_offsets_model_time_only():
 
     assert torch.allclose(batch.fb.t, t)
     assert torch.allclose(net.seen_t, torch.tensor([0.3, 0.99999]))
+
+
+def test_model_conditioning_ignore_time_uses_constant_model_time_only():
+    net = RecordingNet()
+    process = FlowProcess(TimeSchedule(mode="flow", num_steps=1000), output_target="x0")
+    loss_fn = CompositeLoss([AtomicLoss(target="v", formula="mse")])
+    denoiser = Denoiser(
+        net,
+        process=process,
+        loss_fn=loss_fn,
+        time_condition_jitter={
+            "enabled": True,
+            "mean": 0.1,
+            "std": 0.0,
+            "prob": 1.0,
+            "min_t": 1e-5,
+            "max_t": 0.99999,
+        },
+        model_conditioning={
+            "ignore_time": True,
+            "time_constant": 0.5,
+        },
+    )
+
+    x0 = torch.randn(2, 3, 8, 8)
+    t = torch.tensor([0.2, 0.95])
+    batch = denoiser.compute_loss(x0, t=t)
+
+    assert torch.allclose(batch.fb.t, t)
+    assert torch.allclose(net.seen_t, torch.full_like(t, 0.5))

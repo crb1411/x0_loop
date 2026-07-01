@@ -18,6 +18,18 @@ class ConstantX0Model(torch.nn.Module):
         return self.x0
 
 
+class RecordingX0Model(torch.nn.Module):
+    def __init__(self, x0: torch.Tensor):
+        super().__init__()
+        self.register_buffer("x0", x0)
+        self.seen_t: list[torch.Tensor] = []
+
+    def forward(self, x, t, cond=None):
+        del x, cond
+        self.seen_t.append(t.detach().clone())
+        return self.x0
+
+
 def test_flow_euler_and_heun_reach_constant_x0():
     shape = (2, 3, 4, 4)
     target = torch.randn(shape)
@@ -39,6 +51,29 @@ def test_flow_euler_and_heun_reach_constant_x0():
         assert model.calls == expected_calls
         assert "x" in result["trace"][0]
         assert result["trace"][0]["x"].shape == target.shape
+
+
+def test_flow_sampling_time_condition_shift_changes_model_time_only():
+    shape = (2, 3, 4, 4)
+    target = torch.randn(shape)
+    schedule = TimeSchedule(mode="flow", num_steps=1000)
+    process = FlowProcess(schedule=schedule, output_target="x0", sampler="euler")
+    model = RecordingX0Model(target)
+
+    result = process.sample(
+        model=model,
+        steps=2,
+        shape=shape,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        sampler="euler",
+        return_trace=True,
+        time_condition_shift={"shift": 0.02, "min_t": 0.001, "max_t": 0.999},
+    )
+
+    assert torch.allclose(result["trace"][0]["t"], torch.tensor(1.0))
+    assert torch.allclose(result["trace"][0]["t_model"], torch.tensor(0.999))
+    assert torch.allclose(model.seen_t[0], torch.full((shape[0],), 0.999))
 
 
 def test_standard_flow_tbin_summary_uses_eps_label():

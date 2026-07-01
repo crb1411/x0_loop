@@ -169,6 +169,22 @@ class BaseProcess(nn.Module):
             raise ValueError(f"Unknown guidance_schedule.name={name!r}. Use constant|power_decay|linear_decay|cosine_decay.")
         return min_scale + (max_scale - min_scale) * weight
 
+    @staticmethod
+    def shifted_model_time(t: torch.Tensor, time_condition_shift=None) -> torch.Tensor:
+        if time_condition_shift is None:
+            return t
+        if isinstance(time_condition_shift, dict):
+            shift = float(time_condition_shift.get("shift", time_condition_shift.get("mean", 0.0)))
+            min_t = float(time_condition_shift.get("min_t", 1e-5))
+            max_t = float(time_condition_shift.get("max_t", 1.0 - 1e-5))
+        else:
+            shift = float(time_condition_shift)
+            min_t = 1e-5
+            max_t = 1.0 - 1e-5
+        if shift == 0.0:
+            return t
+        return (t + shift).clamp(min_t, max_t)
+
     def forward_sample(self, x0: torch.Tensor, t: torch.Tensor, rng=None) -> ForwardBatch:
         raise NotImplementedError
 
@@ -178,16 +194,17 @@ class BaseProcess(nn.Module):
     @torch.no_grad()
     def sample(self, model, steps: int, shape, device, dtype, rng=None, return_trace: bool = False,
                cond=None, null_cond=None, guidance_scale: float = 1.0, sampler: str | None = None,
-               posterior_noise_scale: float | None = None, guidance_schedule=None) -> dict:
+               posterior_noise_scale: float | None = None, guidance_schedule=None, time_condition_shift=None) -> dict:
         x = self.prior_sample(shape=shape, device=device, dtype=dtype)
         trace = []
         last_x0_hat = None
         for t_scalar, s_scalar in self.schedule.iter_pairs(steps=steps, device=device):
             t = torch.full((shape[0],), float(t_scalar.item()), device=device, dtype=torch.float32)
-            out = model(x, t, cond=cond)
+            t_model = self.shifted_model_time(t, time_condition_shift)
+            out = model(x, t_model, cond=cond)
             step_guidance_scale = self.guidance_scale_at_t(guidance_scale, t, guidance_schedule)
             if cond is not None and null_cond is not None and float(step_guidance_scale) != 1.0:
-                out_uncond = model(x, t, cond=null_cond)
+                out_uncond = model(x, t_model, cond=null_cond)
                 out = out_uncond + float(step_guidance_scale) * (out - out_uncond)
             xt = x
             x0_hat = self.x0_from_output(x, t, out, aux={})
@@ -201,6 +218,7 @@ class BaseProcess(nn.Module):
             if return_trace:
                 trace.append({
                     "t": t_scalar.detach().cpu(),
+                    "t_model": t_model[0].detach().cpu(),
                     "guidance_scale": float(step_guidance_scale),
                     "x": xt.detach().cpu(),
                     "x0_hat": x0_hat.detach().cpu(),

@@ -29,6 +29,7 @@ def _cfg(cfg: dict) -> dict[str, Any]:
         "sampler": str(gen_cfg.get("sampler", sample_cfg.get("sampler", "heun"))),
         "guidance_scale": float(gen_cfg.get("guidance_scale", 3.0)),
         "guidance_schedule": gen_cfg.get("guidance_schedule", sample_cfg.get("guidance_schedule", None)),
+        "time_condition_shift": gen_cfg.get("time_condition_shift", sample_cfg.get("time_condition_shift", None)),
         "posterior_noise_scale": gen_cfg.get("posterior_noise_scale", sample_cfg.get("posterior_noise_scale", None)),
         "input2": gen_cfg.get("input2", None),
         "fid_statistics_file": gen_cfg.get("fid_statistics_file", None),
@@ -55,6 +56,7 @@ def _cfg(cfg: dict) -> dict[str, Any]:
             "sampler": str(final_cfg.get("sampler", gen_cfg.get("final_sampler", out["sampler"]))),
             "guidance_scale": float(final_cfg.get("guidance_scale", gen_cfg.get("final_guidance_scale", out["guidance_scale"]))),
             "guidance_schedule": final_cfg.get("guidance_schedule", gen_cfg.get("final_guidance_schedule", out["guidance_schedule"])),
+            "time_condition_shift": final_cfg.get("time_condition_shift", gen_cfg.get("final_time_condition_shift", out["time_condition_shift"])),
         }
     return out
 
@@ -192,6 +194,7 @@ def _export_fake_images(
             null_cond=null_cond,
             guidance_scale=float(gen_cfg["guidance_scale"]),
             guidance_schedule=gen_cfg["guidance_schedule"],
+            time_condition_shift=gen_cfg["time_condition_shift"],
             sampler=str(gen_cfg["sampler"]),
             posterior_noise_scale=gen_cfg["posterior_noise_scale"],
         )
@@ -254,7 +257,8 @@ def _run_generative_eval(
             "[gen_eval] start: "
             f"tag={tag}, step={resume.global_step}, num_samples={gen_cfg['num_samples']}, "
             f"steps={gen_cfg['steps']}, sampler={gen_cfg['sampler']}, "
-            f"guidance_scale={gen_cfg['guidance_scale']}, guidance_schedule={gen_cfg['guidance_schedule']}"
+            f"guidance_scale={gen_cfg['guidance_scale']}, guidance_schedule={gen_cfg['guidance_schedule']}, "
+            f"time_condition_shift={gen_cfg['time_condition_shift']}"
         )
     if runtime.is_distributed:
         dist_utils.barrier()
@@ -300,6 +304,7 @@ def _run_generative_eval(
             "sampler": str(gen_cfg["sampler"]),
             "guidance_scale": float(gen_cfg["guidance_scale"]),
             "guidance_schedule": gen_cfg["guidance_schedule"],
+            "time_condition_shift": gen_cfg["time_condition_shift"],
             "keep_images_count": int(gen_cfg["keep_images_count"]),
             "metrics": metrics,
         }

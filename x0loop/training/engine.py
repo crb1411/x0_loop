@@ -423,6 +423,7 @@ def train(cfg: dict) -> None:
         loss_fn=loss_fn,
         time_sampler=time_sampler,
         time_condition_jitter=cfg.get("time_condition_jitter", None),
+        model_conditioning=cfg.get("model_conditioning", None),
     )
     # Data augmentation pipeline and where it is applied (data_only here).
     augment, augment_mode = build_augment(cfg)
@@ -434,6 +435,7 @@ def train(cfg: dict) -> None:
             runtime.logger.log_text(line)
         runtime.logger.log_text(f"[time_sampler] {cfg.get('time_sampler', {'name': 'legacy'})}")
         runtime.logger.log_text(f"[time_condition_jitter] {cfg.get('time_condition_jitter', {'enabled': False})}")
+        runtime.logger.log_text(f"[model_conditioning] {cfg.get('model_conditioning', {'ignore_time': False})}")
         runtime.logger.log_text(f"[adversarial] {cfg.get('adversarial', {'enabled': False})}")
     optimizer = torch.optim.AdamW(denoiser.parameters(), lr=float(cfg["train"].get("lr", 1e-4)), betas=(0.9, 0.95), weight_decay=float(cfg["train"].get("weight_decay", 0.05)))
     d_optimizer = None

@@ -291,6 +291,7 @@ def run_sampling_if_due(
                 cond=sample_cond,
                 null_cond=null_cond,
                 guidance_scale=guidance_scale,
+                time_condition_shift=cfg["sample"].get("time_condition_shift", None),
                 sampler=sample_sampler,
                 posterior_noise_scale=cfg["sample"].get("posterior_noise_scale", None),
             )
