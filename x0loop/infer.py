@@ -1,7 +1,8 @@
 """Stand-alone inference script.
 
 Config resolution order:
-  1. <ckpt_dir>/../resolved_config.yaml   (auto-detected from checkpoint path)
+  1. <ckpt_dir>/../launch_config.yaml     (auto-detected from checkpoint path)
+     fallback: <ckpt_dir>/../resolved_config.yaml
   2. infer/infer.yaml                      (overlaid on top, overrides anything)
 
 Outputs (under <ckpt_dir>/infer_step_XXXXXXXX/ by default):
@@ -23,6 +24,7 @@ import torch
 import yaml
 
 from x0loop.models.factory import build_model
+from x0loop.models.denoiser import Denoiser
 from x0loop.train import (
     build_null_class_cond,
     build_process,
@@ -32,7 +34,7 @@ from x0loop.train import (
     save_sample_grid,
     save_trace_large_images,
 )
-from x0loop.utils.checkpoint import load_checkpoint
+from x0loop.utils.checkpoint import _load_model_state_with_fallback, _replace_state_dict_prefix, _strip_state_dict_prefix
 from x0loop.utils.ema import EMA
 from x0loop.core.image_normalization import image_to_display_minus_one_one
 
@@ -104,17 +106,18 @@ def _step_from_ckpt(ckpt_path: str) -> int:
     return int(m.group(1)) if m else 0
 
 
-def _find_resolved_config(ckpt_path: str) -> str:
-    """Walk up from checkpoints/ to find resolved_config.yaml in the run dir."""
+def _find_base_config(ckpt_path: str) -> str:
+    """Walk up from checkpoints/ to find the training config in the run dir."""
     ckpt_abs = os.path.abspath(ckpt_path)
     # checkpoints/ is one level below the run dir
     run_dir = os.path.dirname(os.path.dirname(ckpt_abs))
-    candidate = os.path.join(run_dir, "resolved_config.yaml")
-    if os.path.isfile(candidate):
-        return candidate
+    for name in ("launch_config.yaml", "resolved_config.yaml"):
+        candidate = os.path.join(run_dir, name)
+        if os.path.isfile(candidate):
+            return candidate
     raise FileNotFoundError(
-        f"resolved_config.yaml not found at {candidate}\n"
-        f"Expected layout: <run_dir>/resolved_config.yaml + <run_dir>/checkpoints/<ckpt>.pt"
+        f"launch_config.yaml/resolved_config.yaml not found in {run_dir}\n"
+        f"Expected layout: <run_dir>/launch_config.yaml + <run_dir>/checkpoints/<ckpt>.pt"
     )
 
 
@@ -134,25 +137,41 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
+def _apply_prefix_transform(state_dict: dict, name: str) -> dict:
+    if name == "none":
+        return state_dict
+    if "->" in name:
+        old, new = name.split("->")
+        return _replace_state_dict_prefix(state_dict, old, new)
+    return _strip_state_dict_prefix(state_dict, name)
+
+
 def _load_model(cfg: dict, ckpt_path: str, device: torch.device):
-    model, model_cfg = build_model(cfg["model"])
-    model = model.to(device)
-    use_ema = bool(cfg["train"].get("use_ema", True))
-    ema = EMA(model, decay=float(cfg["train"].get("ema_decay", 0.9999))) if use_ema else None
-    ckpt_mode = cfg.get("distributed", {}).get("checkpoint", {}).get("mode", "full")
-    try:
-        load_checkpoint(ckpt_path, model=model, optimizer=None,
-                        scaler=None, ema=ema, map_location="cpu", mode=ckpt_mode, strict=True)
-    except Exception:
-        info = load_checkpoint(ckpt_path, model=model, optimizer=None,
-                               scaler=None, ema=ema, map_location="cpu", mode="full", strict=False)
-        li = info.get("_load_info", {})
-        print(f"[infer] fallback strict=False; "
-              f"missing={len(li.get('missing_keys', []))}, "
-              f"unexpected={len(li.get('unexpected_keys', []))}", flush=True)
-    if ema is not None:
+    net, model_cfg = build_model(cfg["model"])
+    schedule = build_schedule(cfg)
+    process = build_process(cfg, schedule).to(device)
+    model = Denoiser(
+        net.to(device),
+        process=process,
+        model_conditioning=cfg.get("model_conditioning", None),
+    )
+
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    info = _load_model_state_with_fallback(model, ckpt["model"], strict=True)
+    print(
+        f"[infer] loaded checkpoint strict=True prefix={info.get('prefix')} "
+        f"missing={len(info.get('missing_keys', []))} unexpected={len(info.get('unexpected_keys', []))}",
+        flush=True,
+    )
+
+    use_ema = bool(cfg.get("train", {}).get("use_ema", True)) and ("ema" in ckpt)
+    if use_ema:
+        ema = EMA(model, decay=float(cfg.get("train", {}).get("ema_decay", 0.9999)))
+        shadow = _apply_prefix_transform(ckpt["ema"]["shadow"], info["prefix"])
+        ema.load_state_dict({"decay": ckpt["ema"]["decay"], "shadow": shadow})
         ema.copy_to(model)
-    return model, model_cfg
+        print("[infer] using EMA weights", flush=True)
+    return model, model_cfg, process
 
 
 def _run_tag(sc: dict) -> str:
@@ -186,9 +205,9 @@ def main():
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
     # ── Config resolution ──────────────────────────────────────────────────
-    resolved_cfg_path = _find_resolved_config(args.ckpt)
-    print(f"[infer] base config → {resolved_cfg_path}", flush=True)
-    cfg = _load_yaml(resolved_cfg_path)
+    base_cfg_path = _find_base_config(args.ckpt)
+    print(f"[infer] base config → {base_cfg_path}", flush=True)
+    cfg = _load_yaml(base_cfg_path)
 
     if os.path.isfile(args.infer_config):
         print(f"[infer] overlay     → {args.infer_config}", flush=True)
@@ -225,11 +244,8 @@ def main():
     _dump_config(cfg, out_dir)
 
     # ── Model ──────────────────────────────────────────────────────────────
-    model, model_cfg = _load_model(cfg, args.ckpt, device)
+    model, model_cfg, process = _load_model(cfg, args.ckpt, device)
     model.eval()
-
-    schedule = build_schedule(cfg)
-    process  = build_process(cfg, schedule)
 
     # ── Sampling ───────────────────────────────────────────────────────────
     sample_cond = build_sample_cond(cfg, sample_num=sample_num, device=device, batch_cond=None)

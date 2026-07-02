@@ -43,6 +43,16 @@ time_condition_jitter:
   prob: 1.0
   min_t: 0.001
   max_t: 0.999
+model_conditioning:
+  ignore_time: true
+  time_constant: 0.5
+clean_loop:
+  enabled: true
+  bank_size: 50000
+  bank_prob: 0.25
+  warmup_steps: 10000
+  loss_bank_weight: 0.3
+  time_constant: 0.5
 loss:
   outer_weight: skew_triangular
   outer_weight_power: 1.0
@@ -126,7 +136,7 @@ gen_eval:
     batch_size: 256
     steps: 20
     sampler: heun
-    guidance_scale: 0.0
+    guidance_scale: 2.2
     guidance_schedule: null
 distributed:
   mode: ddp
@@ -150,5 +160,5 @@ compile:
   mode: default
   fullgraph: false
   dynamic: false
-_config_path: /data/seek/aigc/x0_loop/train_run2/base/config.yaml
+_config_path: /data/seek/aigc/x0_loop/train_run2/base_ignore_time/config.yaml
 _runtime_config_path: /data/seek/aigc/x0_loop/x0loop/configs/runtime/ddp_checkpoint_compile.yaml

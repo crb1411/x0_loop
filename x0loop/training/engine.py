@@ -16,6 +16,7 @@ from x0loop.losses.adversarial import accuracy_metrics, adversarial_weight, buil
 from x0loop.losses.atomic import regress
 from x0loop.losses.spec import build_loss
 from x0loop.models.denoiser import Denoiser
+from x0loop.training.clean_loop import CleanLoopBank, CleanLoopConfig, build_clean_loop_config
 from x0loop.training.context import ForwardBatch as TrainForwardBatch
 from x0loop.training.context import LoopConfig, ModelContext, ResumeState, RuntimeContext
 from x0loop.training.factories import build_augment, build_data_context, build_discriminator, build_model_context, build_process, build_schedule, init_runtime, load_resume_state
@@ -198,6 +199,9 @@ def compute_forward_batch(
     x0: torch.Tensor,
     y: object,
     use_label_cond: bool,
+    step: int,
+    clean_loop_cfg: CleanLoopConfig | None = None,
+    clean_loop_bank: CleanLoopBank | None = None,
 ) -> TrainForwardBatch:
     x0 = x0.to(runtime.device, non_blocking=True)
     bsz = x0.shape[0]
@@ -206,12 +210,55 @@ def compute_forward_batch(
         cond = apply_classifier_free_label_dropout(cond, null_class_id=int(model_ctx.model_cfg.num_classes), drop_prob=float(cfg["train"].get("class_dropout_prob", 0.0)))
     if augment_mode == "data_only":
         x0 = augment.apply(x0, augment.sample_params(bsz, device=runtime.device))
+
+    clean_enabled = clean_loop_cfg is not None and clean_loop_cfg.enabled and clean_loop_bank is not None
+    requested_bank = int(bsz * clean_loop_cfg.bank_prob) if clean_enabled else 0
+    n_bank = 0
+    if clean_enabled and step >= clean_loop_cfg.warmup_steps and requested_bank > 0:
+        n_bank = min(requested_bank, len(clean_loop_bank))
+    n_fresh = bsz - n_bank
+    if n_fresh <= 0:
+        raise ValueError("clean_loop requires at least one fresh sample per batch; reduce clean_loop.bank_prob.")
+
+    fresh_x0 = x0[:n_fresh]
+    fresh_cond = cond[:n_fresh] if cond is not None else None
     with torch.autocast(device_type=runtime.device.type, dtype=amp_dtype_for_precision(model_ctx.precision), enabled=(model_ctx.precision in {"bf16", "fp16"})):
-        batch = denoiser.compute_loss(x0, cond=cond)
+        batch = denoiser.compute_loss(fresh_x0, cond=fresh_cond)
         with torch.no_grad():
             unweighted = _diagnostic_losses(process, batch.fb, batch.out)
+            x0_hat = process.x0_from_output(batch.fb.xt, batch.fb.t, batch.out.detach(), aux={})
     extra_metrics = {k: v for k, v in batch.loss_dict.items() if k != "total"}
-    return TrainForwardBatch(loss=batch.loss_dict["total"], loss_by_target=unweighted, batch_size=bsz, cond=cond, fb=batch.fb, out=batch.out, extra_metrics=extra_metrics)
+    extra_metrics["loss_fresh"] = batch.loss_dict["total"].detach()
+    fresh_scale = float(n_fresh) / float(bsz)
+    total_loss = batch.loss_dict["total"] * fresh_scale
+
+    if clean_enabled:
+        if n_bank > 0:
+            with torch.autocast(device_type=runtime.device.type, dtype=amp_dtype_for_precision(model_ctx.precision), enabled=(model_ctx.precision in {"bf16", "fp16"})):
+                bank_x, bank_cond, bank_x0, bank_steps = clean_loop_bank.sample(n_bank, device=runtime.device, dtype=x0.dtype)
+                bank_t = torch.full((bank_x.shape[0],), clean_loop_cfg.time_constant, device=runtime.device, dtype=batch.fb.t.dtype)
+                bank_out = denoiser.forward(bank_x, bank_t, cond=bank_cond)
+                bank_pred_x0 = process.x0_from_output(bank_x, bank_t, bank_out, aux={})
+                bank_per_example = regress("mse", bank_pred_x0, bank_x0)
+                bank_loss = bank_per_example.mean()
+            bank_scale = float(n_bank) / float(bsz)
+            total_loss = total_loss + bank_scale * clean_loop_cfg.loss_bank_weight * bank_loss
+            extra_metrics.update({
+                "clean/loss_bank": bank_loss.detach(),
+                "clean/loss_bank_weighted": (bank_scale * clean_loop_cfg.loss_bank_weight * bank_loss).detach(),
+                "clean/loss_bank_weight": clean_loop_cfg.loss_bank_weight,
+                "clean/bank_age": (float(step) - bank_steps.detach().float().mean()).clamp_min(0.0),
+            })
+
+        clean_loop_bank.add(x_in=x0_hat, x0=batch.fb.x0, cond=fresh_cond, step=step)
+        extra_metrics.update({
+            "clean/bank_size": float(len(clean_loop_bank)),
+            "clean/bank_prob": clean_loop_cfg.bank_prob,
+            "clean/bank_n": float(n_bank),
+            "clean/fresh_n": float(n_fresh),
+            "clean/fresh_scale": fresh_scale,
+        })
+    return TrainForwardBatch(loss=total_loss, loss_by_target=unweighted, batch_size=bsz, cond=fresh_cond, fb=batch.fb, out=batch.out, extra_metrics=extra_metrics)
 
 
 def backward_loss(loss: torch.Tensor, *, current_accum_steps: int, scaler: torch.amp.GradScaler | None) -> None:
@@ -425,6 +472,8 @@ def train(cfg: dict) -> None:
         time_condition_jitter=cfg.get("time_condition_jitter", None),
         model_conditioning=cfg.get("model_conditioning", None),
     )
+    clean_loop_cfg = build_clean_loop_config(cfg)
+    clean_loop_bank = CleanLoopBank(clean_loop_cfg) if clean_loop_cfg.enabled else None
     # Data augmentation pipeline and where it is applied (data_only here).
     augment, augment_mode = build_augment(cfg)
     if runtime.is_main:
@@ -436,6 +485,7 @@ def train(cfg: dict) -> None:
         runtime.logger.log_text(f"[time_sampler] {cfg.get('time_sampler', {'name': 'legacy'})}")
         runtime.logger.log_text(f"[time_condition_jitter] {cfg.get('time_condition_jitter', {'enabled': False})}")
         runtime.logger.log_text(f"[model_conditioning] {cfg.get('model_conditioning', {'ignore_time': False})}")
+        runtime.logger.log_text(f"[clean_loop] {cfg.get('clean_loop', {'enabled': False})}")
         runtime.logger.log_text(f"[adversarial] {cfg.get('adversarial', {'enabled': False})}")
     optimizer = torch.optim.AdamW(denoiser.parameters(), lr=float(cfg["train"].get("lr", 1e-4)), betas=(0.9, 0.95), weight_decay=float(cfg["train"].get("weight_decay", 0.05)))
     d_optimizer = None
@@ -489,7 +539,21 @@ def train(cfg: dict) -> None:
                         pg["lr"] = step_lr
                     optimizer.zero_grad(set_to_none=True)
                 with maybe_no_sync(model_ctx.model, enabled=model_ctx.use_ddp and not did_optimizer_step):
-                    fwd = compute_forward_batch(cfg=cfg, runtime=runtime, model_ctx=model_ctx, denoiser=denoiser, process=process, augment=augment, augment_mode=augment_mode, x0=x0, y=y, use_label_cond=use_label_cond)
+                    fwd = compute_forward_batch(
+                        cfg=cfg,
+                        runtime=runtime,
+                        model_ctx=model_ctx,
+                        denoiser=denoiser,
+                        process=process,
+                        augment=augment,
+                        augment_mode=augment_mode,
+                        x0=x0,
+                        y=y,
+                        use_label_cond=use_label_cond,
+                        step=resume.global_step,
+                        clean_loop_cfg=clean_loop_cfg,
+                        clean_loop_bank=clean_loop_bank,
+                    )
                     maybe_apply_adversarial(cfg=cfg, fwd=fwd, process=process, discriminator=discriminator, d_optimizer=d_optimizer, scaler=scaler, step=resume.global_step)
                     backward_loss(fwd.loss, current_accum_steps=current_accum_steps, scaler=scaler)
                 grad_norm = None
