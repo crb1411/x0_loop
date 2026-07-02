@@ -128,6 +128,10 @@ class Logger:
         fields = fields.replace(", ", " ")
         return f"(tbin) [0.50,0.55) {fields}"
 
+    @staticmethod
+    def _fixed_section(text: str, width: int) -> str:
+        return text if len(text) >= width else text.ljust(width)
+
     @classmethod
     def _format_training_preview(cls, kv: dict) -> str:
         def val(key: str, default: float = 0.0):
@@ -139,31 +143,32 @@ class Logger:
         bank_scale = val("clean/bank_scale", 0.0)
         bank_weight = val("clean/loss_bank_weight", 0.0)
         bank_loss = val("clean/loss_bank", 0.0)
-        parts: list[str] = [
+        loss_part = (
             f"(loss) {cls._fmt_sig(total_loss)} = "
             f"(fresh_scale) {cls._fmt_sig(fresh_scale)} * "
             f"(weighted_fresh_loss) {cls._fmt_sig(fresh_loss)} + "
             f"(bank_scale) {cls._fmt_sig(bank_scale)} * "
             f"(bank_weight) {cls._fmt_sig(bank_weight)} * "
             f"(bank_x0_mse) {cls._fmt_sig(bank_loss)}"
-        ]
+        )
+        parts: list[str] = [cls._fixed_section(loss_part, 185)]
         mid_tbin = cls._format_mid_tbin(kv.get("summary"))
         if mid_tbin is not None:
-            parts.append(mid_tbin)
+            parts.append(cls._fixed_section(mid_tbin, 88))
 
         base = []
-        for key in ("lr", "iter_s", "img_s", "grad_norm", "gpu_mem_gb"):
-            if key not in kv:
-                continue
-            if key == "lr":
-                base.append(f"{key}={cls._fmt_sci(kv[key])}")
-            else:
-                base.append(f"{key}={cls._fmt_num(kv[key])}")
-        for key in ("epoch", "micro_step", "accumulation_steps"):
-            if key in kv:
-                base.append(f"{key}={cls._fmt_int(kv[key])}")
+        if "lr" in kv:
+            base.append(f"lr={cls._fmt_sci(kv['lr']):>13}")
+        if "iter_s" in kv:
+            base.append(f"iter_s={cls._fmt_num(kv['iter_s']):>9}")
+        if "img_s" in kv:
+            base.append(f"img_s={cls._fmt_num(kv['img_s']):>10}")
+        if "grad_norm" in kv:
+            base.append(f"grad_norm={cls._fmt_num(kv['grad_norm']):>10}")
+        if "epoch" in kv:
+            base.append(f"epoch={cls._fmt_int(kv['epoch']):>4}")
         if base:
-            parts.append(" ".join(base))
+            parts.append(cls._fixed_section(" ".join(base), 76))
 
         terminal_key = "loss_z" if "loss_z" in kv else "loss_eps" if "loss_eps" in kv else None
         diag = []
@@ -174,7 +179,7 @@ class Logger:
         if "loss_v" in kv:
             diag.append(f"v_mse={cls._fmt_sig(kv['loss_v'])}")
         if diag:
-            parts.append(f"(diag) {' '.join(diag)}")
+            parts.append(cls._fixed_section(f"(diag) {' '.join(diag)}", 58))
 
         clean = []
         for key, label in (
@@ -191,19 +196,33 @@ class Logger:
                 else:
                     clean.append(f"{label}={cls._fmt_num(kv[key])}")
         if clean:
-            parts.append(f"(clean) {' '.join(clean)}")
+            parts.append(cls._fixed_section(f"(clean) {' '.join(clean)}", 112))
 
         progress = []
-        for key in ("progress_pct", "elapsed", "eta_train", "eta_geneval", "eta_total", "total_est"):
-            if key in kv:
-                value = kv[key]
-                if key == "progress_pct" and isinstance(value, (float, int)):
-                    value = f"{cls._fmt_num(value)}%"
-                elif isinstance(value, (float, int)):
-                    value = cls._fmt_num(value)
-                progress.append(f"{key}={value}")
+        if "progress_pct" in kv:
+            try:
+                progress.append(f"progress_pct={float(kv['progress_pct']):9.5f}%")
+            except (TypeError, ValueError):
+                progress.append(f"progress_pct={kv['progress_pct']}")
+        for key, width in (("elapsed", 9), ("eta_train", 11), ("eta_geneval", 11), ("eta_total", 11), ("total_est", 11)):
+            if key not in kv:
+                continue
+            value = kv[key]
+            if isinstance(value, (float, int)):
+                value = cls._fmt_num(value)
+            progress.append(f"{key}={str(value):>{width}}")
         if progress:
-            parts.append(f"(progress) {' '.join(progress)}")
+            parts.append(cls._fixed_section(f"(progress) {' '.join(progress)}", 122))
+
+        meta = []
+        if "gpu_mem_gb" in kv:
+            meta.append(f"gpu_mem_gb={cls._fmt_num(kv['gpu_mem_gb'])}")
+        if "micro_step" in kv:
+            meta.append(f"micro_step={cls._fmt_int(kv['micro_step'])}")
+        if "accumulation_steps" in kv:
+            meta.append(f"accumulation_steps={cls._fmt_int(kv['accumulation_steps'])}")
+        if meta:
+            parts.append(cls._fixed_section(f"(meta) {' '.join(meta)}", 68))
 
         if "summary" in kv:
             parts.append(f"(summary) {kv['summary']}")
