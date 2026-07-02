@@ -90,18 +90,18 @@ train:
   ema_decay: 0.996
   resume: null
 logging:
-  log_every: 10
-  window_size: 20
+  log_every: 100
+  window_size: 100
   # mudata_every: 3000
   use_tb: true
-  sample_every: 100
+  sample_every: 10000
   sample_rank0_only: true
   summary_include_x0: true
   out_dir: null
 eval:
   enabled: true
-  every_steps: 50
-  max_batches: 2
+  every_steps: 1000
+  max_batches: 8
   batch_size: 256
   num_workers: 4
 sample:
@@ -160,5 +160,5 @@ compile:
   mode: default
   fullgraph: false
   dynamic: false
-_config_path: /data/seek/aigc/x0_loop/train_run2/debugcleanloopv1/config.yaml
+_config_path: /data/seek/aigc/x0_loop/train_run2/cleanloopv1_500ep/config.yaml
 _runtime_config_path: /data/seek/aigc/x0_loop/x0loop/configs/runtime/ddp_checkpoint_compile.yaml

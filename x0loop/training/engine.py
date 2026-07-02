@@ -139,8 +139,9 @@ def log_loop_config(logger: Logger, loop_cfg: LoopConfig) -> None:
     logger.log_text(f"[train] grad_clip={loop_cfg.grad_clip}")
     meta = loop_cfg.lr_sched_meta
     logger.log_text(f"[train] lr_scheduler={meta.get('name', 'constant')} meta={meta}")
-    for line in _format_lr_shape(loop_cfg):
-        logger.log_text(line)
+    lr_shape = _format_lr_shape(loop_cfg)
+    if lr_shape:
+        logger.log_text("\n".join(lr_shape))
 
 
 _SHAPE_POINTS = (0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95)
@@ -171,7 +172,7 @@ def _format_bar_shape(prefix: str, label: str, rows: list[tuple[float, float]], 
         f"[{prefix}] {label} shape | mean={mean_value:.4g} min={min(values):.4g} max={max_value:.4g}"
     ]
     for x, value in rows:
-        lines.append(f"[{prefix}] {x_name}={x:>4.2f}  {value:{value_fmt}}  {_bar(value, max_value)}")
+        lines.append(f"  {x_name}={x:>4.2f}  {value:{value_fmt}}  {_bar(value, max_value)}")
     return lines
 
 
@@ -306,18 +307,25 @@ def compute_forward_batch(
             unweighted = _diagnostic_losses(process, fresh_fb, fresh_out)
             fresh_x0_hat = process.x0_from_output(fresh_fb.xt, fresh_fb.t, fresh_out.detach(), aux={})
 
-    extra_metrics = {k: v for k, v in loss_dict.items() if k != "total"}
-    extra_metrics.update({f"fresh/{k}": v for k, v in loss_dict.items() if k != "total"})
     fresh_loss = loss_dict["total"]
     fresh_scale = float(n_fresh) / float(bsz)
     fresh_contrib = fresh_loss * fresh_scale
     total_loss = fresh_contrib
-    extra_metrics.update({
-        "loss_fresh": fresh_loss.detach(),
-        "loss_fresh_contrib": fresh_contrib.detach(),
+    extra_metrics = {
         "fresh/loss": fresh_loss.detach(),
-        "fresh/loss_contrib": fresh_contrib.detach(),
-    })
+        "fresh/loss_no_weight": loss_dict["loss_no_weight"].detach(),
+        "fresh/weight": loss_dict["weight"].detach(),
+    }
+    aggregate_loss_keys = {f"loss_{atom.target}" for atom in denoiser.loss_fn.atoms}
+    for key, value in loss_dict.items():
+        if key in {"total", "loss_weighted", "loss_no_weight", "weight"}:
+            continue
+        if key in aggregate_loss_keys:
+            continue
+        if key.startswith("loss_"):
+            extra_metrics[f"fresh/{key}"] = value.detach()
+    if clean_enabled and n_bank > 0:
+        extra_metrics["fresh/loss_contrib"] = fresh_contrib.detach()
 
     if clean_enabled:
         if bank_loss is not None and bank_steps is not None and bank_pred_x0 is not None and bank_x0 is not None:
@@ -326,7 +334,6 @@ def compute_forward_batch(
             total_loss = total_loss + bank_contrib
             extra_metrics.update({
                 "clean/loss_bank": bank_loss.detach(),
-                "clean/loss_bank_weighted": bank_contrib.detach(),
                 "clean/loss_bank_contrib": bank_contrib.detach(),
                 "clean/loss_bank_weight": clean_loop_cfg.loss_bank_weight,
                 "clean/bank_scale": bank_scale,
@@ -573,11 +580,13 @@ def train(cfg: dict) -> None:
         atom_descs = ", ".join(repr(atom) for atom in loss_fn.atoms)
         runtime.logger.log_text(f"[process] name={cfg.get('process', {}).get('name')} output_target={process.output_target} schedule={schedule.mode}")
         runtime.logger.log_text(f"[loss] {atom_descs}")
-        for line in _format_loss_weight_shape(loss_fn):
-            runtime.logger.log_text(line)
+        loss_weight_shape = _format_loss_weight_shape(loss_fn)
+        if loss_weight_shape:
+            runtime.logger.log_text("\n".join(loss_weight_shape))
         runtime.logger.log_text(f"[time_sampler] {cfg.get('time_sampler', {'name': 'legacy'})}")
-        for line in _format_time_sampler_shape(time_sampler):
-            runtime.logger.log_text(line)
+        time_sampler_shape = _format_time_sampler_shape(time_sampler)
+        if time_sampler_shape:
+            runtime.logger.log_text("\n".join(time_sampler_shape))
         runtime.logger.log_text(f"[time_condition_jitter] {cfg.get('time_condition_jitter', {'enabled': False})}")
         runtime.logger.log_text(f"[model_conditioning] {cfg.get('model_conditioning', {'ignore_time': False})}")
         runtime.logger.log_text(f"[clean_loop] {cfg.get('clean_loop', {'enabled': False})}")

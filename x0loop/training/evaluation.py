@@ -62,13 +62,9 @@ def compute_eval_forward(
         terminal_label = endpoint_loss_label(p)
         diag = {
             "loss": loss_dict["total"].detach(),
-            "fresh/loss": loss_dict["total"].detach(),
             "loss_weighted": loss_dict["loss_weighted"].detach(),
             "loss_no_weight": loss_dict["loss_no_weight"].detach(),
             "loss_outer_weight": loss_dict["weight"].detach(),
-            "fresh/loss_weighted": loss_dict["loss_weighted"].detach(),
-            "fresh/loss_no_weight": loss_dict["loss_no_weight"].detach(),
-            "fresh/weight": loss_dict["weight"].detach(),
             f"loss_{terminal_label}": regress("mse", p.endpoint_from_output(fb.xt, fb.t, out, aux={}), p.endpoint_target(fb)).detach(),
             "loss_x0": regress("mse", p.x0_from_output(fb.xt, fb.t, out, aux={}), p.x0_target(fb)).detach(),
             "loss_v": regress("mse", p.v_from_output(fb.xt, fb.t, out, aux={}), p.v_target(fb)).detach(),
