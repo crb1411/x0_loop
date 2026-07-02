@@ -139,40 +139,87 @@ def log_loop_config(logger: Logger, loop_cfg: LoopConfig) -> None:
     logger.log_text(f"[train] grad_clip={loop_cfg.grad_clip}")
     meta = loop_cfg.lr_sched_meta
     logger.log_text(f"[train] lr_scheduler={meta.get('name', 'constant')} meta={meta}")
+    for line in _format_lr_shape(loop_cfg):
+        logger.log_text(line)
+
+
+_SHAPE_POINTS = (0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95)
+_BAR_WIDTH = 40
+
+
+def _as_vector(x: torch.Tensor) -> torch.Tensor:
+    if x.ndim > 1:
+        x = x.view(x.shape[0], -1).mean(dim=1)
+    return x.detach().float().cpu()
+
+
+def _bar(value: float, max_value: float, *, width: int = _BAR_WIDTH) -> str:
+    if max_value <= 0.0 or not math.isfinite(max_value):
+        n = 0
+    else:
+        n = int(round(width * max(0.0, float(value)) / max_value))
+    return "█" * max(0, min(width, n))
+
+
+def _format_bar_shape(prefix: str, label: str, rows: list[tuple[float, float]], *, x_name: str, value_fmt: str = ".3f") -> list[str]:
+    if not rows:
+        return []
+    values = [float(v) for _, v in rows]
+    max_value = max(values) if values else 0.0
+    mean_value = sum(values) / len(values) if values else 0.0
+    lines = [
+        f"[{prefix}] {label} shape | mean={mean_value:.4g} min={min(values):.4g} max={max_value:.4g}"
+    ]
+    for x, value in rows:
+        lines.append(f"[{prefix}] {x_name}={x:>4.2f}  {value:{value_fmt}}  {_bar(value, max_value)}")
+    return lines
 
 
 def _format_loss_weight_shape(loss_fn) -> list[str]:
-    t_points = torch.tensor([0.001, 0.25, 0.5, 0.75, 0.999], dtype=torch.float32)
+    t_points = torch.tensor(_SHAPE_POINTS, dtype=torch.float32)
     t_grid = (torch.arange(2000, dtype=torch.float32) + 0.5) / 2000.0
 
-    def _as_vector(x: torch.Tensor) -> torch.Tensor:
-        if x.ndim > 1:
-            x = x.view(x.shape[0], -1).mean(dim=1)
-        return x.detach().float().cpu()
-
-    def _fmt_values(values: torch.Tensor) -> str:
-        return " ".join(f"{float(v):>9.4g}" for v in values)
-
-    def _line(name: str, fn) -> str:
+    def _shape(name: str, fn) -> list[str]:
         point_values = _as_vector(fn(t_points))
         grid_values = _as_vector(fn(t_grid))
-        return (
-            f"[loss_weight] {name:<18} {_fmt_values(point_values)} "
-            f"| mean={float(grid_values.mean()):.4g} min={float(grid_values.min()):.4g} max={float(grid_values.max()):.4g}"
+        rows = [(float(t), float(v)) for t, v in zip(t_points, point_values, strict=True)]
+        lines = _format_bar_shape("loss_weight", name, rows, x_name="t")
+        lines[0] = (
+            f"[loss_weight] {name} shape | "
+            f"mean={float(grid_values.mean()):.4g} min={float(grid_values.min()):.4g} max={float(grid_values.max()):.4g}"
         )
+        return lines
 
-    lines = [f"[loss_weight] {'t':<18} {_fmt_values(t_points)}"]
-    lines.append(
-        _line(
-            "outer",
-            lambda t: loss_fn.outer_weight(SimpleNamespace(t=t), torch.ones_like(t)),
-        )
-    )
+    lines = _shape("outer", lambda t: loss_fn.outer_weight(SimpleNamespace(t=t), torch.ones_like(t)))
     for atom_index, atom in enumerate(loss_fn.atoms):
         if atom.weight_fn is None:
             continue
-        lines.append(_line(f"term{atom_index}:{atom.target}", lambda t, atom=atom: atom.weight_fn(t, None)))
+        lines.extend(_shape(f"term{atom_index}:{atom.target}", lambda t, atom=atom: atom.weight_fn(t, None)))
     return lines
+
+
+def _format_time_sampler_shape(time_sampler) -> list[str]:
+    sample_count = 20000
+    t = time_sampler.sample(sample_count, device=torch.device("cpu")).detach().float().clamp(0.0, 1.0)
+    points = torch.tensor(_SHAPE_POINTS, dtype=torch.float32)
+    mids = 0.5 * (points[:-1] + points[1:])
+    edges = torch.cat([torch.tensor([0.0]), mids, torch.tensor([1.0])])
+    idx = torch.bucketize(t, edges[1:-1], right=False)
+    hist = torch.bincount(idx, minlength=edges.numel() - 1).float()
+    widths = edges[1:] - edges[:-1]
+    density = hist / float(sample_count) / widths.clamp_min(1e-8)
+    rows = [(float(point), float(value)) for point, value in zip(points, density, strict=True)]
+    return _format_bar_shape("time_sampler", "sample_density", rows, x_name="t")
+
+
+def _format_lr_shape(loop_cfg: LoopConfig) -> list[str]:
+    if loop_cfg.total_steps <= 0:
+        return []
+    rows: list[tuple[float, float]] = []
+    for frac in _SHAPE_POINTS:
+        step = min(loop_cfg.total_steps - 1, max(0, int(round(frac * float(loop_cfg.total_steps - 1)))))
+        rows.append((float(frac), float(loop_cfg.lr_for_step(step))))
+    return _format_bar_shape("lr", "schedule", rows, x_name="p", value_fmt=".4g")
 
 
 def _diagnostic_losses(process: BaseProcess, fb: ProcessForwardBatch, out: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -222,35 +269,81 @@ def compute_forward_batch(
 
     fresh_x0 = x0[:n_fresh]
     fresh_cond = cond[:n_fresh] if cond is not None else None
+    bank_x = bank_cond = bank_x0 = bank_steps = None
+    if clean_enabled and n_bank > 0:
+        bank_x, bank_cond, bank_x0, bank_steps = clean_loop_bank.sample(n_bank, device=runtime.device, dtype=x0.dtype)
+
     with torch.autocast(device_type=runtime.device.type, dtype=amp_dtype_for_precision(model_ctx.precision), enabled=(model_ctx.precision in {"bf16", "fp16"})):
-        batch = denoiser.compute_loss(fresh_x0, cond=fresh_cond)
+        if denoiser.loss_fn is None:
+            raise ValueError("Denoiser requires loss_fn for training.")
+        fresh_fb = denoiser.make_forward_batch(fresh_x0)
+        fresh_t_model = denoiser.training_time_condition(fresh_fb.t)
+        model_x = fresh_fb.xt
+        model_t = fresh_t_model
+        model_cond = fresh_cond
+        bank_t = None
+        if bank_x is not None:
+            bank_t = torch.full((bank_x.shape[0],), clean_loop_cfg.time_constant, device=runtime.device, dtype=fresh_fb.t.dtype)
+            model_x = torch.cat([model_x, bank_x], dim=0)
+            model_t = torch.cat([model_t, bank_t], dim=0)
+            if fresh_cond is not None:
+                if bank_cond is None:
+                    raise ValueError("clean_loop bank was created without labels but current training uses labels.")
+                model_cond = torch.cat([fresh_cond, bank_cond], dim=0)
+
+        model_out = denoiser.forward(model_x, model_t, cond=model_cond)
+        fresh_out = model_out[:n_fresh]
+        loss_dict = denoiser.loss_fn(process, fresh_fb, fresh_out)
+        bank_out = model_out[n_fresh:] if bank_x is not None else None
+        bank_loss = None
+        bank_pred_x0 = None
+        if bank_x is not None and bank_t is not None and bank_out is not None and bank_x0 is not None:
+            bank_pred_x0 = process.x0_from_output(bank_x, bank_t, bank_out, aux={})
+            bank_per_example = regress("mse", bank_pred_x0, bank_x0)
+            bank_loss = bank_per_example.mean()
+
         with torch.no_grad():
-            unweighted = _diagnostic_losses(process, batch.fb, batch.out)
-            x0_hat = process.x0_from_output(batch.fb.xt, batch.fb.t, batch.out.detach(), aux={})
-    extra_metrics = {k: v for k, v in batch.loss_dict.items() if k != "total"}
-    extra_metrics["loss_fresh"] = batch.loss_dict["total"].detach()
+            unweighted = _diagnostic_losses(process, fresh_fb, fresh_out)
+            fresh_x0_hat = process.x0_from_output(fresh_fb.xt, fresh_fb.t, fresh_out.detach(), aux={})
+
+    extra_metrics = {k: v for k, v in loss_dict.items() if k != "total"}
+    extra_metrics.update({f"fresh/{k}": v for k, v in loss_dict.items() if k != "total"})
+    fresh_loss = loss_dict["total"]
     fresh_scale = float(n_fresh) / float(bsz)
-    total_loss = batch.loss_dict["total"] * fresh_scale
+    fresh_contrib = fresh_loss * fresh_scale
+    total_loss = fresh_contrib
+    extra_metrics.update({
+        "loss_fresh": fresh_loss.detach(),
+        "loss_fresh_contrib": fresh_contrib.detach(),
+        "fresh/loss": fresh_loss.detach(),
+        "fresh/loss_contrib": fresh_contrib.detach(),
+    })
 
     if clean_enabled:
-        if n_bank > 0:
-            with torch.autocast(device_type=runtime.device.type, dtype=amp_dtype_for_precision(model_ctx.precision), enabled=(model_ctx.precision in {"bf16", "fp16"})):
-                bank_x, bank_cond, bank_x0, bank_steps = clean_loop_bank.sample(n_bank, device=runtime.device, dtype=x0.dtype)
-                bank_t = torch.full((bank_x.shape[0],), clean_loop_cfg.time_constant, device=runtime.device, dtype=batch.fb.t.dtype)
-                bank_out = denoiser.forward(bank_x, bank_t, cond=bank_cond)
-                bank_pred_x0 = process.x0_from_output(bank_x, bank_t, bank_out, aux={})
-                bank_per_example = regress("mse", bank_pred_x0, bank_x0)
-                bank_loss = bank_per_example.mean()
+        if bank_loss is not None and bank_steps is not None and bank_pred_x0 is not None and bank_x0 is not None:
             bank_scale = float(n_bank) / float(bsz)
-            total_loss = total_loss + bank_scale * clean_loop_cfg.loss_bank_weight * bank_loss
+            bank_contrib = bank_scale * clean_loop_cfg.loss_bank_weight * bank_loss
+            total_loss = total_loss + bank_contrib
             extra_metrics.update({
                 "clean/loss_bank": bank_loss.detach(),
-                "clean/loss_bank_weighted": (bank_scale * clean_loop_cfg.loss_bank_weight * bank_loss).detach(),
+                "clean/loss_bank_weighted": bank_contrib.detach(),
+                "clean/loss_bank_contrib": bank_contrib.detach(),
                 "clean/loss_bank_weight": clean_loop_cfg.loss_bank_weight,
+                "clean/bank_scale": bank_scale,
                 "clean/bank_age": (float(step) - bank_steps.detach().float().mean()).clamp_min(0.0),
             })
 
-        clean_loop_bank.add(x_in=x0_hat, x0=batch.fb.x0, cond=fresh_cond, step=step)
+        add_x_in = fresh_x0_hat
+        add_x0 = fresh_fb.x0
+        add_cond = fresh_cond
+        if bank_pred_x0 is not None and bank_x0 is not None:
+            add_x_in = torch.cat([add_x_in, bank_pred_x0.detach()], dim=0)
+            add_x0 = torch.cat([add_x0, bank_x0], dim=0)
+            if add_cond is not None:
+                if bank_cond is None:
+                    raise ValueError("clean_loop bank was created without labels but current training uses labels.")
+                add_cond = torch.cat([add_cond, bank_cond], dim=0)
+        clean_loop_bank.add(x_in=add_x_in, x0=add_x0, cond=add_cond, step=step)
         extra_metrics.update({
             "clean/bank_size": float(len(clean_loop_bank)),
             "clean/bank_prob": clean_loop_cfg.bank_prob,
@@ -258,7 +351,7 @@ def compute_forward_batch(
             "clean/fresh_n": float(n_fresh),
             "clean/fresh_scale": fresh_scale,
         })
-    return TrainForwardBatch(loss=total_loss, loss_by_target=unweighted, batch_size=bsz, cond=fresh_cond, fb=batch.fb, out=batch.out, extra_metrics=extra_metrics)
+    return TrainForwardBatch(loss=total_loss, loss_by_target=unweighted, batch_size=bsz, cond=fresh_cond, fb=fresh_fb, out=fresh_out, extra_metrics=extra_metrics)
 
 
 def backward_loss(loss: torch.Tensor, *, current_accum_steps: int, scaler: torch.amp.GradScaler | None) -> None:
@@ -483,6 +576,8 @@ def train(cfg: dict) -> None:
         for line in _format_loss_weight_shape(loss_fn):
             runtime.logger.log_text(line)
         runtime.logger.log_text(f"[time_sampler] {cfg.get('time_sampler', {'name': 'legacy'})}")
+        for line in _format_time_sampler_shape(time_sampler):
+            runtime.logger.log_text(line)
         runtime.logger.log_text(f"[time_condition_jitter] {cfg.get('time_condition_jitter', {'enabled': False})}")
         runtime.logger.log_text(f"[model_conditioning] {cfg.get('model_conditioning', {'ignore_time': False})}")
         runtime.logger.log_text(f"[clean_loop] {cfg.get('clean_loop', {'enabled': False})}")

@@ -258,7 +258,8 @@ def _run_generative_eval(
             f"tag={tag}, step={resume.global_step}, num_samples={gen_cfg['num_samples']}, "
             f"steps={gen_cfg['steps']}, sampler={gen_cfg['sampler']}, "
             f"guidance_scale={gen_cfg['guidance_scale']}, guidance_schedule={gen_cfg['guidance_schedule']}, "
-            f"time_condition_shift={gen_cfg['time_condition_shift']}"
+            f"time_condition_shift={gen_cfg['time_condition_shift']}, "
+            f"model_conditioning={cfg.get('model_conditioning', {'ignore_time': False})}"
         )
     if runtime.is_distributed:
         dist_utils.barrier()
@@ -305,6 +306,7 @@ def _run_generative_eval(
             "guidance_scale": float(gen_cfg["guidance_scale"]),
             "guidance_schedule": gen_cfg["guidance_schedule"],
             "time_condition_shift": gen_cfg["time_condition_shift"],
+            "model_conditioning": cfg.get("model_conditioning", {"ignore_time": False}),
             "keep_images_count": int(gen_cfg["keep_images_count"]),
             "metrics": metrics,
         }
