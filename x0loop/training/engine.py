@@ -328,6 +328,14 @@ def compute_forward_batch(
         extra_metrics["fresh/loss_contrib"] = fresh_contrib.detach()
 
     if clean_enabled:
+        extra_metrics.update({
+            "fresh/loss_contrib": fresh_contrib.detach(),
+            "clean/loss_bank": 0.0,
+            "clean/loss_bank_contrib": 0.0,
+            "clean/loss_bank_weight": clean_loop_cfg.loss_bank_weight,
+            "clean/bank_scale": float(n_bank) / float(bsz),
+            "clean/warmup_left": float(max(0, clean_loop_cfg.warmup_steps - step)),
+        })
         if bank_loss is not None and bank_steps is not None and bank_pred_x0 is not None and bank_x0 is not None:
             bank_scale = float(n_bank) / float(bsz)
             bank_contrib = bank_scale * clean_loop_cfg.loss_bank_weight * bank_loss

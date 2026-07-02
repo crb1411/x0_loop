@@ -111,7 +111,7 @@ sample:
   guidance_scale: 1.0
   save_trace: false
 gen_eval:
-  enabled: false
+  enabled: true
   every_steps: 10000
   num_samples: 5000
   batch_size: 256
@@ -153,7 +153,7 @@ distributed:
     static_graph: false
   checkpoint:
     mode: full
-    every_steps: 500
+    every_steps: 30000
 compile:
   enabled: true
   allow_fsdp: false

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import re
 import sys
 import time
 from collections import deque
@@ -81,6 +83,142 @@ class Logger:
         if self.is_main:
             self.py_logger.info("%s", msg)
 
+    @staticmethod
+    def _fmt_num(value, digits: int = 5) -> str:
+        try:
+            return f"{float(value):.{digits}f}"
+        except (TypeError, ValueError):
+            return str(value)
+
+    @staticmethod
+    def _fmt_sig(value, digits: int = 5) -> str:
+        try:
+            v = float(value)
+            if not math.isfinite(v):
+                return str(v)
+            if v == 0.0:
+                return "0." + ("0" * (digits - 1))
+            decimals = max(0, digits - 1 - int(math.floor(math.log10(abs(v)))))
+            return f"{v:.{decimals}f}"
+        except (TypeError, ValueError):
+            return str(value)
+
+    @staticmethod
+    def _fmt_sci(value, digits: int = 5) -> str:
+        try:
+            return f"{float(value):.{digits}e}"
+        except (TypeError, ValueError):
+            return str(value)
+
+    @staticmethod
+    def _fmt_int(value) -> str:
+        try:
+            return str(int(round(float(value))))
+        except (TypeError, ValueError):
+            return str(value)
+
+    @staticmethod
+    def _format_mid_tbin(summary) -> str | None:
+        if not isinstance(summary, str):
+            return None
+        match = re.search(r"\[0\.50,0\.55\):\s*([^|]+)", summary)
+        if match is None:
+            return None
+        fields = match.group(1).strip().rstrip()
+        fields = fields.replace(", ", " ")
+        return f"(tbin) [0.50,0.55) {fields}"
+
+    @classmethod
+    def _format_training_preview(cls, kv: dict) -> str:
+        def val(key: str, default: float = 0.0):
+            return kv.get(key, default)
+
+        total_loss = val("loss")
+        fresh_scale = val("clean/fresh_scale", 1.0)
+        fresh_loss = val("fresh/loss", total_loss)
+        bank_scale = val("clean/bank_scale", 0.0)
+        bank_weight = val("clean/loss_bank_weight", 0.0)
+        bank_loss = val("clean/loss_bank", 0.0)
+        parts: list[str] = [
+            f"(loss) {cls._fmt_sig(total_loss)} = "
+            f"(fresh_scale) {cls._fmt_sig(fresh_scale)} * "
+            f"(weighted_fresh_loss) {cls._fmt_sig(fresh_loss)} + "
+            f"(bank_scale) {cls._fmt_sig(bank_scale)} * "
+            f"(bank_weight) {cls._fmt_sig(bank_weight)} * "
+            f"(bank_x0_mse) {cls._fmt_sig(bank_loss)}"
+        ]
+        mid_tbin = cls._format_mid_tbin(kv.get("summary"))
+        if mid_tbin is not None:
+            parts.append(mid_tbin)
+
+        base = []
+        for key in ("lr", "iter_s", "img_s", "grad_norm", "gpu_mem_gb"):
+            if key not in kv:
+                continue
+            if key == "lr":
+                base.append(f"{key}={cls._fmt_sci(kv[key])}")
+            else:
+                base.append(f"{key}={cls._fmt_num(kv[key])}")
+        for key in ("epoch", "micro_step", "accumulation_steps"):
+            if key in kv:
+                base.append(f"{key}={cls._fmt_int(kv[key])}")
+        if base:
+            parts.append(" ".join(base))
+
+        terminal_key = "loss_z" if "loss_z" in kv else "loss_eps" if "loss_eps" in kv else None
+        diag = []
+        if terminal_key is not None:
+            diag.append(f"{terminal_key.removeprefix('loss_')}_mse={cls._fmt_sig(kv[terminal_key])}")
+        if "loss_x0" in kv:
+            diag.append(f"x0_mse={cls._fmt_sig(kv['loss_x0'])}")
+        if "loss_v" in kv:
+            diag.append(f"v_mse={cls._fmt_sig(kv['loss_v'])}")
+        if diag:
+            parts.append(f"(diag) {' '.join(diag)}")
+
+        clean = []
+        for key, label in (
+            ("clean/bank_size", "bank_size"),
+            ("clean/bank_n", "bank_n"),
+            ("clean/fresh_n", "fresh_n"),
+            ("clean/bank_prob", "bank_prob"),
+            ("clean/warmup_left", "warmup_left"),
+            ("clean/bank_age", "bank_age"),
+        ):
+            if key in kv:
+                if key in {"clean/bank_size", "clean/bank_n", "clean/fresh_n", "clean/warmup_left"}:
+                    clean.append(f"{label}={cls._fmt_int(kv[key])}")
+                else:
+                    clean.append(f"{label}={cls._fmt_num(kv[key])}")
+        if clean:
+            parts.append(f"(clean) {' '.join(clean)}")
+
+        progress = []
+        for key in ("progress_pct", "elapsed", "eta_train", "eta_geneval", "eta_total", "total_est"):
+            if key in kv:
+                value = kv[key]
+                if key == "progress_pct" and isinstance(value, (float, int)):
+                    value = f"{cls._fmt_num(value)}%"
+                elif isinstance(value, (float, int)):
+                    value = cls._fmt_num(value)
+                progress.append(f"{key}={value}")
+        if progress:
+            parts.append(f"(progress) {' '.join(progress)}")
+
+        if "summary" in kv:
+            parts.append(f"(summary) {kv['summary']}")
+        return " | ".join(parts)
+
+    @classmethod
+    def _format_default_preview(cls, kv: dict) -> str:
+        return " ".join([f"{k}={cls._fmt_num(v)}" if isinstance(v, (float, int)) else f"{k}={v}" for k, v in kv.items()])
+
+    @classmethod
+    def _format_preview(cls, kv: dict) -> str:
+        if "loss" in kv and "fresh/loss" in kv:
+            return cls._format_training_preview(kv)
+        return cls._format_default_preview(kv)
+
     def log_kv(self, step: int, kv: dict, total_steps: int | None = None):
         if not self.is_main:
             return
@@ -94,7 +232,7 @@ class Logger:
         for k, v in kv.items():
             if self.tb is not None and isinstance(v, (float, int)):
                 self.tb.add_scalar(k, float(v), step)
-        preview = " ".join([f"{k}={v:.5g}" if isinstance(v, (float, int)) else f"{k}={v}" for k, v in kv.items()])
+        preview = self._format_preview(kv)
         if total_steps is not None and total_steps > 0:
             self.py_logger.info("[step %d/%d] %s", step, int(total_steps), preview)
         else:
