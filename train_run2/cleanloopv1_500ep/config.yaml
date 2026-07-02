@@ -49,9 +49,9 @@ model_conditioning:
 clean_loop:
   enabled: true
   bank_size: 4096
-  bank_prob: 0.25
+  bank_prob: 0.50
   warmup_steps: 10000
-  loss_bank_weight: 0.3
+  loss_bank_weight: 2.0
   time_constant: 0.5
 loss:
   outer_weight: skew_triangular

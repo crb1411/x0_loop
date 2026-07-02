@@ -80,21 +80,27 @@ def format_tbin_summary(
 ) -> str:
     parts = []
     n = counts.numel()
+    count_width = max(1, len(str(int(counts.max().item())))) if n > 0 else 1
+
+    def _fmt_value(value: torch.Tensor | float) -> str:
+        v = float(value.item()) if isinstance(value, torch.Tensor) else float(value)
+        return f"{v:.4e}"
+
     for i in range(n):
         left = float(edges[i].item())
         right = float(edges[i + 1].item())
         close = "]" if i == n - 1 else ")"
         cnt = int(counts[i].item())
         fields = [
-            f"n={cnt}",
-            f"a={float(avg_a[i].item()):.4g}",
-            f"w={float(avg_w[i].item()):.4g}",
-            f"l{endpoint_label}={float(avg_eps[i].item()):.4g}",
-            f"lx0={float(avg_x0[i].item()):.4g}",
-            f"lv={float(avg_v[i].item()):.4g}",
+            f"n={cnt:0{count_width}d}",
+            f"a={_fmt_value(avg_a[i])}",
+            f"w={_fmt_value(avg_w[i])}",
+            f"l{endpoint_label}={_fmt_value(avg_eps[i])}",
+            f"lx0={_fmt_value(avg_x0[i])}",
+            f"lv={_fmt_value(avg_v[i])}",
         ]
         for key, values in (extra_avgs or {}).items():
-            fields.append(f"{key}={float(values[i].item()):.4g}")
+            fields.append(f"{key}={_fmt_value(values[i])}")
         parts.append(f"[{left:.2f},{right:.2f}{close}: {', '.join(fields)}")
     return " | ".join(parts)
 

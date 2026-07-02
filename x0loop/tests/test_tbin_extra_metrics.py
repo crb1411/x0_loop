@@ -17,7 +17,7 @@ def test_time_bin_summary_includes_extra_values():
 
     summary = acc.summary(is_distributed=False)
 
-    assert "gadv=1" in summary
-    assert "gadv=3" in summary
-    assert "dacc=0.5" in summary
-    assert "dacc=1" in summary
+    assert "gadv=1.0000e+00" in summary
+    assert "gadv=3.0000e+00" in summary
+    assert "dacc=5.0000e-01" in summary
+    assert "dacc=1.0000e+00" in summary
