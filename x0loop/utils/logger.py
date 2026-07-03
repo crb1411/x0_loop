@@ -194,7 +194,7 @@ class Logger:
             ("clean/t_bank", "t_bank"),
             ("clean/t1", "t1"),
             ("clean/loss_bank_raw", "bank_raw"),
-            ("clean/loss_bank_inner_weight", "bank_inner_w"),
+            ("clean/loss_bank_weight_applied", "bank_w"),
             ("clean/bank_loss_use_weight", "bank_use_w"),
             ("clean/fresh_add_n", "fresh_add_n"),
             ("clean/bank_add_n", "bank_add_n"),

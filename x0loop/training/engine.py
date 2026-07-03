@@ -391,7 +391,7 @@ def compute_forward_batch(
             "fresh/loss_contrib": fresh_contrib.detach(),
             "clean/loss_bank": 0.0,
             "clean/loss_bank_raw": 0.0,
-            "clean/loss_bank_inner_weight": 0.0,
+            "clean/loss_bank_weight_applied": 0.0,
             "clean/loss_bank_contrib": 0.0,
             "clean/loss_bank_weight": clean_loop_cfg.loss_bank_weight,
             "clean/bank_loss_use_weight": float(clean_loop_cfg.bank_loss_use_weight),
@@ -405,7 +405,7 @@ def compute_forward_batch(
             extra_metrics.update({
                 "clean/loss_bank": bank_loss.detach(),
                 "clean/loss_bank_raw": bank_loss_raw.detach() if bank_loss_raw is not None else bank_loss.detach(),
-                "clean/loss_bank_inner_weight": bank_loss_weight.detach() if bank_loss_weight is not None else torch.ones_like(bank_loss).detach(),
+                "clean/loss_bank_weight_applied": bank_loss_weight.detach() if bank_loss_weight is not None else torch.ones_like(bank_loss).detach(),
                 "clean/loss_bank_contrib": bank_contrib.detach(),
                 "clean/loss_bank_weight": clean_loop_cfg.loss_bank_weight,
                 "clean/bank_loss_use_weight": float(clean_loop_cfg.bank_loss_use_weight),

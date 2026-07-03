@@ -219,7 +219,7 @@ def build_clean_loop_bank_input(
 ) -> torch.Tensor:
     if cfg.bank_input_mode == "step":
         return process.step(xt, t, t1, model_out, aux={})
-    endpoint = torch.randn_like(x0_hat)
+    endpoint = process.prior_sample(shape=x0_hat.shape, device=x0_hat.device, dtype=x0_hat.dtype)
     alpha = process.schedule.alpha(t1)
     sigma = process.schedule.sigma(t1)
     a = process._reshape_coeff(alpha, x0_hat)
