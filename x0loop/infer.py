@@ -225,6 +225,7 @@ def main():
     if isinstance(sampler_name, str) and sampler_name.lower() == "auto":
         sampler_name = None
     posterior_ns = sc.get("posterior_noise_scale", None)
+    refine_time = float(sc.get("refine_time", 0.5))
 
     # ── Output directory: infer_step_XXXXXXXX / cfg{g}_{sm}_n{num}_t{steps} ──
     step     = _step_from_ckpt(args.ckpt)
@@ -252,7 +253,7 @@ def main():
     null_cond   = build_null_class_cond(cfg, sample_num=sample_num, device=device)
 
     print(f"[infer] generating {sample_num} images × {steps} steps  "
-          f"guidance={guidance}  sampler={sampler_name or 'ddim'}", flush=True)
+          f"guidance={guidance}  sampler={sampler_name or 'ddim'}  refine_time={refine_time}", flush=True)
 
     with torch.no_grad():
         result = process.sample(
@@ -267,6 +268,7 @@ def main():
             guidance_scale=guidance,
             sampler=sampler_name,
             posterior_noise_scale=posterior_ns,
+            refine_time=refine_time,
         )
 
     # ── Save ───────────────────────────────────────────────────────────────

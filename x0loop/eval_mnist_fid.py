@@ -137,6 +137,7 @@ def export_fake_images(
     device: torch.device,
     sampler: str | None,
     posterior_noise_scale: float | None,
+    refine_time: float,
 ):
     os.makedirs(out_dir, exist_ok=True)
     done = 0
@@ -152,6 +153,7 @@ def export_fake_images(
             cond=None,
             sampler=sampler,
             posterior_noise_scale=posterior_noise_scale,
+            refine_time=refine_time,
         )
         x = result["x"]
         for i in range(bs):
@@ -245,8 +247,9 @@ def main():
         if args.posterior_noise_scale is not None
         else cfg.get("sample", {}).get("posterior_noise_scale", None)
     )
+    refine_time = float(cfg.get("sample", {}).get("refine_time", 0.5))
     if sampler is not None:
-        print(f"[fid] sampler={sampler}, posterior_noise_scale={posterior_noise_scale}", flush=True)
+        print(f"[fid] sampler={sampler}, posterior_noise_scale={posterior_noise_scale}, refine_time={refine_time}", flush=True)
     export_fake_images(
         model=model,
         process=process,
@@ -259,6 +262,7 @@ def main():
         device=device,
         sampler=sampler,
         posterior_noise_scale=posterior_noise_scale,
+        refine_time=refine_time,
     )
 
     from torch_fidelity import calculate_metrics

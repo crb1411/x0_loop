@@ -47,7 +47,7 @@ model_conditioning:
   ignore_time: true
   time_constant: 0.5
 clean_loop:
-  enabled: true
+  enabled: false
   bank_size: 50000
   bank_prob: 0.25
   warmup_steps: 10000

@@ -4,11 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "${ROOT}"
 
-RUN_NAME="base"
+RUN_NAME="cleanloopv1_500ep_tbank0p75"
 CONFIG_PATH="${ROOT}/train_run2/${RUN_NAME}/config.yaml"
 RUNTIME_CONFIG="${RUNTIME_CONFIG:-${ROOT}/x0loop/configs/runtime/ddp_checkpoint_compile.yaml}"
 TIMESTAMP="${X0LOOP_RUN_TIMESTAMP:-$(date +"%Y%m%d_%H%M%S")}"
-OUT_DIR="${ROOT}/runs2/ignore_time/${RUN_NAME}/${TIMESTAMP}"
+OUT_DIR="${ROOT}/runs2/clean_loop/${RUN_NAME}/${TIMESTAMP}"
 LOG_DIR="${OUT_DIR}/logs"
 LOG_FILE="${LOG_DIR}/launcher.log"
 PID_FILE="${LOG_DIR}/launcher.pid"
