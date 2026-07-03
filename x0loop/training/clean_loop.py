@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import torch
 
+from x0loop.losses.atomic import VALID_FORMULAS, normalize_loss_target
+
 
 @dataclass(frozen=True)
 class CleanLoopConfig:
@@ -19,6 +21,9 @@ class CleanLoopConfig:
     t1_delta: float = 0.02
     t1_min: float = 1.0e-5
     t1_max_resample_attempts: int = 8
+    bank_loss_target: str = "x0"
+    bank_loss_formula: str = "mse"
+    bank_loss_use_weight: bool = False
     storage_dtype: torch.dtype = torch.float16
 
 
@@ -37,6 +42,10 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
     t1_delta = float(raw.get("t1_delta", raw.get("t1_max_delta", 1.0 / 50.0)))
     t1_min = float(raw.get("t1_min", 1.0e-5))
     t1_max_resample_attempts = int(raw.get("t1_max_resample_attempts", 8))
+    bank_loss_raw = raw.get("bank_loss", {}) or {}
+    bank_loss_target = normalize_loss_target(raw.get("bank_loss_target", bank_loss_raw.get("target", "x0")))
+    bank_loss_formula = str(raw.get("bank_loss_formula", bank_loss_raw.get("formula", "mse"))).lower()
+    bank_loss_use_weight = bool(raw.get("bank_loss_use_weight", bank_loss_raw.get("use_weight", False)))
     if bank_size <= 0:
         raise ValueError(f"clean_loop.bank_size must be > 0, got {bank_size}")
     if not (0.0 <= bank_prob <= 1.0):
@@ -57,6 +66,10 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
         raise ValueError(f"clean_loop.t1_delta must be > 0, got {t1_delta}")
     if t1_max_resample_attempts <= 0:
         raise ValueError(f"clean_loop.t1_max_resample_attempts must be > 0, got {t1_max_resample_attempts}")
+    if bank_loss_target == "mudata":
+        raise ValueError("clean_loop bank loss does not support mudata target")
+    if bank_loss_formula not in VALID_FORMULAS:
+        raise ValueError(f"clean_loop.bank_loss_formula must be {' | '.join(sorted(VALID_FORMULAS))}, got {bank_loss_formula!r}")
     return CleanLoopConfig(
         enabled=True,
         bank_size=bank_size,
@@ -70,6 +83,9 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
         t1_delta=t1_delta,
         t1_min=t1_min,
         t1_max_resample_attempts=t1_max_resample_attempts,
+        bank_loss_target=bank_loss_target,
+        bank_loss_formula=bank_loss_formula,
+        bank_loss_use_weight=bank_loss_use_weight,
     )
 
 

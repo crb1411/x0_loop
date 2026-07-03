@@ -147,7 +147,7 @@ class Logger:
             f"(weighted_fresh_loss) {cls._fmt_sig(fresh_loss)} + "
             f"(bank_scale) {cls._fmt_sig(bank_scale)} * "
             f"(bank_weight) {cls._fmt_sig(bank_weight)} * "
-            f"(bank_x0_mse) {cls._fmt_sig(bank_loss)}"
+            f"(weighted_bank_loss) {cls._fmt_sig(bank_loss)}"
         )
         parts: list[str] = [loss_part]
         mid_tbin = cls._format_mid_tbin(kv.get("summary"))
@@ -193,6 +193,9 @@ class Logger:
             ("clean/bank_prob", "bank_prob"),
             ("clean/t_bank", "t_bank"),
             ("clean/t1", "t1"),
+            ("clean/loss_bank_raw", "bank_raw"),
+            ("clean/loss_bank_inner_weight", "bank_inner_w"),
+            ("clean/bank_loss_use_weight", "bank_use_w"),
             ("clean/fresh_add_n", "fresh_add_n"),
             ("clean/bank_add_n", "bank_add_n"),
             ("clean/warmup_left", "warmup_left"),

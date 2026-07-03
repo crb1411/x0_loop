@@ -13,7 +13,7 @@ from x0loop.aug.base import BaseAugment
 from x0loop.core.process_base import BaseProcess, ForwardBatch as ProcessForwardBatch
 from x0loop.core.time_sampling import build_time_sampler
 from x0loop.losses.adversarial import accuracy_metrics, adversarial_weight, build_adversarial_config, discriminator_loss, generator_loss, r1_penalty, t_weight
-from x0loop.losses.atomic import regress
+from x0loop.losses.atomic import LOSS_FUNCTIONS, regress
 from x0loop.losses.spec import build_loss
 from x0loop.models.denoiser import Denoiser
 from x0loop.training.clean_loop import (
@@ -241,6 +241,48 @@ def _diagnostic_losses(process: BaseProcess, fb: ProcessForwardBatch, out: torch
     return diag
 
 
+def _endpoint_from_x0_xt(process: BaseProcess, xt: torch.Tensor, t: torch.Tensor, x0: torch.Tensor) -> torch.Tensor:
+    alpha = process.schedule.alpha(t)
+    sigma = process.schedule.sigma(t)
+    a = process._reshape_coeff(alpha, xt)
+    s = process._reshape_coeff(sigma, xt)
+    return (xt - a * x0) / s.clamp_min(1.0e-12)
+
+
+def _bank_loss_dict(
+    *,
+    clean_loop_cfg: CleanLoopConfig,
+    loss_fn,
+    process: BaseProcess,
+    bank_x: torch.Tensor,
+    bank_t: torch.Tensor,
+    bank_x0: torch.Tensor,
+    bank_out: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    endpoint = _endpoint_from_x0_xt(process, bank_x, bank_t, bank_x0)
+    fb = ProcessForwardBatch(x0=bank_x0, t=bank_t, xt=bank_x, endpoint=endpoint)
+    raw = LOSS_FUNCTIONS[clean_loop_cfg.bank_loss_target](
+        process,
+        fb,
+        bank_out,
+        formula=clean_loop_cfg.bank_loss_formula,
+    )
+    weighted = raw
+    outer_weight = torch.ones_like(raw)
+    if clean_loop_cfg.bank_loss_use_weight:
+        matching_atoms = [atom for atom in loss_fn.atoms if atom.target == clean_loop_cfg.bank_loss_target]
+        if matching_atoms:
+            weighted = sum(atom.weight_term(raw, fb) for atom in matching_atoms)
+        outer_weight = loss_fn.outer_weight(fb, weighted)
+        weighted = outer_weight * weighted
+    return {
+        "loss": weighted.mean(),
+        "raw": raw.mean(),
+        "weight": outer_weight.mean(),
+        "pred_x0": process.x0_from_output(bank_x, bank_t, bank_out, aux={}),
+    }
+
+
 def compute_forward_batch(
     *,
     cfg: dict,
@@ -302,11 +344,23 @@ def compute_forward_batch(
         loss_dict = denoiser.loss_fn(process, fresh_fb, fresh_out)
         bank_out = model_out[n_fresh:] if bank_x is not None else None
         bank_loss = None
+        bank_loss_raw = None
+        bank_loss_weight = None
         bank_pred_x0 = None
         if bank_x is not None and bank_t is not None and bank_out is not None and bank_x0 is not None:
-            bank_pred_x0 = process.x0_from_output(bank_x, bank_t, bank_out, aux={})
-            bank_per_example = regress("mse", bank_pred_x0, bank_x0)
-            bank_loss = bank_per_example.mean()
+            bank_loss_info = _bank_loss_dict(
+                clean_loop_cfg=clean_loop_cfg,
+                loss_fn=denoiser.loss_fn,
+                process=process,
+                bank_x=bank_x,
+                bank_t=bank_t,
+                bank_x0=bank_x0,
+                bank_out=bank_out,
+            )
+            bank_loss = bank_loss_info["loss"]
+            bank_loss_raw = bank_loss_info["raw"]
+            bank_loss_weight = bank_loss_info["weight"]
+            bank_pred_x0 = bank_loss_info["pred_x0"]
 
         with torch.no_grad():
             unweighted = _diagnostic_losses(process, fresh_fb, fresh_out)
@@ -336,8 +390,11 @@ def compute_forward_batch(
         extra_metrics.update({
             "fresh/loss_contrib": fresh_contrib.detach(),
             "clean/loss_bank": 0.0,
+            "clean/loss_bank_raw": 0.0,
+            "clean/loss_bank_inner_weight": 0.0,
             "clean/loss_bank_contrib": 0.0,
             "clean/loss_bank_weight": clean_loop_cfg.loss_bank_weight,
+            "clean/bank_loss_use_weight": float(clean_loop_cfg.bank_loss_use_weight),
             "clean/bank_scale": float(n_bank) / float(bsz),
             "clean/warmup_left": float(max(0, clean_loop_cfg.warmup_steps - step)),
         })
@@ -347,8 +404,11 @@ def compute_forward_batch(
             total_loss = total_loss + bank_contrib
             extra_metrics.update({
                 "clean/loss_bank": bank_loss.detach(),
+                "clean/loss_bank_raw": bank_loss_raw.detach() if bank_loss_raw is not None else bank_loss.detach(),
+                "clean/loss_bank_inner_weight": bank_loss_weight.detach() if bank_loss_weight is not None else torch.ones_like(bank_loss).detach(),
                 "clean/loss_bank_contrib": bank_contrib.detach(),
                 "clean/loss_bank_weight": clean_loop_cfg.loss_bank_weight,
+                "clean/bank_loss_use_weight": float(clean_loop_cfg.bank_loss_use_weight),
                 "clean/bank_scale": bank_scale,
                 "clean/bank_age": (float(step) - bank_steps.detach().float().mean()).clamp_min(0.0),
             })

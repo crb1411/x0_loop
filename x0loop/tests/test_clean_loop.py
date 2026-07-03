@@ -16,6 +16,7 @@ def test_clean_loop_config_accepts_requested_aliases():
             "bank_input_mode": "step",
             "t1_sampler": "local_uniform",
             "t1_delta": 0.02,
+            "bank_loss": {"target": "v", "formula": "mse", "use_weight": True},
         },
     })
 
@@ -29,6 +30,9 @@ def test_clean_loop_config_accepts_requested_aliases():
     assert cfg.bank_input_mode == "step"
     assert cfg.t1_sampler == "local_uniform"
     assert cfg.t1_delta == 0.02
+    assert cfg.bank_loss_target == "v"
+    assert cfg.bank_loss_formula == "mse"
+    assert cfg.bank_loss_use_weight
 
 
 def test_clean_loop_bank_fifo_capacity_and_sample_shapes():

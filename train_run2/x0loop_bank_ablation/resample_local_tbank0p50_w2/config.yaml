@@ -58,6 +58,10 @@ clean_loop:
   t1_sampler: local_uniform
   t1_delta: 0.02
   t1_min: 1.0e-5
+  bank_loss:
+    target: v
+    formula: mse
+    use_weight: true
 loss:
   outer_weight: skew_triangular
   outer_weight_power: 1.0
