@@ -32,6 +32,7 @@ from x0loop.training.evaluation import run_eval_if_due
 from x0loop.training.generative_eval import run_final_generative_eval, run_generative_eval_if_due
 from x0loop.training.checkpointing import save_checkpoint_if_due, save_final_checkpoint
 from x0loop.training.sampling import apply_classifier_free_label_dropout, run_mudata_observation_if_due, run_sampling_if_due
+from x0loop.training.trainset_observation import run_trainset_observation_if_due
 from x0loop.utils.ema import EMA
 from x0loop.utils.fsdp import clip_grad_norm
 from x0loop.utils.logger import Logger, MetricLogger
@@ -301,9 +302,7 @@ def compute_forward_batch(
 ) -> TrainForwardBatch:
     x0 = x0.to(runtime.device, non_blocking=True)
     bsz = x0.shape[0]
-    cond = y.to(runtime.device, non_blocking=True) if (use_label_cond and isinstance(y, torch.Tensor)) else None
-    if cond is not None:
-        cond = apply_classifier_free_label_dropout(cond, null_class_id=int(model_ctx.model_cfg.num_classes), drop_prob=float(cfg["train"].get("class_dropout_prob", 0.0)))
+    raw_label = y.to(runtime.device, non_blocking=True) if (use_label_cond and isinstance(y, torch.Tensor)) else None
     if augment_mode == "data_only":
         x0 = augment.apply(x0, augment.sample_params(bsz, device=runtime.device))
 
@@ -317,10 +316,28 @@ def compute_forward_batch(
         raise ValueError("clean_loop requires at least one fresh sample per batch; reduce clean_loop.bank_prob.")
 
     fresh_x0 = x0[:n_fresh]
-    fresh_cond = cond[:n_fresh] if cond is not None else None
-    bank_x = bank_cond = bank_x0 = bank_t = bank_steps = None
+    fresh_label = raw_label[:n_fresh] if raw_label is not None else None
+    fresh_cond = None
+    bank_x = bank_cond = bank_x0 = bank_t = bank_steps = bank_label = None
     if clean_enabled and n_bank > 0:
-        bank_x, bank_cond, bank_x0, bank_t, bank_steps = clean_loop_bank.sample(n_bank, device=runtime.device, dtype=x0.dtype)
+        bank_x, bank_cond, bank_x0, bank_t, bank_steps, bank_label = clean_loop_bank.sample(n_bank, device=runtime.device, dtype=x0.dtype)
+    bank_raw_label = bank_label if bank_label is not None else bank_cond
+
+    model_cond = None
+    bank_model_cond = None
+    if fresh_label is not None:
+        model_cond_raw = fresh_label
+        if bank_x is not None:
+            if bank_raw_label is None:
+                raise ValueError("clean_loop bank was created without labels but current training uses labels.")
+            model_cond_raw = torch.cat([fresh_label, bank_raw_label], dim=0)
+        model_cond = apply_classifier_free_label_dropout(
+            model_cond_raw,
+            null_class_id=int(model_ctx.model_cfg.num_classes),
+            drop_prob=float(cfg["train"].get("class_dropout_prob", 0.0)),
+        )
+        fresh_cond = model_cond[:n_fresh]
+        bank_model_cond = model_cond[n_fresh:] if bank_x is not None else None
 
     with torch.autocast(device_type=runtime.device.type, dtype=amp_dtype_for_precision(model_ctx.precision), enabled=(model_ctx.precision in {"bf16", "fp16"})):
         if denoiser.loss_fn is None:
@@ -329,15 +346,10 @@ def compute_forward_batch(
         fresh_t_model = denoiser.training_time_condition(fresh_fb.t)
         model_x = fresh_fb.xt
         model_t = fresh_t_model
-        model_cond = fresh_cond
         if bank_x is not None:
             bank_t = bank_t.to(device=runtime.device, dtype=fresh_fb.t.dtype)
             model_x = torch.cat([model_x, bank_x], dim=0)
             model_t = torch.cat([model_t, bank_t], dim=0)
-            if fresh_cond is not None:
-                if bank_cond is None:
-                    raise ValueError("clean_loop bank was created without labels but current training uses labels.")
-                model_cond = torch.cat([fresh_cond, bank_cond], dim=0)
 
         model_out = denoiser.forward(model_x, model_t, cond=model_cond)
         fresh_out = model_out[:n_fresh]
@@ -432,11 +444,13 @@ def compute_forward_batch(
         add_x_in = fresh_xt1_hat_all[fresh_add_mask]
         add_x0 = fresh_fb.x0[fresh_add_mask]
         add_t = fresh_add_t1_all[fresh_add_mask]
-        add_cond = fresh_cond[fresh_add_mask] if fresh_cond is not None else None
+        add_cond = fresh_label[fresh_add_mask] if fresh_label is not None else None
+        add_label = fresh_label[fresh_add_mask] if fresh_label is not None else None
         fresh_add_n = int(fresh_add_mask.detach().sum().item())
         bank_add_n = 0
+        bank_readd_n = 0
         if bank_pred_x0 is not None and bank_x0 is not None:
-            assert bank_x is not None and bank_t is not None and bank_out is not None
+            assert bank_x is not None and bank_t is not None and bank_out is not None and bank_steps is not None
             bank_add_t1 = sample_clean_loop_t1(
                 cfg=clean_loop_cfg,
                 t=bank_t,
@@ -452,19 +466,34 @@ def compute_forward_batch(
                 x0_hat=bank_pred_x0.detach(),
                 t1=bank_add_t1,
             )
-            add_x_in = torch.cat([add_x_in, bank_xt1_hat.detach()], dim=0)
-            add_x0 = torch.cat([add_x0, bank_x0], dim=0)
-            add_t = torch.cat([add_t, bank_add_t1], dim=0)
-            bank_add_n = int(bank_pred_x0.shape[0])
-            if add_cond is not None:
-                if bank_cond is None:
-                    raise ValueError("clean_loop bank was created without labels but current training uses labels.")
-                add_cond = torch.cat([add_cond, bank_cond], dim=0)
-            elif fresh_cond is not None:
-                if bank_cond is None:
-                    raise ValueError("clean_loop bank was created without labels but current training uses labels.")
-                add_cond = bank_cond
-        clean_loop_bank.add(x_in=add_x_in, x0=add_x0, t=add_t, cond=add_cond, step=step)
+            bank_age = (float(step) - bank_steps.detach().float()).clamp_min(0.0)
+            if clean_loop_cfg.max_bank_readd_age is None:
+                bank_readd_mask = torch.ones_like(bank_age, dtype=torch.bool)
+            else:
+                bank_readd_mask = bank_age < float(clean_loop_cfg.max_bank_readd_age)
+            bank_readd_n = int(bank_readd_mask.detach().sum().item())
+            if bank_readd_n > 0:
+                add_x_in = torch.cat([add_x_in, bank_xt1_hat.detach()[bank_readd_mask]], dim=0)
+                add_x0 = torch.cat([add_x0, bank_x0[bank_readd_mask]], dim=0)
+                add_t = torch.cat([add_t, bank_add_t1[bank_readd_mask]], dim=0)
+                bank_add_n = bank_readd_n
+                if add_label is not None:
+                    if bank_raw_label is None:
+                        raise ValueError("clean_loop bank was created without labels but current training uses labels.")
+                    add_label = torch.cat([add_label, bank_raw_label[bank_readd_mask]], dim=0)
+                elif fresh_label is not None:
+                    if bank_raw_label is None:
+                        raise ValueError("clean_loop bank was created without labels but current training uses labels.")
+                    add_label = bank_raw_label[bank_readd_mask]
+                if add_cond is not None:
+                    if bank_raw_label is None:
+                        raise ValueError("clean_loop bank was created without labels but current training uses labels.")
+                    add_cond = torch.cat([add_cond, bank_raw_label[bank_readd_mask]], dim=0)
+                elif fresh_cond is not None:
+                    if bank_raw_label is None:
+                        raise ValueError("clean_loop bank was created without labels but current training uses labels.")
+                    add_cond = bank_raw_label[bank_readd_mask]
+        clean_loop_bank.add(x_in=add_x_in, x0=add_x0, t=add_t, cond=add_cond, step=step, label=add_label)
         extra_metrics.update({
             "clean/bank_size": float(len(clean_loop_bank)),
             "clean/bank_prob": clean_loop_cfg.bank_prob,
@@ -475,8 +504,30 @@ def compute_forward_batch(
             "clean/t1": add_t.detach().float().mean() if add_t.numel() > 0 else 0.0,
             "clean/fresh_add_n": float(fresh_add_n),
             "clean/bank_add_n": float(bank_add_n),
+            "clean/bank_readd_n": float(bank_readd_n),
+            "clean/max_bank_readd_age": -1.0 if clean_loop_cfg.max_bank_readd_age is None else float(clean_loop_cfg.max_bank_readd_age),
         })
-    return TrainForwardBatch(loss=total_loss, loss_by_target=unweighted, batch_size=bsz, cond=fresh_cond, fb=fresh_fb, out=fresh_out, extra_metrics=extra_metrics)
+    trainset_observe = {
+        "fresh": {
+            "input": fresh_fb.xt.detach(),
+            "x0": fresh_fb.x0.detach(),
+            "pred_x0": fresh_x0_hat.detach(),
+            "t": fresh_fb.t.detach(),
+            "label": fresh_label.detach() if fresh_label is not None else None,
+            "cond": fresh_cond.detach() if fresh_cond is not None else None,
+        },
+    }
+    if bank_x is not None and bank_x0 is not None and bank_t is not None:
+        trainset_observe["bank"] = {
+            "input": bank_x.detach(),
+            "x0": bank_x0.detach(),
+            "pred_x0": bank_pred_x0.detach() if bank_pred_x0 is not None else None,
+            "t": bank_t.detach(),
+            "label": bank_raw_label.detach() if bank_raw_label is not None else None,
+            "cond": bank_model_cond.detach() if bank_model_cond is not None else None,
+            "age": (float(step) - bank_steps.detach().float()).clamp_min(0.0) if bank_steps is not None else None,
+        }
+    return TrainForwardBatch(loss=total_loss, loss_by_target=unweighted, batch_size=bsz, cond=fresh_cond, fb=fresh_fb, out=fresh_out, extra_metrics=extra_metrics, trainset_observe=trainset_observe)
 
 
 def backward_loss(loss: torch.Tensor, *, current_accum_steps: int, scaler: torch.amp.GradScaler | None) -> None:
@@ -797,6 +848,7 @@ def train(cfg: dict) -> None:
                 run_eval_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, schedule=schedule, time_sampler=time_sampler, process=process, loss_fn=loss_fn, data_ctx=data_ctx, resume=resume, use_label_cond=use_label_cond)
                 run_sampling_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, loop_cfg=loop_cfg, resume=resume, cond=fwd.cond, use_label_cond=use_label_cond)
                 run_mudata_observation_if_due(cfg=cfg, runtime=runtime, process=process, resume=resume)
+                run_trainset_observation_if_due(cfg=cfg, runtime=runtime, loop_cfg=loop_cfg, resume=resume, epoch=epoch, micro_step=micro_step, observe=fwd.trainset_observe)
                 extra_state = None
                 if discriminator is not None:
                     extra_state = {"discriminator": discriminator.state_dict()}
