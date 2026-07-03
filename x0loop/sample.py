@@ -117,6 +117,7 @@ def main():
                 if args.posterior_noise_scale is not None
                 else cfg["sample"].get("posterior_noise_scale", None)
             ),
+            refine_time=float(cfg["sample"].get("refine_time", 0.5)),
         )
 
     if is_main_process():

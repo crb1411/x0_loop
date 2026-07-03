@@ -24,7 +24,7 @@ process:
   output_target: x0
   sampler: heun
   endpoint: learnable_mu
-  endpoint_beta: 0.9
+  endpoint_beta: 0.8
   predict_mudata: false
   mudata_init_mean: 0.0
   mudata_init_std: 1.0
@@ -36,18 +36,33 @@ time_sampler:
   std: 1.0
   min_t: 0.001
   max_t: 0.999
-# time_condition_jitter:
-#   enabled: true
-#   mean: 0.02
-#   std: 0.02
-#   prob: 1.0
-#   min_t: 0.001
-#   max_t: 0.999
+time_condition_jitter:
+  enabled: true
+  mean: 0.02
+  std: 0.02
+  prob: 1.0
+  min_t: 0.001
+  max_t: 0.999
+model_conditioning:
+  ignore_time: false
+  time_constant: 0.5
+clean_loop:
+  enabled: true
+  bank_size: 4096
+  bank_prob: 0.50
+  warmup_steps: 10000
+  loss_bank_weight: 2.0
+  time_constant: 0.5
+  t_bank: 0.50
+  bank_input_mode: x0_hat_resample
+  t1_sampler: local_uniform
+  t1_delta: 0.02
+  t1_min: 1.0e-5
 loss:
   outer_weight: skew_triangular
   outer_weight_power: 1.0
   outer_weight_floor: 0.0
-  outer_weight_skew: 0.3
+  outer_weight_skew: 0.22
   terms:
   - target: v
     formula: mse
@@ -62,15 +77,15 @@ augment:
 train:
   seed: 42
   deterministic: false
-  epochs: 300
+  epochs: 400
   batch_size: 256
   gradient_accumulation_steps: 1
-  class_dropout_prob: 0.15
+  class_dropout_prob: 0.10
   num_workers: 8
-  lr: 0.00015
+  lr: 0.00030
   lr_scheduler:
     name: cosine
-    max_lr: 0.00015
+    max_lr: 0.00030
     min_lr: 5.0e-05
     warmup_steps: 10000
     cosine_steps: 50000
@@ -150,5 +165,5 @@ compile:
   mode: default
   fullgraph: false
   dynamic: false
-_config_path: /data/seek/aigc/x0_loop/train_run/ablations/615_learnable_endpoint/base2_infer_tshift_p0p01/config.yaml
+_config_path: /data/seek/aigc/x0_loop/train_run2/x0loop_bank_ablation/resample_local_tbank0p50_w2/config.yaml
 _runtime_config_path: /data/seek/aigc/x0_loop/x0loop/configs/runtime/ddp_checkpoint_compile.yaml

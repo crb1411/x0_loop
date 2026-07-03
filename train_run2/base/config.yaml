@@ -126,7 +126,7 @@ gen_eval:
     batch_size: 256
     steps: 20
     sampler: heun
-    guidance_scale: 0.0
+    guidance_scale: 2.2
     guidance_schedule: null
 distributed:
   mode: ddp

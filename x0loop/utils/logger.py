@@ -182,7 +182,7 @@ class Logger:
         clean = []
         clean_int_values = [
             kv[key]
-            for key in ("clean/bank_size", "clean/bank_n", "clean/fresh_n", "clean/warmup_left")
+            for key in ("clean/bank_size", "clean/bank_n", "clean/fresh_n", "clean/warmup_left", "clean/fresh_add_n", "clean/bank_add_n")
             if key in kv
         ]
         clean_int_width = max(5, *(len(cls._fmt_int(v)) for v in clean_int_values)) if clean_int_values else 5
@@ -191,11 +191,15 @@ class Logger:
             ("clean/bank_n", "bank_n"),
             ("clean/fresh_n", "fresh_n"),
             ("clean/bank_prob", "bank_prob"),
+            ("clean/t_bank", "t_bank"),
+            ("clean/t1", "t1"),
+            ("clean/fresh_add_n", "fresh_add_n"),
+            ("clean/bank_add_n", "bank_add_n"),
             ("clean/warmup_left", "warmup_left"),
             ("clean/bank_age", "bank_age"),
         ):
             if key in kv:
-                if key in {"clean/bank_size", "clean/bank_n", "clean/fresh_n", "clean/warmup_left"}:
+                if key in {"clean/bank_size", "clean/bank_n", "clean/fresh_n", "clean/warmup_left", "clean/fresh_add_n", "clean/bank_add_n"}:
                     clean.append(f"{label}={cls._fmt_int(kv[key], width=clean_int_width)}")
                 else:
                     clean.append(f"{label}={cls._fmt_num(kv[key])}")

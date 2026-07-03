@@ -133,9 +133,9 @@ class Denoiser(nn.Module):
         null_cond=None,
         guidance_scale: float = 1.0,
         guidance_schedule=None,
-        time_condition_shift=None,
         sampler: str | None = None,
         posterior_noise_scale: float | None = None,
+        refine_time: float = 0.5,
     ) -> dict[str, Any]:
         return self.process.sample(
             model=self,
@@ -148,7 +148,7 @@ class Denoiser(nn.Module):
             null_cond=null_cond,
             guidance_scale=guidance_scale,
             guidance_schedule=guidance_schedule,
-            time_condition_shift=time_condition_shift,
             sampler=sampler,
             posterior_noise_scale=posterior_noise_scale,
+            refine_time=refine_time,
         )

@@ -29,8 +29,8 @@ def _cfg(cfg: dict) -> dict[str, Any]:
         "sampler": str(gen_cfg.get("sampler", sample_cfg.get("sampler", "heun"))),
         "guidance_scale": float(gen_cfg.get("guidance_scale", 3.0)),
         "guidance_schedule": gen_cfg.get("guidance_schedule", sample_cfg.get("guidance_schedule", None)),
-        "time_condition_shift": gen_cfg.get("time_condition_shift", sample_cfg.get("time_condition_shift", None)),
         "posterior_noise_scale": gen_cfg.get("posterior_noise_scale", sample_cfg.get("posterior_noise_scale", None)),
+        "refine_time": float(gen_cfg.get("refine_time", sample_cfg.get("refine_time", 0.5))),
         "input2": gen_cfg.get("input2", None),
         "fid_statistics_file": gen_cfg.get("fid_statistics_file", None),
         "datasets_root": gen_cfg.get("datasets_root", None),
@@ -53,11 +53,11 @@ def _cfg(cfg: dict) -> dict[str, Any]:
         "num_samples": int(final_cfg.get("num_samples", gen_cfg.get("final_num_samples", 20000))),
         "batch_size": int(final_cfg.get("batch_size", gen_cfg.get("final_batch_size", out["batch_size"]))),
         "steps": int(final_cfg.get("steps", gen_cfg.get("final_steps", 50))),
-            "sampler": str(final_cfg.get("sampler", gen_cfg.get("final_sampler", out["sampler"]))),
-            "guidance_scale": float(final_cfg.get("guidance_scale", gen_cfg.get("final_guidance_scale", out["guidance_scale"]))),
-            "guidance_schedule": final_cfg.get("guidance_schedule", gen_cfg.get("final_guidance_schedule", out["guidance_schedule"])),
-            "time_condition_shift": final_cfg.get("time_condition_shift", gen_cfg.get("final_time_condition_shift", out["time_condition_shift"])),
-        }
+        "sampler": str(final_cfg.get("sampler", gen_cfg.get("final_sampler", out["sampler"]))),
+        "guidance_scale": float(final_cfg.get("guidance_scale", gen_cfg.get("final_guidance_scale", out["guidance_scale"]))),
+        "guidance_schedule": final_cfg.get("guidance_schedule", gen_cfg.get("final_guidance_schedule", out["guidance_schedule"])),
+        "refine_time": float(final_cfg.get("refine_time", gen_cfg.get("final_refine_time", out["refine_time"]))),
+    }
     return out
 
 
@@ -194,9 +194,9 @@ def _export_fake_images(
             null_cond=null_cond,
             guidance_scale=float(gen_cfg["guidance_scale"]),
             guidance_schedule=gen_cfg["guidance_schedule"],
-            time_condition_shift=gen_cfg["time_condition_shift"],
             sampler=str(gen_cfg["sampler"]),
             posterior_noise_scale=gen_cfg["posterior_noise_scale"],
+            refine_time=float(gen_cfg["refine_time"]),
         )
         labels_cpu = cond.detach().cpu() if cond is not None else None
         save_sample_images(result["x"].detach().cpu(), fake_dir, indices=indices, labels=labels_cpu, label_names=label_names, cfg=cfg)
@@ -258,7 +258,7 @@ def _run_generative_eval(
             f"tag={tag}, step={resume.global_step}, num_samples={gen_cfg['num_samples']}, "
             f"steps={gen_cfg['steps']}, sampler={gen_cfg['sampler']}, "
             f"guidance_scale={gen_cfg['guidance_scale']}, guidance_schedule={gen_cfg['guidance_schedule']}, "
-            f"time_condition_shift={gen_cfg['time_condition_shift']}, "
+            f"refine_time={gen_cfg['refine_time']}, "
             f"model_conditioning={cfg.get('model_conditioning', {'ignore_time': False})}"
         )
     if runtime.is_distributed:
@@ -305,7 +305,7 @@ def _run_generative_eval(
             "sampler": str(gen_cfg["sampler"]),
             "guidance_scale": float(gen_cfg["guidance_scale"]),
             "guidance_schedule": gen_cfg["guidance_schedule"],
-            "time_condition_shift": gen_cfg["time_condition_shift"],
+            "refine_time": float(gen_cfg["refine_time"]),
             "model_conditioning": cfg.get("model_conditioning", {"ignore_time": False}),
             "keep_images_count": int(gen_cfg["keep_images_count"]),
             "metrics": metrics,

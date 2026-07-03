@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "${ROOT}"
 
-RUN_NAME="base"
-CONFIG_PATH="${ROOT}/train_run2/${RUN_NAME}/config.yaml"
+RUN_NAME="resample_sampler_tbank0p75_w2"
+CONFIG_PATH="${ROOT}/train_run2/x0loop_bank_ablation/${RUN_NAME}/config.yaml"
 RUNTIME_CONFIG="${RUNTIME_CONFIG:-${ROOT}/x0loop/configs/runtime/ddp_checkpoint_compile.yaml}"
 TIMESTAMP="${X0LOOP_RUN_TIMESTAMP:-$(date +"%Y%m%d_%H%M%S")}"
-OUT_DIR="${ROOT}/runs2/ignore_time/${RUN_NAME}/${TIMESTAMP}"
+OUT_DIR="${ROOT}/runs2/x0loop_bank_ablation/${RUN_NAME}/${TIMESTAMP}"
 LOG_DIR="${OUT_DIR}/logs"
 LOG_FILE="${LOG_DIR}/launcher.log"
 PID_FILE="${LOG_DIR}/launcher.pid"

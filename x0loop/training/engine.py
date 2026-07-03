@@ -16,7 +16,13 @@ from x0loop.losses.adversarial import accuracy_metrics, adversarial_weight, buil
 from x0loop.losses.atomic import regress
 from x0loop.losses.spec import build_loss
 from x0loop.models.denoiser import Denoiser
-from x0loop.training.clean_loop import CleanLoopBank, CleanLoopConfig, build_clean_loop_config
+from x0loop.training.clean_loop import (
+    CleanLoopBank,
+    CleanLoopConfig,
+    build_clean_loop_bank_input,
+    build_clean_loop_config,
+    sample_clean_loop_t1,
+)
 from x0loop.training.context import ForwardBatch as TrainForwardBatch
 from x0loop.training.context import LoopConfig, ModelContext, ResumeState, RuntimeContext
 from x0loop.training.factories import build_augment, build_data_context, build_discriminator, build_model_context, build_process, build_schedule, init_runtime, load_resume_state
@@ -270,9 +276,9 @@ def compute_forward_batch(
 
     fresh_x0 = x0[:n_fresh]
     fresh_cond = cond[:n_fresh] if cond is not None else None
-    bank_x = bank_cond = bank_x0 = bank_steps = None
+    bank_x = bank_cond = bank_x0 = bank_t = bank_steps = None
     if clean_enabled and n_bank > 0:
-        bank_x, bank_cond, bank_x0, bank_steps = clean_loop_bank.sample(n_bank, device=runtime.device, dtype=x0.dtype)
+        bank_x, bank_cond, bank_x0, bank_t, bank_steps = clean_loop_bank.sample(n_bank, device=runtime.device, dtype=x0.dtype)
 
     with torch.autocast(device_type=runtime.device.type, dtype=amp_dtype_for_precision(model_ctx.precision), enabled=(model_ctx.precision in {"bf16", "fp16"})):
         if denoiser.loss_fn is None:
@@ -282,9 +288,8 @@ def compute_forward_batch(
         model_x = fresh_fb.xt
         model_t = fresh_t_model
         model_cond = fresh_cond
-        bank_t = None
         if bank_x is not None:
-            bank_t = torch.full((bank_x.shape[0],), clean_loop_cfg.time_constant, device=runtime.device, dtype=fresh_fb.t.dtype)
+            bank_t = bank_t.to(device=runtime.device, dtype=fresh_fb.t.dtype)
             model_x = torch.cat([model_x, bank_x], dim=0)
             model_t = torch.cat([model_t, bank_t], dim=0)
             if fresh_cond is not None:
@@ -348,23 +353,68 @@ def compute_forward_batch(
                 "clean/bank_age": (float(step) - bank_steps.detach().float().mean()).clamp_min(0.0),
             })
 
-        add_x_in = fresh_x0_hat
-        add_x0 = fresh_fb.x0
-        add_cond = fresh_cond
+        fresh_add_mask = fresh_fb.t > clean_loop_cfg.t_bank
+        fresh_add_t1_all = sample_clean_loop_t1(
+            cfg=clean_loop_cfg,
+            t=fresh_fb.t,
+            time_sampler=denoiser.time_sampler,
+            device=runtime.device,
+        )
+        fresh_xt1_hat_all = build_clean_loop_bank_input(
+            cfg=clean_loop_cfg,
+            process=process,
+            xt=fresh_fb.xt,
+            t=fresh_fb.t,
+            model_out=fresh_out.detach(),
+            x0_hat=fresh_x0_hat,
+            t1=fresh_add_t1_all,
+        )
+        add_x_in = fresh_xt1_hat_all[fresh_add_mask]
+        add_x0 = fresh_fb.x0[fresh_add_mask]
+        add_t = fresh_add_t1_all[fresh_add_mask]
+        add_cond = fresh_cond[fresh_add_mask] if fresh_cond is not None else None
+        fresh_add_n = int(fresh_add_mask.detach().sum().item())
+        bank_add_n = 0
         if bank_pred_x0 is not None and bank_x0 is not None:
-            add_x_in = torch.cat([add_x_in, bank_pred_x0.detach()], dim=0)
+            assert bank_x is not None and bank_t is not None and bank_out is not None
+            bank_add_t1 = sample_clean_loop_t1(
+                cfg=clean_loop_cfg,
+                t=bank_t,
+                time_sampler=denoiser.time_sampler,
+                device=runtime.device,
+            )
+            bank_xt1_hat = build_clean_loop_bank_input(
+                cfg=clean_loop_cfg,
+                process=process,
+                xt=bank_x,
+                t=bank_t,
+                model_out=bank_out.detach(),
+                x0_hat=bank_pred_x0.detach(),
+                t1=bank_add_t1,
+            )
+            add_x_in = torch.cat([add_x_in, bank_xt1_hat.detach()], dim=0)
             add_x0 = torch.cat([add_x0, bank_x0], dim=0)
+            add_t = torch.cat([add_t, bank_add_t1], dim=0)
+            bank_add_n = int(bank_pred_x0.shape[0])
             if add_cond is not None:
                 if bank_cond is None:
                     raise ValueError("clean_loop bank was created without labels but current training uses labels.")
                 add_cond = torch.cat([add_cond, bank_cond], dim=0)
-        clean_loop_bank.add(x_in=add_x_in, x0=add_x0, cond=add_cond, step=step)
+            elif fresh_cond is not None:
+                if bank_cond is None:
+                    raise ValueError("clean_loop bank was created without labels but current training uses labels.")
+                add_cond = bank_cond
+        clean_loop_bank.add(x_in=add_x_in, x0=add_x0, t=add_t, cond=add_cond, step=step)
         extra_metrics.update({
             "clean/bank_size": float(len(clean_loop_bank)),
             "clean/bank_prob": clean_loop_cfg.bank_prob,
             "clean/bank_n": float(n_bank),
             "clean/fresh_n": float(n_fresh),
             "clean/fresh_scale": fresh_scale,
+            "clean/t_bank": clean_loop_cfg.t_bank,
+            "clean/t1": add_t.detach().float().mean() if add_t.numel() > 0 else 0.0,
+            "clean/fresh_add_n": float(fresh_add_n),
+            "clean/bank_add_n": float(bank_add_n),
         })
     return TrainForwardBatch(loss=total_loss, loss_by_target=unweighted, batch_size=bsz, cond=fresh_cond, fb=fresh_fb, out=fresh_out, extra_metrics=extra_metrics)
 

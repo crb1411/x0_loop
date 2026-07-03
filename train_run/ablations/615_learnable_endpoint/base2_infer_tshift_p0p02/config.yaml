@@ -109,7 +109,6 @@ gen_eval:
   sampler: heun
   guidance_scale: 2.2
   guidance_schedule: null
-  time_condition_shift: 0.02
   input2: cifar10-train
   datasets_root: /root/data/cifar10_data
   datasets_download: false
@@ -129,7 +128,6 @@ gen_eval:
     sampler: heun
     guidance_scale: 2.2
     guidance_schedule: null
-    time_condition_shift: 0.02
 distributed:
   mode: ddp
   backend: nccl

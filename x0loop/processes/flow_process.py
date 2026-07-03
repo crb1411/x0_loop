@@ -138,9 +138,12 @@ class FlowProcess(BaseProcess):
             return "unipc"
         if name in {"unipc3", "unipc_3"}:
             return "unipc3"
-        if name not in {"euler", "heun", "dpmpp_2m", "unipc", "unipc3"}:
+        if name in {"clean_loop", "cleanloop", "refine", "x0_refine", "x0hat_refine"}:
+            return "clean_loop"
+        if name not in {"euler", "heun", "dpmpp_2m", "unipc", "unipc3", "clean_loop"}:
             raise ValueError(
-                f"Unknown flow sampler: {sampler!r}. Use 'euler', 'heun', 'dpmpp_2m', 'unipc' or 'unipc3'."
+                "Unknown flow sampler: "
+                f"{sampler!r}. Use 'euler', 'heun', 'dpmpp_2m', 'unipc', 'unipc3' or 'clean_loop'."
             )
         return name
 
@@ -158,6 +161,13 @@ class FlowProcess(BaseProcess):
             out = out_uncond + float(guidance_scale) * (out - out_uncond)
         return out
 
+    @staticmethod
+    def _model_time(model, path_t: torch.Tensor) -> torch.Tensor:
+        model_time_condition = getattr(model, "model_time_condition", None)
+        if callable(model_time_condition):
+            return model_time_condition(path_t)
+        return path_t
+
     @torch.no_grad()
     def sample(
         self,
@@ -172,12 +182,26 @@ class FlowProcess(BaseProcess):
         null_cond=None,
         guidance_scale: float = 1.0,
         guidance_schedule=None,
-        time_condition_shift=None,
         sampler: str | None = None,
         posterior_noise_scale: float | None = None,
+        refine_time: float = 0.5,
     ) -> dict:
         del rng, posterior_noise_scale
         method = self._normalize_sampler(self.sampler if sampler is None else sampler)
+        if method == "clean_loop":
+            return self._sample_clean_loop_refine(
+                model=model,
+                steps=steps,
+                shape=shape,
+                device=device,
+                dtype=dtype,
+                return_trace=return_trace,
+                cond=cond,
+                null_cond=null_cond,
+                guidance_scale=guidance_scale,
+                guidance_schedule=guidance_schedule,
+                refine_time=refine_time,
+            )
         x = self.prior_sample(shape=shape, device=device, dtype=dtype)
         trace = []
         last_x0_hat = None
@@ -189,7 +213,7 @@ class FlowProcess(BaseProcess):
         total = len(pairs)
         for index, (t_scalar, s_scalar) in enumerate(pairs):
             t = torch.full((shape[0],), float(t_scalar.item()), device=device, dtype=torch.float32)
-            t_model = self.shifted_model_time(t, time_condition_shift)
+            t_model = self._model_time(model, t)
             step_guidance_scale = self.guidance_scale_at_t(guidance_scale, t, guidance_schedule)
             out = self._model_output(model, x, t_model, cond, null_cond, step_guidance_scale)
             xt = x
@@ -215,7 +239,7 @@ class FlowProcess(BaseProcess):
                     # Heun averages the velocity before and after an Euler predictor.
                     x_euler = x + dt * velocity
                     s = torch.full((shape[0],), float(s_scalar.item()), device=device, dtype=torch.float32)
-                    s_model = self.shifted_model_time(s, time_condition_shift)
+                    s_model = self._model_time(model, s)
                     s_guidance_scale = self.guidance_scale_at_t(guidance_scale, s, guidance_schedule)
                     out_s = self._model_output(model, x_euler, s_model, cond, null_cond, s_guidance_scale)
                     velocity_s = self._velocity(x_euler, s, out_s)
@@ -227,13 +251,61 @@ class FlowProcess(BaseProcess):
             if return_trace:
                 trace.append({
                     "t": t_scalar.detach().cpu(),
-                    "t_model": t_model[0].detach().cpu(),
+                    "path_t": t_scalar.detach().cpu(),
+                    "model_t": t_model[0].detach().cpu(),
                     "guidance_scale": float(step_guidance_scale),
                     "x": xt.detach().cpu(),
                     "x0_hat": x0_hat.detach().cpu(),
                 })
 
         result: dict[str, Any] = {"x": x, "x0_hat": last_x0_hat}
+        if return_trace:
+            result["trace"] = trace
+        return result
+
+    def _sample_clean_loop_refine(
+        self,
+        *,
+        model,
+        steps: int,
+        shape,
+        device,
+        dtype,
+        return_trace: bool,
+        cond=None,
+        null_cond=None,
+        guidance_scale: float = 1.0,
+        guidance_schedule=None,
+        refine_time: float = 0.5,
+    ) -> dict:
+        steps = int(steps)
+        if steps <= 0:
+            raise ValueError(f"clean_loop sampler requires steps > 0, got {steps}")
+        refine_time = float(refine_time)
+        if not (0.0 <= refine_time <= 1.0):
+            raise ValueError(f"clean_loop refine_time must be in [0,1], got {refine_time}")
+
+        x = self.prior_sample(shape=shape, device=device, dtype=dtype)
+        trace = []
+        for index in range(steps):
+            t_value = 1.0 if index == 0 else refine_time
+            path_t = torch.full((shape[0],), t_value, device=device, dtype=torch.float32)
+            model_t = self._model_time(model, path_t)
+            step_guidance_scale = self.guidance_scale_at_t(guidance_scale, path_t, guidance_schedule)
+            out = self._model_output(model, x, model_t, cond, null_cond, step_guidance_scale)
+            x0_hat = self.x0_from_output(x, path_t, out, aux={})
+            if return_trace:
+                trace.append({
+                    "t": path_t[0].detach().cpu(),
+                    "path_t": path_t[0].detach().cpu(),
+                    "model_t": model_t[0].detach().cpu(),
+                    "guidance_scale": float(step_guidance_scale),
+                    "x": x.detach().cpu(),
+                    "x0_hat": x0_hat.detach().cpu(),
+                })
+            x = x0_hat
+
+        result: dict[str, Any] = {"x": x, "x0_hat": x}
         if return_trace:
             result["trace"] = trace
         return result
