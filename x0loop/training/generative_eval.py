@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import re
 import shutil
 import time
 from contextlib import contextmanager
@@ -37,6 +39,8 @@ def _cfg(cfg: dict) -> dict[str, Any]:
         "datasets_download": bool(gen_cfg.get("datasets_download", False)),
         "keep_images": bool(gen_cfg.get("keep_images", False)),
         "keep_images_count": int(gen_cfg.get("keep_images_count", 0)),
+        "keep_images_per_class": int(gen_cfg.get("keep_images_per_class", 1)),
+        "keep_image_classes": int(gen_cfg.get("keep_image_classes", cfg.get("model", {}).get("num_classes", 10))),
         "verbose": bool(gen_cfg.get("verbose", False)),
         "cache": bool(gen_cfg.get("cache", True)),
         "cache_root": gen_cfg.get("cache_root", None),
@@ -137,6 +141,52 @@ def _prune_fake_images(fake_dir: str, keep_count: int) -> int:
     for path in paths[keep_count:]:
         os.remove(path)
     return min(len(paths), keep_count)
+
+
+_FAKE_LABEL_RE = re.compile(r"_y(?P<label>[^_]+)_x0loop\.png$")
+
+
+def _list_fake_image_paths(fake_dir: str) -> list[str]:
+    paths: list[str] = []
+    if not os.path.isdir(fake_dir):
+        return paths
+    for name in os.listdir(fake_dir):
+        path = os.path.join(fake_dir, name)
+        if os.path.isfile(path):
+            paths.append(path)
+    paths.sort()
+    return paths
+
+
+def _prune_fake_images_by_class(fake_dir: str, *, per_class: int, max_classes: int) -> tuple[int, list[str]]:
+    if per_class <= 0 or max_classes <= 0:
+        return 0, []
+
+    paths = _list_fake_image_paths(fake_dir)
+    groups: dict[str, list[str]] = {}
+    for path in paths:
+        match = _FAKE_LABEL_RE.search(os.path.basename(path))
+        if match is None:
+            continue
+        groups.setdefault(match.group("label"), []).append(path)
+
+    rng = random.SystemRandom()
+    keep: set[str] = set()
+    kept_labels: list[str] = []
+    for label in sorted(groups)[:max_classes]:
+        choices = groups[label]
+        keep.update(rng.sample(choices, min(per_class, len(choices))))
+        kept_labels.append(label)
+
+    # Unconditional or custom datasets may not encode labels in filenames.
+    # Keep a small random visual audit sample instead of deleting everything.
+    if not keep and paths:
+        keep.update(rng.sample(paths, min(per_class * max_classes, len(paths))))
+
+    for path in paths:
+        if path not in keep:
+            os.remove(path)
+    return len(keep), kept_labels
 
 
 @contextmanager
@@ -298,7 +348,11 @@ def _run_generative_eval(
             "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "tag": tag,
             "eval_dir": eval_dir,
-            "fake_dir": fake_dir if gen_cfg["keep_images"] or int(gen_cfg["keep_images_count"]) > 0 else None,
+            "fake_dir": fake_dir if (
+                gen_cfg["keep_images"]
+                or int(gen_cfg["keep_images_count"]) > 0
+                or int(gen_cfg["keep_images_per_class"]) > 0
+            ) else None,
             "num_samples": int(gen_cfg["num_samples"]),
             "batch_size": int(gen_cfg["batch_size"]),
             "steps": int(gen_cfg["steps"]),
@@ -308,20 +362,40 @@ def _run_generative_eval(
             "refine_time": float(gen_cfg["refine_time"]),
             "model_conditioning": cfg.get("model_conditioning", {"ignore_time": False}),
             "keep_images_count": int(gen_cfg["keep_images_count"]),
+            "keep_images_per_class": int(gen_cfg["keep_images_per_class"]),
+            "keep_image_classes": int(gen_cfg["keep_image_classes"]),
             "metrics": metrics,
         }
         if error is not None:
             row["error"] = error
+        cleanup_log: str | None = None
+        keep_count = int(gen_cfg["keep_images_count"])
+        if keep_count > 0:
+            kept = _prune_fake_images(fake_dir, keep_count)
+            row["kept_fake_images"] = kept
+            cleanup_log = f"[gen_eval] kept_fake_images={kept} fake_dir={fake_dir}"
+        elif not gen_cfg["keep_images"]:
+            kept, kept_labels = _prune_fake_images_by_class(
+                fake_dir,
+                per_class=int(gen_cfg["keep_images_per_class"]),
+                max_classes=int(gen_cfg["keep_image_classes"]),
+            )
+            if kept > 0:
+                row["kept_fake_images"] = kept
+                row["kept_fake_labels"] = kept_labels
+                cleanup_log = (
+                    f"[gen_eval] kept_fake_images={kept} "
+                    f"classes={','.join(kept_labels) if kept_labels else 'unlabeled'} "
+                    f"fake_dir={fake_dir}"
+                )
+            else:
+                shutil.rmtree(eval_dir, ignore_errors=True)
         metrics_path = _write_metrics_jsonl(runtime, row)
         runtime.logger.log_text(f"[gen_eval] metrics_jsonl={metrics_path}")
         if error is None:
             runtime.logger.log_text(f"[gen_eval] metrics={_json_ready(metrics)}")
-        keep_count = int(gen_cfg["keep_images_count"])
-        if keep_count > 0:
-            kept = _prune_fake_images(fake_dir, keep_count)
-            runtime.logger.log_text(f"[gen_eval] kept_fake_images={kept} fake_dir={fake_dir}")
-        elif not gen_cfg["keep_images"]:
-            shutil.rmtree(eval_dir, ignore_errors=True)
+        if cleanup_log is not None:
+            runtime.logger.log_text(cleanup_log)
     if runtime.is_distributed:
         dist_utils.barrier()
 
