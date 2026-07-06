@@ -37,7 +37,7 @@ time_sampler:
   min_t: 0.001
   max_t: 0.999
 time_condition_jitter:
-  enabled: false
+  enabled: true
   mean: 0.02
   std: 0.02
   prob: 1.0
@@ -80,7 +80,7 @@ augment:
 train:
   seed: 42
   deterministic: false
-  epochs: 500
+  epochs: 700
   batch_size: 256
   gradient_accumulation_steps: 1
   class_dropout_prob: 0.10
@@ -96,7 +96,7 @@ train:
   max_clip_grad: 10.0
   use_ema: true
   ema_decay: 0.996
-  resume: /data/seek/aigc/x0_loop/runs2/x0loop_bank_ablation/step_local_tbank0p75_w2/20260703_105505/checkpoints/ckpt_step_00078000.pt
+  resume: /data/seek/aigc/x0_loop/runs2/x0loop_bank_ablation/step_age1_p0p3_w0p3_tbank0p4_dt0p2/20260703_164047/checkpoints/ckpt_step_00097500.pt
 logging:
   log_every: 100
   window_size: 100
@@ -175,5 +175,5 @@ compile:
   mode: default
   fullgraph: false
   dynamic: false
-_config_path: /data/seek/aigc/x0_loop/train_run2/x0loop_bank_ablation/step_age1_p0p3_w0p3_tbank0p4_dt0p2/config.yaml
+_config_path: /data/seek/aigc/x0_loop/train_run2/x0loop_bank_ablation/step_age1_p0p3_w0p3_tbank0p4_dt0p2_resume200ep/config.yaml
 _runtime_config_path: /data/seek/aigc/x0_loop/x0loop/configs/runtime/ddp_checkpoint_compile.yaml
