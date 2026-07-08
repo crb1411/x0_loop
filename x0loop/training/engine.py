@@ -318,9 +318,9 @@ def compute_forward_batch(
     fresh_x0 = x0[:n_fresh]
     fresh_label = raw_label[:n_fresh] if raw_label is not None else None
     fresh_cond = None
-    bank_x = bank_cond = bank_x0 = bank_t = bank_steps = bank_label = None
+    bank_x = bank_cond = bank_x0 = bank_t = bank_age = bank_label = None
     if clean_enabled and n_bank > 0:
-        bank_x, bank_cond, bank_x0, bank_t, bank_steps, bank_label = clean_loop_bank.sample(n_bank, device=runtime.device, dtype=x0.dtype)
+        bank_x, bank_cond, bank_x0, bank_t, bank_age, bank_label = clean_loop_bank.sample(n_bank, device=runtime.device, dtype=x0.dtype)
     bank_raw_label = bank_label if bank_label is not None else bank_cond
 
     model_cond = None
@@ -410,7 +410,7 @@ def compute_forward_batch(
             "clean/bank_scale": float(n_bank) / float(bsz),
             "clean/warmup_left": float(max(0, clean_loop_cfg.warmup_steps - step)),
         })
-        if bank_loss is not None and bank_steps is not None and bank_pred_x0 is not None and bank_x0 is not None:
+        if bank_loss is not None and bank_age is not None and bank_pred_x0 is not None and bank_x0 is not None:
             bank_scale = float(n_bank) / float(bsz)
             bank_contrib = bank_scale * clean_loop_cfg.loss_bank_weight * bank_loss
             total_loss = total_loss + bank_contrib
@@ -422,7 +422,7 @@ def compute_forward_batch(
                 "clean/loss_bank_weight": clean_loop_cfg.loss_bank_weight,
                 "clean/bank_loss_use_weight": float(clean_loop_cfg.bank_loss_use_weight),
                 "clean/bank_scale": bank_scale,
-                "clean/bank_age": (float(step) - bank_steps.detach().float().mean()).clamp_min(0.0),
+                "clean/bank_age": bank_age.detach().float().mean(),
             })
 
         fresh_add_mask = fresh_fb.t > clean_loop_cfg.t_bank
@@ -446,11 +446,12 @@ def compute_forward_batch(
         add_t = fresh_add_t1_all[fresh_add_mask]
         add_cond = fresh_label[fresh_add_mask] if fresh_label is not None else None
         add_label = fresh_label[fresh_add_mask] if fresh_label is not None else None
+        add_age = torch.ones_like(add_t, dtype=torch.long)
         fresh_add_n = int(fresh_add_mask.detach().sum().item())
         bank_add_n = 0
         bank_readd_n = 0
         if bank_pred_x0 is not None and bank_x0 is not None:
-            assert bank_x is not None and bank_t is not None and bank_out is not None and bank_steps is not None
+            assert bank_x is not None and bank_t is not None and bank_out is not None and bank_age is not None
             bank_add_t1 = sample_clean_loop_t1(
                 cfg=clean_loop_cfg,
                 t=bank_t,
@@ -466,7 +467,6 @@ def compute_forward_batch(
                 x0_hat=bank_pred_x0.detach(),
                 t1=bank_add_t1,
             )
-            bank_age = (float(step) - bank_steps.detach().float()).clamp_min(0.0)
             if clean_loop_cfg.max_bank_readd_age is None:
                 bank_readd_mask = torch.ones_like(bank_age, dtype=torch.bool)
             else:
@@ -476,6 +476,7 @@ def compute_forward_batch(
                 add_x_in = torch.cat([add_x_in, bank_xt1_hat.detach()[bank_readd_mask]], dim=0)
                 add_x0 = torch.cat([add_x0, bank_x0[bank_readd_mask]], dim=0)
                 add_t = torch.cat([add_t, bank_add_t1[bank_readd_mask]], dim=0)
+                add_age = torch.cat([add_age, bank_age[bank_readd_mask].detach().long() + 1], dim=0)
                 bank_add_n = bank_readd_n
                 if add_label is not None:
                     if bank_raw_label is None:
@@ -493,7 +494,7 @@ def compute_forward_batch(
                     if bank_raw_label is None:
                         raise ValueError("clean_loop bank was created without labels but current training uses labels.")
                     add_cond = bank_raw_label[bank_readd_mask]
-        clean_loop_bank.add(x_in=add_x_in, x0=add_x0, t=add_t, cond=add_cond, step=step, label=add_label)
+        clean_loop_bank.add(x_in=add_x_in, x0=add_x0, t=add_t, cond=add_cond, age=add_age, label=add_label)
         extra_metrics.update({
             "clean/bank_size": float(len(clean_loop_bank)),
             "clean/bank_prob": clean_loop_cfg.bank_prob,
@@ -525,7 +526,7 @@ def compute_forward_batch(
             "t": bank_t.detach(),
             "label": bank_raw_label.detach() if bank_raw_label is not None else None,
             "cond": bank_model_cond.detach() if bank_model_cond is not None else None,
-            "age": (float(step) - bank_steps.detach().float()).clamp_min(0.0) if bank_steps is not None else None,
+            "age": bank_age.detach() if bank_age is not None else None,
         }
     return TrainForwardBatch(loss=total_loss, loss_by_target=unweighted, batch_size=bsz, cond=fresh_cond, fb=fresh_fb, out=fresh_out, extra_metrics=extra_metrics, trainset_observe=trainset_observe)
 

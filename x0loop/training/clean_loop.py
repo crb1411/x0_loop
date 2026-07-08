@@ -60,9 +60,9 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
     if not (0.0 <= t_bank <= 1.0):
         raise ValueError(f"clean_loop.t_bank must be in [0, 1], got {t_bank}")
     if bank_input_mode not in {"step", "x0_hat_resample", "resample"}:
-        raise ValueError("clean_loop.bank_input_mode must be step | x0_hat_resample")
-    if t1_sampler not in {"local_uniform", "fixed_delta", "resample_below_t", "time_sampler"}:
-        raise ValueError("clean_loop.t1_sampler must be local_uniform | fixed_delta | resample_below_t")
+        raise ValueError("clean_loop.bank_input_mode must be step | x0_hat_resample | resample")
+    if t1_sampler not in {"local_uniform", "uniform_below_t", "fixed_delta", "resample_below_t", "time_sampler"}:
+        raise ValueError("clean_loop.t1_sampler must be local_uniform | uniform_below_t | fixed_delta | resample_below_t")
     if not (0.0 <= t1_min < 1.0):
         raise ValueError(f"clean_loop.t1_min must be in [0,1), got {t1_min}")
     if t1_delta <= 0.0:
@@ -96,7 +96,7 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
 
 
 class CleanLoopBank:
-    """Local FIFO ring buffer for (x_t1, raw_label, x0, t1) tuples."""
+    """Local FIFO ring buffer for (x_t1, raw_label, x0, t1, age) tuples."""
 
     def __init__(self, cfg: CleanLoopConfig):
         self.cfg = cfg
@@ -105,7 +105,7 @@ class CleanLoopBank:
         self.t: torch.Tensor | None = None
         self.cond: torch.Tensor | None = None
         self.label: torch.Tensor | None = None
-        self.steps: torch.Tensor | None = None
+        self.ages: torch.Tensor | None = None
         self.next_idx = 0
         self.count = 0
 
@@ -121,24 +121,28 @@ class CleanLoopBank:
         self.x_in = torch.empty(shape, dtype=self.cfg.storage_dtype, device="cpu")
         self.x0 = torch.empty(shape, dtype=self.cfg.storage_dtype, device="cpu")
         self.t = torch.empty((self.capacity,), dtype=torch.float32, device="cpu")
-        self.steps = torch.empty((self.capacity,), dtype=torch.long, device="cpu")
+        self.ages = torch.empty((self.capacity,), dtype=torch.long, device="cpu")
         if cond is not None:
             self.cond = torch.empty((self.capacity, *cond.shape[1:]), dtype=cond.dtype, device="cpu")
         if label is not None:
             self.label = torch.empty((self.capacity, *label.shape[1:]), dtype=label.dtype, device="cpu")
 
     @torch.no_grad()
-    def add(self, *, x_in: torch.Tensor, x0: torch.Tensor, t: torch.Tensor, cond: torch.Tensor | None, step: int, label: torch.Tensor | None = None) -> None:
+    def add(self, *, x_in: torch.Tensor, x0: torch.Tensor, t: torch.Tensor, cond: torch.Tensor | None, age: torch.Tensor | int, label: torch.Tensor | None = None) -> None:
         if x_in.shape[0] == 0:
             return
-        if self.x_in is None or self.x0 is None or self.t is None or self.steps is None:
+        if self.x_in is None or self.x0 is None or self.t is None or self.ages is None:
             self._allocate(x_in, x0, t, cond, label)
-        assert self.x_in is not None and self.x0 is not None and self.t is not None and self.steps is not None
+        assert self.x_in is not None and self.x0 is not None and self.t is not None and self.ages is not None
 
         n = int(x_in.shape[0])
         x_in_cpu = x_in.detach().to(device="cpu", dtype=self.cfg.storage_dtype)
         x0_cpu = x0.detach().to(device="cpu", dtype=self.cfg.storage_dtype)
         t_cpu = t.detach().to(device="cpu", dtype=torch.float32).flatten()
+        if torch.is_tensor(age):
+            age_cpu = age.detach().to(device="cpu", dtype=torch.long).flatten()
+        else:
+            age_cpu = torch.full((n,), int(age), dtype=torch.long, device="cpu")
         cond_cpu = cond.detach().to(device="cpu") if cond is not None else None
         label_cpu = label.detach().to(device="cpu") if label is not None else None
 
@@ -151,7 +155,7 @@ class CleanLoopBank:
                 self.x_in[dst].copy_(x_in_cpu[src])
                 self.x0[dst].copy_(x0_cpu[src])
                 self.t[dst].copy_(t_cpu[src])
-                self.steps[dst].fill_(int(step))
+                self.ages[dst].copy_(age_cpu[src])
                 if self.cond is not None and cond_cpu is not None:
                     self.cond[dst].copy_(cond_cpu[src])
                 if self.label is not None and label_cpu is not None:
@@ -164,7 +168,7 @@ class CleanLoopBank:
                     x0=x0_cpu[src][:first],
                     t=t_cpu[src][:first],
                     cond=cond_cpu[src][:first] if cond_cpu is not None else None,
-                    step=step,
+                    age=age_cpu[src][:first],
                     label=label_cpu[src][:first] if label_cpu is not None else None,
                 )
                 self.add(
@@ -172,7 +176,7 @@ class CleanLoopBank:
                     x0=x0_cpu[src][first:first + second],
                     t=t_cpu[src][first:first + second],
                     cond=cond_cpu[src][first:first + second] if cond_cpu is not None else None,
-                    step=step,
+                    age=age_cpu[src][first:first + second],
                     label=label_cpu[src][first:first + second] if label_cpu is not None else None,
                 )
                 continue
@@ -180,7 +184,7 @@ class CleanLoopBank:
             self.count = min(self.capacity, self.count + chunk_n)
 
     def sample(self, n: int, *, device: torch.device, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        if n <= 0 or self.count <= 0 or self.x_in is None or self.x0 is None or self.t is None or self.steps is None:
+        if n <= 0 or self.count <= 0 or self.x_in is None or self.x0 is None or self.t is None or self.ages is None:
             raise ValueError("CleanLoopBank.sample requires a non-empty bank and n > 0")
         n = min(int(n), self.count)
         idx = torch.randint(self.count, (n,), device="cpu")
@@ -188,9 +192,9 @@ class CleanLoopBank:
         x0 = self.x0[idx].to(device=device, dtype=dtype)
         t = self.t[idx].to(device=device)
         cond = self.cond[idx].to(device=device) if self.cond is not None else None
-        steps = self.steps[idx].to(device=device)
+        ages = self.ages[idx].to(device=device)
         label = self.label[idx].to(device=device) if self.label is not None else None
-        return x_in, cond, x0, t, steps, label
+        return x_in, cond, x0, t, ages, label
 
 
 def sample_clean_loop_t1(
@@ -207,6 +211,9 @@ def sample_clean_loop_t1(
     if cfg.t1_sampler == "local_uniform":
         upper = (t - float(cfg.t1_min)).clamp_min(0.0).clamp_max(float(cfg.t1_delta))
         return (t - torch.rand_like(t) * upper).clamp_min(float(cfg.t1_min))
+    if cfg.t1_sampler == "uniform_below_t":
+        upper = (t - float(cfg.t1_min)).clamp_min(0.0)
+        return (min_t + torch.rand_like(t) * upper).clamp_max(t).clamp_min(float(cfg.t1_min))
 
     if time_sampler is None:
         upper = (t - float(cfg.t1_min)).clamp_min(0.0).clamp_max(float(cfg.t1_delta))
