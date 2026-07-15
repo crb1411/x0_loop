@@ -23,6 +23,13 @@ from x0loop.training.clean_loop import (
     build_clean_loop_config,
     sample_clean_loop_t1,
 )
+from x0loop.training.consistency import (
+    ConsistencyTrainingConfig,
+    build_consistency_time_sampler,
+    build_consistency_training_config,
+    compute_consistency_training_batch,
+    should_add_consistency_loss,
+)
 from x0loop.training.context import ForwardBatch as TrainForwardBatch
 from x0loop.training.context import LoopConfig, ModelContext, ResumeState, RuntimeContext
 from x0loop.training.factories import build_augment, build_data_context, build_discriminator, build_model_context, build_process, build_schedule, init_runtime, load_resume_state
@@ -299,6 +306,8 @@ def compute_forward_batch(
     step: int,
     clean_loop_cfg: CleanLoopConfig | None = None,
     clean_loop_bank: CleanLoopBank | None = None,
+    consistency_cfg: ConsistencyTrainingConfig | None = None,
+    consistency_time_sampler=None,
 ) -> TrainForwardBatch:
     x0 = x0.to(runtime.device, non_blocking=True)
     bsz = x0.shape[0]
@@ -508,6 +517,50 @@ def compute_forward_batch(
             "clean/bank_readd_n": float(bank_readd_n),
             "clean/max_bank_readd_age": -1.0 if clean_loop_cfg.max_bank_readd_age is None else float(clean_loop_cfg.max_bank_readd_age),
         })
+
+    consistency_observe = None
+    if consistency_cfg is not None and consistency_time_sampler is not None and should_add_consistency_loss(consistency_cfg):
+        consistency_cond = None
+        if raw_label is not None:
+            consistency_cond = apply_classifier_free_label_dropout(
+                raw_label,
+                null_class_id=int(model_ctx.model_cfg.num_classes),
+                drop_prob=float(cfg["train"].get("class_dropout_prob", 0.0)),
+            )
+        with torch.autocast(device_type=runtime.device.type, dtype=amp_dtype_for_precision(model_ctx.precision), enabled=(model_ctx.precision in {"bf16", "fp16"})):
+            consistency_fb, consistency_out, consistency_x_r, consistency_r, consistency_loss_dict = compute_consistency_training_batch(
+                cfg=consistency_cfg,
+                sampler=consistency_time_sampler,
+                denoiser=denoiser,
+                process=process,
+                loss_fn=denoiser.loss_fn,
+                x0=x0[::2],
+                cond=consistency_cond[::2],
+            )
+        consistency_weight = float(consistency_cfg.consistent_weight)
+        consistency_contrib = consistency_weight * consistency_loss_dict["total"]
+        total_loss = total_loss + consistency_contrib
+        extra_metrics.update({
+            "consistency/loss": consistency_loss_dict["total"].detach(),
+            "consistency/loss_contrib": consistency_contrib.detach(),
+            "consistency/scale": consistency_weight,
+            "consistency/loss_no_weight": consistency_loss_dict["loss_no_weight"].detach(),
+            "consistency/weight": consistency_loss_dict["weight"].detach(),
+            "consistency/t_mean": consistency_fb.t.detach().mean(),
+            "consistency/r_mean": consistency_r.detach().mean(),
+            "consistency/weight_t_mean": torch.maximum(consistency_fb.t.detach(), consistency_r.detach()).mean(),
+            "consistency/h_mean": (consistency_fb.t.detach() - consistency_r.detach()).mean(),
+            "consistency/r_input_delta": (consistency_fb.xt.detach() - consistency_x_r.detach()).square().flatten(1).mean(dim=1).mean(),
+            "consistency/loss_v_mse": consistency_loss_dict["loss_v_mse"].detach(),
+        })
+        consistency_observe = {
+            "input": consistency_x_r.detach(),
+            "x0": consistency_fb.x0.detach(),
+            "pred_x0": process.x0_from_output(consistency_fb.xt, consistency_fb.t, consistency_out.detach(), aux={}).detach(),
+            "t": consistency_fb.t.detach(),
+            "label": raw_label.detach() if raw_label is not None else None,
+            "cond": consistency_cond.detach() if consistency_cond is not None else None,
+        }
     trainset_observe = {
         "fresh": {
             "input": fresh_fb.xt.detach(),
@@ -528,6 +581,8 @@ def compute_forward_batch(
             "cond": bank_model_cond.detach() if bank_model_cond is not None else None,
             "age": bank_age.detach() if bank_age is not None else None,
         }
+    if consistency_observe is not None:
+        trainset_observe["consistency"] = consistency_observe
     return TrainForwardBatch(loss=total_loss, loss_by_target=unweighted, batch_size=bsz, cond=fresh_cond, fb=fresh_fb, out=fresh_out, extra_metrics=extra_metrics, trainset_observe=trainset_observe)
 
 
@@ -744,6 +799,8 @@ def train(cfg: dict) -> None:
     )
     clean_loop_cfg = build_clean_loop_config(cfg)
     clean_loop_bank = CleanLoopBank(clean_loop_cfg) if clean_loop_cfg.enabled else None
+    consistency_cfg = build_consistency_training_config(cfg)
+    consistency_time_sampler = build_consistency_time_sampler(cfg, schedule, time_sampler)
     # Data augmentation pipeline and where it is applied (data_only here).
     augment, augment_mode = build_augment(cfg)
     if runtime.is_main:
@@ -760,6 +817,7 @@ def train(cfg: dict) -> None:
         runtime.logger.log_text(f"[time_condition_jitter] {cfg.get('time_condition_jitter', {'enabled': False})}")
         runtime.logger.log_text(f"[model_conditioning] {cfg.get('model_conditioning', {'ignore_time': False})}")
         runtime.logger.log_text(f"[clean_loop] {cfg.get('clean_loop', {'enabled': False})}")
+        runtime.logger.log_text(f"[consistency_training] {cfg.get('consistency_training', {'enabled': False})}")
         runtime.logger.log_text(f"[adversarial] {cfg.get('adversarial', {'enabled': False})}")
     optimizer = torch.optim.AdamW(denoiser.parameters(), lr=float(cfg["train"].get("lr", 1e-4)), betas=(0.9, 0.95), weight_decay=float(cfg["train"].get("weight_decay", 0.05)))
     d_optimizer = None
@@ -827,6 +885,8 @@ def train(cfg: dict) -> None:
                         step=resume.global_step,
                         clean_loop_cfg=clean_loop_cfg,
                         clean_loop_bank=clean_loop_bank,
+                        consistency_cfg=consistency_cfg,
+                        consistency_time_sampler=consistency_time_sampler,
                     )
                     maybe_apply_adversarial(cfg=cfg, fwd=fwd, process=process, discriminator=discriminator, d_optimizer=d_optimizer, scaler=scaler, step=resume.global_step)
                     backward_loss(fwd.loss, current_accum_steps=current_accum_steps, scaler=scaler)

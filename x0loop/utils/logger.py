@@ -135,12 +135,12 @@ class Logger:
             return kv.get(key, default)
 
         total_loss = val("loss")
+        step_width = len(str(int(total_steps))) if total_steps is not None and total_steps > 0 else 0
         fresh_scale = val("clean/fresh_scale", 1.0)
         fresh_loss = val("fresh/loss", total_loss)
         bank_scale = val("clean/bank_scale", 0.0)
         bank_weight = val("clean/loss_bank_weight", 0.0)
         bank_loss = val("clean/loss_bank", 0.0)
-        step_width = len(str(int(total_steps))) if total_steps is not None and total_steps > 0 else 0
         loss_part = (
             f"(loss) {cls._fmt_sig(total_loss)} = "
             f"(fresh_scale) {cls._fmt_sig(fresh_scale)} * "
@@ -149,6 +149,13 @@ class Logger:
             f"(bank_weight) {cls._fmt_sig(bank_weight)} * "
             f"(weighted_bank_loss) {cls._fmt_sig(bank_loss)}"
         )
+        if "consistency/loss" in kv:
+            consistent_scale = val("consistency/scale", 1.0)
+            consistent_loss = val("consistency/loss", total_loss)
+            loss_part += (
+                f" + (consistent_weight) {cls._fmt_sig(consistent_scale)} * "
+                f"(weighted_consistent_loss) {cls._fmt_sig(consistent_loss)}"
+            )
         parts: list[str] = [loss_part]
         mid_tbin = cls._format_mid_tbin(kv.get("summary"))
         if mid_tbin is not None:
@@ -209,6 +216,22 @@ class Logger:
         if clean:
             parts.append(f"(clean) {' '.join(clean)}")
 
+        consistency = []
+        for key, label in (
+            ("consistency/scale", "consistent_weight"),
+            ("consistency/t_mean", "t_mean"),
+            ("consistency/r_mean", "r_mean"),
+            ("consistency/weight_t_mean", "weight_t_mean"),
+            ("consistency/h_mean", "h_mean"),
+            ("consistency/weight", "weight"),
+            ("consistency/loss_no_weight", "no_weight"),
+            ("consistency/loss_v_mse", "v_mse"),
+        ):
+            if key in kv:
+                consistency.append(f"{label}={cls._fmt_sig(kv[key])}")
+        if consistency:
+            parts.append(f"(consistency) {' '.join(consistency)}")
+
         progress = []
         if "progress_pct" in kv:
             try:
@@ -245,7 +268,7 @@ class Logger:
 
     @classmethod
     def _format_preview(cls, kv: dict, *, total_steps: int | None = None) -> str:
-        if "loss" in kv and "fresh/loss" in kv:
+        if "loss" in kv and ("fresh/loss" in kv or "consistency/loss" in kv):
             return cls._format_training_preview(kv, total_steps=total_steps)
         return cls._format_default_preview(kv)
 
