@@ -73,9 +73,9 @@
 
 | Run | 最低 5k FID | 对应 step | 最终 50k FID | NFE 4 | NFE 8 | NFE 20 | Precision | Recall |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| FRESH | — | — | — | — | — | — | — | — |
+| FRESH | 40.0258 | 5,000（当前） | — | — | — | — | — | — |
 | BANK-FIX | — | — | — | — | — | — | — | — |
-| ONLINE | — | — | — | — | — | — | — | — |
+| ONLINE | 40.0258 | 5,000（warmup） | — | — | — | — | — | — |
 
 ### Cycle 01 采样轨迹分析
 
@@ -98,6 +98,11 @@ trace，并逐 step 比较状态、velocity、x0_hat、局部 Euler/Heun defect 
 - 正式 ONLINE 已在 GPU 7 启动。step 10,000 前关闭辅助项，以保证 teacher 已形成有效
   EMA lag，并与 FRESH 保持相同 warmup；step 10,000 后才计入在线 rollout 成本和信号。
 - BANK-FIX 将在 FRESH 完成后使用 GPU 6 启动。
+- step 5,000 的固定噪声 5k FID：FRESH 与尚未启用辅助项的 ONLINE 都为
+  `40.02581897388575`。两者共同日志窗口的 loss、fresh loss、x0/v MSE、LR 和
+  grad norm 也逐项完全一致，验证了 warmup 可比性及 FID 随机流隔离。
+- 首次 5k FID 单卡耗时约 109–115 秒；生成临时图在计算后清理，指标已写入各 run 的
+  `gen_eval_metrics_*.jsonl`。
 
 ## 运行命令
 
