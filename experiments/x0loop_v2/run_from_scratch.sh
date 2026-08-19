@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: $0 fresh|fresh-fixed-repro|fresh-time|bank-fix|bank-x0|online|online-x0|online-x0-time|denoise-gan|terminal-gan" >&2
+  echo "usage: $0 fresh|fresh-fixed-repro|fresh-time|bank-fix|bank-x0|online|online-x0|online-x0-time|online-x0-time-frozen|denoise-gan|terminal-gan" >&2
   exit 2
 fi
 
@@ -26,10 +26,12 @@ aux_batch_ratio=${X0LOOP_AUX_BATCH_RATIO:-0.125}
 aux_gradient_ratio=${X0LOOP_AUX_GRADIENT_RATIO:-0.2}
 aux_gradient_space=${X0LOOP_AUX_GRADIENT_SPACE:-}
 aux_target=${X0LOOP_AUX_TARGET:-}
+teacher_mode=${X0LOOP_TEACHER_MODE:-}
 adv_batch_ratio=${X0LOOP_ADV_BATCH_RATIO:-0.125}
 adv_gradient_ratio=${X0LOOP_ADV_GRADIENT_RATIO:-0.1}
 adv_start_step=${X0LOOP_ADV_START_STEP:-10000}
 adv_warmup_steps=${X0LOOP_ADV_WARMUP_STEPS:-1000}
+branch_teacher_mode=moving
 
 case "$branch" in
   fresh)
@@ -112,6 +114,17 @@ case "$branch" in
     time_jitter_enabled=false
     branch_aux_gradient_space=parameter
     ;;
+  online-x0-time-frozen)
+    clean_enabled=true
+    clean_mode=online
+    branch_aux_target=x0
+    adv_enabled=false
+    adv_fake_space=x0_hat
+    model_ignore_time=false
+    time_jitter_enabled=false
+    branch_aux_gradient_space=parameter
+    branch_teacher_mode=frozen
+    ;;
   denoise-gan)
     clean_enabled=false
     clean_mode=bank_fix
@@ -143,6 +156,9 @@ if [[ -z "$aux_target" ]]; then
 fi
 if [[ -z "$aux_gradient_space" ]]; then
   aux_gradient_space=$branch_aux_gradient_space
+fi
+if [[ -z "$teacher_mode" ]]; then
+  teacher_mode=$branch_teacher_mode
 fi
 
 git_commit=$(git rev-parse HEAD)
@@ -179,6 +195,7 @@ CUDA_VISIBLE_DEVICES=$gpu uv run python -m x0loop.train \
   --set "clean_loop.aux_gradient_ratio=$aux_gradient_ratio" \
   --set "clean_loop.aux_gradient_space=$aux_gradient_space" \
   --set "clean_loop.aux_target=$aux_target" \
+  --set "clean_loop.teacher_mode=$teacher_mode" \
   --set "adversarial.enabled=$adv_enabled" \
   --set "adversarial.fake_space=$adv_fake_space" \
   --set "adversarial.batch_ratio=$adv_batch_ratio" \

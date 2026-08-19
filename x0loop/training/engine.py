@@ -332,6 +332,51 @@ def _parameter_gradient_norm(loss: torch.Tensor, module: torch.nn.Module) -> tor
     return squared_norm.sqrt()
 
 
+def _parameter_gradient_pair_stats(
+    fresh_loss: torch.Tensor,
+    aux_loss: torch.Tensor,
+    module: torch.nn.Module,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return fresh/aux parameter norms and their cosine without touching grads."""
+
+    parameters = tuple(parameter for parameter in module.parameters() if parameter.requires_grad)
+    if not parameters:
+        zero = torch.zeros((), device=fresh_loss.device, dtype=torch.float32)
+        return zero, zero, zero
+    fresh_gradients = torch.autograd.grad(
+        fresh_loss,
+        parameters,
+        retain_graph=True,
+        allow_unused=True,
+    )
+    aux_gradients = torch.autograd.grad(
+        aux_loss,
+        parameters,
+        retain_graph=True,
+        allow_unused=True,
+    )
+    fresh_sq = torch.zeros((), device=fresh_loss.device, dtype=torch.float32)
+    aux_sq = torch.zeros_like(fresh_sq)
+    dot = torch.zeros_like(fresh_sq)
+    for fresh_gradient, aux_gradient in zip(fresh_gradients, aux_gradients, strict=True):
+        if fresh_gradient is not None:
+            fresh_value = fresh_gradient.detach().float()
+            fresh_sq = fresh_sq + fresh_value.square().sum()
+        else:
+            fresh_value = None
+        if aux_gradient is not None:
+            aux_value = aux_gradient.detach().float()
+            aux_sq = aux_sq + aux_value.square().sum()
+        else:
+            aux_value = None
+        if fresh_value is not None and aux_value is not None:
+            dot = dot + (fresh_value * aux_value).sum()
+    fresh_norm = fresh_sq.sqrt()
+    aux_norm = aux_sq.sqrt()
+    cosine = dot / (fresh_norm * aux_norm).clamp_min(1.0e-12)
+    return fresh_norm, aux_norm, cosine
+
+
 def compute_forward_batch(
     *,
     cfg: dict,
@@ -348,6 +393,7 @@ def compute_forward_batch(
     clean_loop_cfg: CleanLoopConfig | None = None,
     clean_loop_bank: CleanLoopBank | TrajectoryBank | None = None,
     ema: EMA | None = None,
+    clean_teacher_ema: EMA | None = None,
 ) -> TrainForwardBatch:
     # Terminal adversarial rollout consumes a separate, deterministically
     # forked RNG stream and is generated before any trainable forward. This
@@ -382,7 +428,7 @@ def compute_forward_batch(
             step=step,
             clean_loop_cfg=clean_loop_cfg,
             clean_loop_bank=clean_loop_bank,
-            ema=ema,
+            ema=clean_teacher_ema if clean_teacher_ema is not None else ema,
         )
         return _attach_terminal_adversarial_payload(
             cfg=cfg,
@@ -1208,6 +1254,7 @@ def compute_forward_batch_v2(
         total_loss = fresh_scale * fresh_loss
         aux_loss = aux_contrib = aux_scale = aux_gradient_ratio_actual = None
         fresh_aux_grad_norm = raw_aux_grad_norm = None
+        aux_parameter_cosine = combined_fresh_cosine = None
         if aux is not None:
             aux_null = (
                 torch.full_like(aux.cond, int(model_ctx.model_cfg.num_classes))
@@ -1234,8 +1281,13 @@ def compute_forward_batch_v2(
             aux_loss = regress("mse", aux_prediction, aux_target).mean()
             if clean_loop_cfg.aux_gradient_ratio > 0.0:
                 if clean_loop_cfg.aux_gradient_space == "parameter":
-                    fresh_grad_norm = _parameter_gradient_norm(fresh_scale * fresh_loss, denoiser)
-                    aux_grad_norm = _parameter_gradient_norm(aux_loss, denoiser)
+                    fresh_grad_norm, aux_grad_norm, aux_parameter_cosine = (
+                        _parameter_gradient_pair_stats(
+                            fresh_scale * fresh_loss,
+                            aux_loss,
+                            denoiser,
+                        )
+                    )
                 else:
                     fresh_grad = torch.autograd.grad(fresh_loss, fresh_out, retain_graph=True)[0]
                     aux_grad = torch.autograd.grad(aux_loss, aux_out, retain_graph=True)[0]
@@ -1251,6 +1303,20 @@ def compute_forward_batch_v2(
                 aux_gradient_ratio_actual = (
                     aux_scale * aux_grad_norm / fresh_grad_norm.clamp_min(1.0e-12)
                 ).detach()
+                if aux_parameter_cosine is not None:
+                    scaled_aux_norm = aux_scale * aux_grad_norm
+                    combined_norm = (
+                        fresh_grad_norm.square()
+                        + scaled_aux_norm.square()
+                        + 2.0
+                        * fresh_grad_norm
+                        * scaled_aux_norm
+                        * aux_parameter_cosine
+                    ).clamp_min(0.0).sqrt()
+                    combined_fresh_cosine = (
+                        fresh_grad_norm
+                        + scaled_aux_norm * aux_parameter_cosine
+                    ) / combined_norm.clamp_min(1.0e-12)
                 aux_contrib = aux_scale * aux_loss
                 total_loss = total_loss + aux_contrib
         with torch.no_grad():
@@ -1287,6 +1353,12 @@ def compute_forward_batch_v2(
                 aux_gradient_ratio_actual
                 if clean_loop_cfg.aux_gradient_space == "parameter" and aux_gradient_ratio_actual is not None
                 else 0.0
+            ),
+            "clean/aux_parameter_cosine": (
+                aux_parameter_cosine.detach() if aux_parameter_cosine is not None else 0.0
+            ),
+            "clean/combined_fresh_cosine": (
+                combined_fresh_cosine.detach() if combined_fresh_cosine is not None else 0.0
             ),
             "clean/solver_index": aux.solver_index.float().mean(),
             "clean/depth": aux.depth.float().mean(),
@@ -1549,6 +1621,12 @@ def _configure_parameter_gradient_vjp(cfg: dict) -> bool:
     return True
 
 
+def _clone_ema(model: torch.nn.Module, ema: EMA) -> EMA:
+    clone = EMA(model=model, decay=ema.decay)
+    clone.load_state_dict(ema.state_dict())
+    return clone
+
+
 def log_training_step(*, runtime: RuntimeContext, loop_cfg: LoopConfig, resume: ResumeState, meters: MetricLogger, tbin_stats: TimeBinAccumulator, epoch: int, micro_step: int, current_accum_steps: int, progress: ProgressEstimator | None = None) -> None:
     if not should_log_training_step(loop_cfg=loop_cfg, resume=resume):
         return
@@ -1649,6 +1727,21 @@ def train(cfg: dict) -> None:
     scaler = maybe_make_scaler(precision=model_ctx.precision, use_fsdp=model_ctx.use_fsdp)
     ema = EMA(model=denoiser, decay=float(cfg["train"].get("ema_decay", 0.9999))) if bool(cfg["train"].get("use_ema", True)) else None
     resume = load_resume_state(cfg, denoiser=denoiser, optimizer=optimizer, scaler=scaler, ema=ema, discriminator=discriminator, d_optimizer=d_optimizer, runtime=runtime)
+    clean_teacher_ema = None
+    if clean_loop_cfg.enabled and clean_loop_cfg.teacher_mode == "frozen":
+        if ema is None:
+            raise ValueError("clean_loop.teacher_mode=frozen requires train.use_ema=true")
+        if resume.clean_teacher_ema_state is not None:
+            clean_teacher_ema = EMA(model=denoiser, decay=ema.decay)
+            clean_teacher_ema.load_state_dict(resume.clean_teacher_ema_state)
+            resume.clean_teacher_ema_state = None
+            if runtime.is_main:
+                runtime.logger.log_text("[clean_loop] restored frozen teacher EMA from checkpoint")
+        elif resume.global_step > clean_loop_cfg.warmup_steps:
+            raise ValueError(
+                "A frozen-teacher resume after warmup requires a checkpoint with "
+                "clean_teacher_ema state"
+            )
     meters = MetricLogger(window_size=int(cfg["logging"].get("window_size", 20)))
     interval_timer = TrainingIntervalTimer(runtime.device)
     loop_cfg = build_loop_config(cfg, data_ctx.loader, runtime.distributed_cfg)
@@ -1674,15 +1767,22 @@ def train(cfg: dict) -> None:
             return resume.global_step >= loop_cfg.total_steps
         return False
 
-    def _save_final_checkpoint() -> None:
-        final_extra_state = None
+    def _checkpoint_extra_state() -> dict | None:
+        extra_state = None
         if discriminator is not None:
-            final_extra_state = {"discriminator": discriminator.state_dict()}
+            extra_state = {"discriminator": discriminator.state_dict()}
             if d_optimizer is not None:
-                final_extra_state["d_optimizer"] = d_optimizer.state_dict()
+                extra_state["d_optimizer"] = d_optimizer.state_dict()
+        if clean_teacher_ema is not None:
+            if extra_state is None:
+                extra_state = {}
+            extra_state["clean_teacher_ema"] = clean_teacher_ema.state_dict()
+        return extra_state
+
+    def _save_final_checkpoint() -> None:
         save_final_checkpoint(
             cfg=cfg, denoiser=denoiser, runtime=runtime, optimizer=optimizer, scaler=scaler,
-            ema=ema, extra_state=final_extra_state, resume=resume, epoch=epoch,
+            ema=ema, extra_state=_checkpoint_extra_state(), resume=resume, epoch=epoch,
         )
 
     try:
@@ -1707,6 +1807,19 @@ def train(cfg: dict) -> None:
                     for pg in optimizer.param_groups:
                         pg["lr"] = step_lr
                     optimizer.zero_grad(set_to_none=True)
+                if (
+                    clean_loop_cfg.enabled
+                    and clean_loop_cfg.teacher_mode == "frozen"
+                    and clean_teacher_ema is None
+                    and resume.global_step >= clean_loop_cfg.warmup_steps
+                ):
+                    if ema is None:
+                        raise ValueError("Frozen clean-loop teacher requires EMA")
+                    clean_teacher_ema = _clone_ema(denoiser, ema)
+                    if runtime.is_main:
+                        runtime.logger.log_text(
+                            f"[clean_loop] froze teacher EMA at step {resume.global_step}"
+                        )
                 with maybe_no_sync(model_ctx.model, enabled=model_ctx.use_ddp and not did_optimizer_step):
                     fwd = compute_forward_batch(
                         cfg=cfg,
@@ -1723,6 +1836,7 @@ def train(cfg: dict) -> None:
                         clean_loop_cfg=clean_loop_cfg,
                         clean_loop_bank=clean_loop_bank,
                         ema=ema,
+                        clean_teacher_ema=clean_teacher_ema,
                     )
                     maybe_apply_adversarial(cfg=cfg, fwd=fwd, process=process, discriminator=discriminator, d_optimizer=d_optimizer, scaler=scaler, step=resume.global_step)
                     backward_loss(fwd.loss, current_accum_steps=current_accum_steps, scaler=scaler)
@@ -1748,12 +1862,7 @@ def train(cfg: dict) -> None:
                 run_eval_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, schedule=schedule, time_sampler=time_sampler, process=process, loss_fn=loss_fn, data_ctx=data_ctx, resume=resume, use_label_cond=use_label_cond)
                 run_sampling_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, loop_cfg=loop_cfg, resume=resume, cond=fwd.cond, use_label_cond=use_label_cond)
                 run_mudata_observation_if_due(cfg=cfg, runtime=runtime, process=process, resume=resume)
-                extra_state = None
-                if discriminator is not None:
-                    extra_state = {"discriminator": discriminator.state_dict()}
-                    if d_optimizer is not None:
-                        extra_state["d_optimizer"] = d_optimizer.state_dict()
-                save_checkpoint_if_due(cfg=cfg, denoiser=denoiser, runtime=runtime, optimizer=optimizer, scaler=scaler, ema=ema, extra_state=extra_state, loop_cfg=loop_cfg, resume=resume, epoch=epoch)
+                save_checkpoint_if_due(cfg=cfg, denoiser=denoiser, runtime=runtime, optimizer=optimizer, scaler=scaler, ema=ema, extra_state=_checkpoint_extra_state(), loop_cfg=loop_cfg, resume=resume, epoch=epoch)
                 gen_eval_duration = run_generative_eval_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, resume=resume)
                 progress.record_gen_eval(gen_eval_duration)
                 if gen_eval_duration is not None and runtime.is_main:

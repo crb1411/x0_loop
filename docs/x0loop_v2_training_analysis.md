@@ -685,6 +685,15 @@ cosine 和 combined/fresh cosine。`PREFIX-FROZEN` 若不能把 15k FID 恢复�
 moving feedback 是主要故障，仍不进入完整 300-epoch；只有低于 14.9119 且动态范围不
 比 FRESH 偏离超过 3%，才有资格进入下一组三分支从零正式周期。该筛选不能冒充从零结论。
 
+筛选实现新增 `clean_loop.teacher_mode=moving|frozen`。frozen teacher 在 warmup 边界从
+当前 EMA 快照一次，之后不再更新；moving evaluation EMA 仍照常更新并用于 FID。两者
+分别写入 checkpoint，post-warmup resume 若缺少 frozen teacher state 会拒绝运行，避免
+静默改变实验定义。参数 VJP 同时报告 fresh/aux cosine 和 combined/fresh cosine。全套
+测试为 86 passed；step-10k 两步 smoke 的 aux cosine 为 0.5300/0.2595，combined/fresh
+cosine 为 0.9968/0.9959，实际梯度比均为 0.10000。额外从包含 frozen state 的 checkpoint
+恢复一步，日志确认 teacher 正确恢复而非重新快照。上述 smoke 只验证实现，不参与 FID
+判断。
+
 ## 时间与吞吐分析
 
 300 epochs 在 CIFAR-10、batch 256 下是 58,500 optimizer steps（每 epoch 约

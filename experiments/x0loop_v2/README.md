@@ -42,6 +42,7 @@ reproducible:
 | `online` | current EMA online Heun rollout | legacy teacher velocity |
 | `online-x0` | current EMA online Heun rollout | teacher native x0 |
 | `online-x0-time` | time-aware EMA online Heun rollout | native x0, 10% parameter-gradient norm |
+| `online-x0-time-frozen` | time-aware online Heun rollout from a warmup-frozen EMA | native x0, parameter-gradient norm + cosine |
 | `denoise-gan` | fresh noised training state | class-conditional x0 distribution loss |
 | `terminal-gan` | EMA Heun-20 prefix, differentiable final Euler | class-conditional terminal distribution loss |
 
@@ -95,6 +96,21 @@ parameter-gradient VJPs retain the graph and are incompatible with the current
 AOTAutograd donated-buffer dynamic path, so `online-x0-time` formally locks
 `compile.dynamic=false`. Compile mode must always be recorded in the run
 configuration.
+
+`online-x0-time-frozen` snapshots the EMA exactly once when the configured
+warmup boundary is reached. Checkpoints persist that frozen shadow separately
+from the moving evaluation EMA, so a post-warmup resume cannot silently change
+the teacher. Its metrics include `clean/aux_parameter_cosine` and
+`clean/combined_fresh_cosine` in addition to the actual norm ratio. Example
+shared-prefix mechanism screen (not a formal from-zero result):
+
+```bash
+X0LOOP_GPU=6 X0LOOP_CYCLE=cycle05-screen X0LOOP_RUN_STEPS=5000 \
+X0LOOP_RESUME=runs/x0loop_v2_from_scratch/cycle04/online-x0-time/checkpoints/ckpt_step_00010000.pt \
+X0LOOP_CLEAN_WARMUP=10000 X0LOOP_AUX_BATCH_RATIO=0.125 \
+X0LOOP_AUX_GRADIENT_RATIO=0.10 X0LOOP_FINAL_FID_ENABLED=false \
+  experiments/x0loop_v2/run_from_scratch.sh online-x0-time-frozen
+```
 
 ## Evaluation and analysis
 

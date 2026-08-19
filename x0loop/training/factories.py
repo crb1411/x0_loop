@@ -256,7 +256,13 @@ def load_resume_state(
         if runtime.is_main:
             ckpt_keys = ",".join(sorted(ckpt.keys()))
             runtime.logger.log_text(f"[resume] loaded: path={resume_path}, mode={ckpt_mode}, step={global_step}, epoch={start_epoch}, keys=[{ckpt_keys}]")
-        return ResumeState(start_epoch=start_epoch, global_step=global_step, run_step=0, ckpt_mode=ckpt_mode)
+        return ResumeState(
+            start_epoch=start_epoch,
+            global_step=global_step,
+            run_step=0,
+            ckpt_mode=ckpt_mode,
+            clean_teacher_ema_state=ckpt.get("clean_teacher_ema"),
+        )
     if runtime.is_main:
         runtime.logger.log_text("[resume] none (start from scratch)")
     return ResumeState(start_epoch=0, global_step=0, run_step=0, ckpt_mode=ckpt_mode)

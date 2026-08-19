@@ -64,6 +64,7 @@ class ResumeState:
     global_step: int
     run_step: int
     ckpt_mode: str
+    clean_teacher_ema_state: dict | None = None
 
 
 @dataclass

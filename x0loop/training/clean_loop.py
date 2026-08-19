@@ -27,6 +27,7 @@ class CleanLoopConfig:
     aux_gradient_space: str = "output"
     aux_scale_max: float = 10.0
     aux_target: str = "velocity"
+    teacher_mode: str = "moving"
     solver_steps: int = 20
     sampler: str = "heun"
     guidance_scale: float = 2.2
@@ -57,6 +58,7 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
     aux_gradient_space = str(raw.get("aux_gradient_space", "output")).lower()
     aux_scale_max = float(raw.get("aux_scale_max", 10.0))
     aux_target = str(raw.get("aux_target", "velocity")).lower()
+    teacher_mode = str(raw.get("teacher_mode", "moving")).lower()
     solver_steps = int(raw.get("solver_steps", 20))
     sampler = str(raw.get("sampler", "heun")).lower()
     guidance_scale = float(raw.get("guidance_scale", 2.2))
@@ -100,6 +102,11 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
         raise ValueError(f"clean_loop.aux_scale_max must be > 0, got {aux_scale_max}")
     if aux_target not in {"velocity", "x0"}:
         raise ValueError(f"clean_loop.aux_target must be velocity | x0, got {aux_target!r}")
+    if teacher_mode not in {"moving", "frozen"}:
+        raise ValueError(
+            "clean_loop.teacher_mode must be moving | frozen, "
+            f"got {teacher_mode!r}"
+        )
     if solver_steps <= 0:
         raise ValueError(f"clean_loop.solver_steps must be > 0, got {solver_steps}")
     if sampler != "heun":
@@ -130,6 +137,7 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
         aux_gradient_space=aux_gradient_space,
         aux_scale_max=aux_scale_max,
         aux_target=aux_target,
+        teacher_mode=teacher_mode,
         solver_steps=solver_steps,
         sampler=sampler,
         guidance_scale=guidance_scale,

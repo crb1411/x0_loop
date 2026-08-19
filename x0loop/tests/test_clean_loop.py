@@ -16,6 +16,7 @@ from x0loop.training.clean_loop import (
 )
 from x0loop.training.engine import (
     _configure_parameter_gradient_vjp,
+    _parameter_gradient_pair_stats,
     _parameter_gradient_norm,
     _teacher_heun_step_batched,
     _teacher_targets,
@@ -95,6 +96,28 @@ def test_clean_loop_rejects_unknown_gradient_space():
         })
 
 
+def test_clean_loop_accepts_frozen_teacher():
+    cfg = build_clean_loop_config({
+        "clean_loop": {
+            "enabled": True,
+            "version": 2,
+            "teacher_mode": "frozen",
+        }
+    })
+    assert cfg.teacher_mode == "frozen"
+
+
+def test_clean_loop_rejects_unknown_teacher_mode():
+    with pytest.raises(ValueError, match="teacher_mode"):
+        build_clean_loop_config({
+            "clean_loop": {
+                "enabled": True,
+                "version": 2,
+                "teacher_mode": "periodic",
+            }
+        })
+
+
 def test_parameter_gradient_norm_matches_manual_norm_without_populating_grad():
     layer = torch.nn.Linear(2, 1, bias=False)
     x = torch.tensor([[1.0, 2.0], [-3.0, 4.0]])
@@ -107,6 +130,32 @@ def test_parameter_gradient_norm_matches_manual_norm_without_populating_grad():
     assert layer.weight.grad is None
     loss.backward()
     assert torch.allclose(layer.weight.grad, expected_gradient)
+
+
+def test_parameter_gradient_pair_stats_match_manual_cosine():
+    layer = torch.nn.Linear(2, 1, bias=False)
+    x = torch.tensor([[1.0, 2.0], [-3.0, 4.0]])
+    prediction = layer(x)
+    fresh_loss = prediction.square().mean()
+    aux_loss = (prediction - 1.0).square().mean()
+    fresh_gradient = torch.autograd.grad(fresh_loss, layer.weight, retain_graph=True)[0]
+    aux_gradient = torch.autograd.grad(aux_loss, layer.weight, retain_graph=True)[0]
+
+    fresh_norm, aux_norm, cosine = _parameter_gradient_pair_stats(
+        fresh_loss,
+        aux_loss,
+        layer,
+    )
+
+    expected_cosine = torch.nn.functional.cosine_similarity(
+        fresh_gradient.flatten(),
+        aux_gradient.flatten(),
+        dim=0,
+    )
+    assert torch.allclose(fresh_norm, fresh_gradient.float().norm())
+    assert torch.allclose(aux_norm, aux_gradient.float().norm())
+    assert torch.allclose(cosine, expected_cosine)
+    assert layer.weight.grad is None
 
 
 def test_compiled_parameter_gradient_control_disables_donated_buffers():

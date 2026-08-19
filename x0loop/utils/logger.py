@@ -208,6 +208,8 @@ class Logger:
             ("clean/fresh_n", "fresh_n"),
             ("clean/aux_n", "aux_n"),
             ("clean/aux_gradient_ratio_actual", "aux_grad_ratio"),
+            ("clean/aux_parameter_cosine", "aux_cos"),
+            ("clean/combined_fresh_cosine", "combined_cos"),
             ("clean/solver_index", "solver_index"),
             ("clean/depth", "depth"),
             ("clean/bank_prob", "bank_prob"),
