@@ -9,6 +9,7 @@ import torch.nn as nn
 from x0loop.core.process_base import BaseProcess, ForwardBatch
 from x0loop.core.time_sampling import TimeSampler
 from x0loop.losses.atomic import CompositeLoss
+from x0loop.models.solver_correction import SolverIndexCorrection, build_solver_correction_config
 
 
 @dataclass
@@ -36,6 +37,7 @@ class Denoiser(nn.Module):
         time_sampler: TimeSampler | None = None,
         time_condition_jitter: dict | None = None,
         model_conditioning: dict | None = None,
+        solver_correction: dict | None = None,
     ):
         super().__init__()
         self.net = net
@@ -44,6 +46,23 @@ class Denoiser(nn.Module):
         self.time_sampler = time_sampler
         self.time_condition_jitter = time_condition_jitter or {}
         self.model_conditioning = model_conditioning or {}
+        correction_cfg = build_solver_correction_config(solver_correction)
+        channels = int(getattr(getattr(net, "cfg", None), "out_channels", 0))
+        # The architecture-control branches must preserve the base run's global
+        # CPU RNG stream (DataLoader order, later diagnostics, etc.). Initialize
+        # the zero-output correction in a forked stream so merely enabling the
+        # module does not perturb any experiment randomness.
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(0)
+            self.solver_correction = (
+                SolverIndexCorrection(correction_cfg, channels=channels)
+                if correction_cfg.enabled
+                else None
+            )
+        if self.solver_correction is not None:
+            reference_parameter = next(net.parameters(), None)
+            if reference_parameter is not None:
+                self.solver_correction.to(device=reference_parameter.device)
 
     @property
     def output_target(self) -> str:
@@ -55,9 +74,26 @@ class Denoiser(nn.Module):
             return t
         return torch.full_like(t, float(cfg.get("time_constant", 0.5)))
 
-    def forward(self, xt: torch.Tensor, t: torch.Tensor, cond=None) -> torch.Tensor:
-        t = self.model_time_condition(t)
-        return self.net(xt, t, cond=cond)
+    def forward(
+        self,
+        xt: torch.Tensor,
+        t: torch.Tensor,
+        cond=None,
+        *,
+        correction_only: bool = False,
+    ) -> torch.Tensor:
+        path_t = t
+        model_t = self.model_time_condition(t)
+        if correction_only:
+            if self.solver_correction is None:
+                raise ValueError("correction_only forward requires solver_correction.enabled=true")
+            with torch.no_grad():
+                base = self.net(xt.detach(), model_t, cond=cond)
+        else:
+            base = self.net(xt, model_t, cond=cond)
+        if self.solver_correction is None:
+            return base
+        return base + self.solver_correction(xt, path_t, base)
 
     def make_forward_batch(self, x0: torch.Tensor, t: torch.Tensor | None = None) -> ForwardBatch:
         if t is None:
@@ -113,16 +149,31 @@ class Denoiser(nn.Module):
     def cfg_combine(cond_out: torch.Tensor, uncond_out: torch.Tensor, guidance_scale: float) -> torch.Tensor:
         return uncond_out + float(guidance_scale) * (cond_out - uncond_out)
 
-    def model_output(self, x: torch.Tensor, t: torch.Tensor, *, cond=None, null_cond=None, guidance_scale: float = 1.0) -> torch.Tensor:
+    def model_output(
+        self,
+        x: torch.Tensor,
+        t: torch.Tensor,
+        *,
+        cond=None,
+        null_cond=None,
+        guidance_scale: float = 1.0,
+        correction_only: bool = False,
+    ) -> torch.Tensor:
         if cond is not None and null_cond is not None and float(guidance_scale) != 1.0:
             both = self.forward(
                 torch.cat((x, x), dim=0),
                 torch.cat((t, t), dim=0),
                 cond=torch.cat((cond, null_cond), dim=0),
+                correction_only=correction_only,
             )
             out, out_uncond = both.chunk(2, dim=0)
             return self.cfg_combine(out, out_uncond, guidance_scale)
-        return self.forward(x, t, cond=cond)
+        return self.forward(x, t, cond=cond, correction_only=correction_only)
+
+    def correction_parameters(self) -> tuple[torch.nn.Parameter, ...]:
+        if self.solver_correction is None:
+            return ()
+        return tuple(parameter for parameter in self.solver_correction.parameters() if parameter.requires_grad)
 
     @torch.no_grad()
     def sample(

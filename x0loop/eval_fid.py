@@ -44,6 +44,7 @@ def _build_denoiser(cfg: dict, model: torch.nn.Module, process: torch.nn.Module)
         model,
         process=process,
         model_conditioning=cfg.get("model_conditioning", None),
+        solver_correction=cfg.get("solver_correction", None),
     )
 
 

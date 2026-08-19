@@ -10,12 +10,22 @@ from types import SimpleNamespace
 import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
+from torch_fidelity.feature_extractor_inceptionv3 import FeatureExtractorInceptionV3
 
 from x0loop.aug.base import BaseAugment
 from x0loop.core.process_base import BaseProcess, ForwardBatch as ProcessForwardBatch
 from x0loop.core.time_sampling import build_time_sampler
 from x0loop.losses.adversarial import accuracy_metrics, adversarial_weight, build_adversarial_config, discriminator_loss, generator_loss, r1_penalty, t_weight
 from x0loop.losses.atomic import regress
+from x0loop.losses.distribution import (
+    build_distribution_matching_config,
+    distribution_matching_weight,
+)
+from x0loop.losses.inception_mmd import (
+    DifferentiableFIDInception,
+    model_images_to_fid_pixels,
+    polynomial_mmd2,
+)
 from x0loop.losses.spec import build_loss
 from x0loop.models.denoiser import Denoiser
 from x0loop.training.clean_loop import (
@@ -180,6 +190,7 @@ class TerminalAdversarialPrefix:
     real: torch.Tensor
     cond: torch.Tensor | None
     null_cond: torch.Tensor | None
+    suffix_steps: int = 1
 
 
 def build_loop_config(cfg: dict, loader: DataLoader, distributed_cfg: dict) -> LoopConfig:
@@ -412,6 +423,18 @@ def compute_forward_batch(
         step=step,
         ema=ema,
     )
+    distribution_prefix = _prepare_terminal_distribution_prefix(
+        cfg=cfg,
+        runtime=runtime,
+        model_ctx=model_ctx,
+        denoiser=denoiser,
+        process=process,
+        x0=x0,
+        y=y,
+        use_label_cond=use_label_cond,
+        step=step,
+        ema=ema,
+    )
     if clean_loop_cfg is not None and clean_loop_cfg.enabled and clean_loop_cfg.version == 2:
         if not isinstance(clean_loop_bank, TrajectoryBank):
             raise TypeError("clean_loop v2 requires a TrajectoryBank")
@@ -431,13 +454,21 @@ def compute_forward_batch(
             clean_loop_bank=clean_loop_bank,
             ema=clean_teacher_ema if clean_teacher_ema is not None else ema,
         )
-        return _attach_terminal_adversarial_payload(
+        fwd = _attach_terminal_adversarial_payload(
             cfg=cfg,
             model_ctx=model_ctx,
             denoiser=denoiser,
             process=process,
             fwd=fwd,
             prefix=terminal_prefix,
+        )
+        return _attach_terminal_distribution_payload(
+            cfg=cfg,
+            model_ctx=model_ctx,
+            denoiser=denoiser,
+            process=process,
+            fwd=fwd,
+            prefix=distribution_prefix,
         )
     x0 = x0.to(runtime.device, non_blocking=True)
     bsz = x0.shape[0]
@@ -607,13 +638,21 @@ def compute_forward_batch(
         out=fresh_out,
         extra_metrics=extra_metrics,
     )
-    return _attach_terminal_adversarial_payload(
+    fwd = _attach_terminal_adversarial_payload(
         cfg=cfg,
         model_ctx=model_ctx,
         denoiser=denoiser,
         process=process,
         fwd=fwd,
         prefix=terminal_prefix,
+    )
+    return _attach_terminal_distribution_payload(
+        cfg=cfg,
+        model_ctx=model_ctx,
+        denoiser=denoiser,
+        process=process,
+        fwd=fwd,
+        prefix=distribution_prefix,
     )
 
 
@@ -776,6 +815,37 @@ def _terminal_heun_prefix_from_root(
     return x.detach(), final_t, final_s
 
 
+@torch.no_grad()
+def _terminal_heun_prefix_before_suffix(
+    *,
+    denoiser: Denoiser,
+    process: BaseProcess,
+    root: torch.Tensor,
+    steps: int,
+    suffix_steps: int,
+    cond: torch.Tensor | None,
+    null_cond: torch.Tensor | None,
+    guidance_scale: float,
+) -> torch.Tensor:
+    pairs = process.schedule.iter_pairs(steps, device=root.device)
+    if not 1 <= suffix_steps <= len(pairs):
+        raise ValueError(f"suffix_steps must be in [1,{len(pairs)}], got {suffix_steps}")
+    x = root
+    for t_scalar, s_scalar in pairs[:-suffix_steps]:
+        x, _, _, _ = _teacher_heun_step(
+            denoiser=denoiser,
+            process=process,
+            x=x,
+            t_scalar=t_scalar,
+            s_scalar=s_scalar,
+            cond=cond,
+            null_cond=null_cond,
+            guidance_scale=guidance_scale,
+            is_last=False,
+        )
+    return x.detach()
+
+
 def _terminal_last_step(
     *,
     denoiser: Denoiser,
@@ -920,6 +990,186 @@ def _attach_terminal_adversarial_payload(
         "gan/terminal_batch": float(fake.shape[0]),
         "gan/terminal_prefix_t": prefix.t_scalar.detach().float(),
         "gan/terminal_fake_rms": fake.detach().float().square().mean().sqrt(),
+    }
+    return fwd
+
+
+def _prepare_terminal_distribution_prefix(
+    *,
+    cfg: dict,
+    runtime: RuntimeContext,
+    model_ctx: ModelContext,
+    denoiser: Denoiser,
+    process: BaseProcess,
+    x0: torch.Tensor,
+    y: object,
+    use_label_cond: bool,
+    step: int,
+    ema: EMA | None,
+) -> TerminalAdversarialPrefix | None:
+    dist_cfg = build_distribution_matching_config(cfg)
+    if distribution_matching_weight(dist_cfg, step) <= 0.0:
+        return None
+    if ema is None:
+        raise ValueError("terminal distribution matching requires train.use_ema=true")
+    if bool((cfg.get("clean_loop", {}) or {}).get("enabled", False)):
+        raise ValueError("distribution_matching cannot be combined with clean_loop")
+    if bool((cfg.get("adversarial", {}) or {}).get("enabled", False)):
+        raise ValueError("distribution_matching cannot be combined with adversarial training")
+    correction = denoiser.solver_correction
+    if correction is None:
+        raise ValueError("distribution_matching requires solver_correction.enabled=true")
+    expected_start = dist_cfg.terminal_steps - dist_cfg.suffix_steps
+    if (
+        correction.cfg.solver_steps != dist_cfg.terminal_steps
+        or correction.cfg.start_index != expected_start
+    ):
+        raise ValueError(
+            "solver correction and differentiable terminal suffix must align exactly: "
+            f"correction=({correction.cfg.solver_steps},{correction.cfg.start_index}), "
+            f"terminal=({dist_cfg.terminal_steps},{expected_start})"
+        )
+    _validate_terminal_kernel(
+        cfg,
+        steps=dist_cfg.terminal_steps,
+        sampler=dist_cfg.terminal_sampler,
+        guidance_scale=dist_cfg.terminal_guidance_scale,
+    )
+
+    real_all = x0.to(runtime.device, non_blocking=True)
+    n = max(2, int(round(real_all.shape[0] * dist_cfg.batch_ratio)))
+    real = real_all[:n].detach()
+    if use_label_cond:
+        if not isinstance(y, torch.Tensor):
+            raise ValueError("terminal distribution matching requires tensor class labels")
+        cond = y[:n].to(runtime.device, non_blocking=True).long()
+        null_cond = torch.full_like(cond, int(model_ctx.model_cfg.num_classes))
+    else:
+        cond = null_cond = None
+
+    amp_enabled = model_ctx.precision in {"bf16", "fp16"}
+    rng_devices = [runtime.device.index or 0] if runtime.device.type == "cuda" else []
+    rollout_seed = (
+        int(cfg["train"].get("seed", 0))
+        + 3_000_017
+        + int(step) * runtime.world_size
+        + runtime.rank
+    )
+    with torch.random.fork_rng(devices=rng_devices):
+        torch.manual_seed(rollout_seed)
+        root = process.prior_sample(
+            (n, *real.shape[1:]),
+            device=runtime.device,
+            dtype=real.dtype,
+        )
+        with _ema_teacher(denoiser, ema), torch.autocast(
+            device_type=runtime.device.type,
+            dtype=amp_dtype_for_precision(model_ctx.precision),
+            enabled=amp_enabled,
+        ):
+            prefix_x = _terminal_heun_prefix_before_suffix(
+                denoiser=denoiser,
+                process=process,
+                root=root,
+                steps=dist_cfg.terminal_steps,
+                suffix_steps=dist_cfg.suffix_steps,
+                cond=cond,
+                null_cond=null_cond,
+                guidance_scale=dist_cfg.terminal_guidance_scale,
+            )
+    pairs = process.schedule.iter_pairs(dist_cfg.terminal_steps, device=runtime.device)
+    start_t = pairs[-dist_cfg.suffix_steps][0]
+    final_s = pairs[-1][1]
+    return TerminalAdversarialPrefix(
+        x=prefix_x,
+        t_scalar=start_t,
+        s_scalar=final_s,
+        real=real,
+        cond=cond,
+        null_cond=null_cond,
+        suffix_steps=dist_cfg.suffix_steps,
+    )
+
+
+def _terminal_correction_suffix(
+    *,
+    denoiser: Denoiser,
+    process: BaseProcess,
+    x: torch.Tensor,
+    steps: int,
+    suffix_steps: int,
+    cond: torch.Tensor | None,
+    null_cond: torch.Tensor | None,
+    guidance_scale: float,
+) -> torch.Tensor:
+    pairs = process.schedule.iter_pairs(steps, device=x.device)[-suffix_steps:]
+    for index, (t_scalar, s_scalar) in enumerate(pairs):
+        t = t_scalar.to(device=x.device, dtype=torch.float32).expand(x.shape[0])
+        output = denoiser.model_output(
+            x,
+            t,
+            cond=cond,
+            null_cond=null_cond,
+            guidance_scale=guidance_scale,
+            correction_only=True,
+        )
+        velocity = process.velocity_from_output(x, t, output, aux={})
+        dt = (s_scalar - t_scalar).to(device=x.device, dtype=x.dtype)
+        is_last = index == len(pairs) - 1
+        if is_last:
+            x = x + dt * velocity
+            continue
+        x_euler = x + dt * velocity
+        s = s_scalar.to(device=x.device, dtype=torch.float32).expand(x.shape[0])
+        output_s = denoiser.model_output(
+            x_euler,
+            s,
+            cond=cond,
+            null_cond=null_cond,
+            guidance_scale=guidance_scale,
+            correction_only=True,
+        )
+        velocity_s = process.velocity_from_output(x_euler, s, output_s, aux={})
+        x = x + dt * 0.5 * (velocity + velocity_s)
+    return x
+
+
+def _attach_terminal_distribution_payload(
+    *,
+    cfg: dict,
+    model_ctx: ModelContext,
+    denoiser: Denoiser,
+    process: BaseProcess,
+    fwd: TrainForwardBatch,
+    prefix: TerminalAdversarialPrefix | None,
+) -> TrainForwardBatch:
+    if prefix is None:
+        return fwd
+    dist_cfg = build_distribution_matching_config(cfg)
+    amp_enabled = model_ctx.precision in {"bf16", "fp16"}
+    with torch.autocast(
+        device_type=prefix.x.device.type,
+        dtype=amp_dtype_for_precision(model_ctx.precision),
+        enabled=amp_enabled,
+    ):
+        fake = _terminal_correction_suffix(
+            denoiser=denoiser,
+            process=process,
+            x=prefix.x,
+            steps=dist_cfg.terminal_steps,
+            suffix_steps=dist_cfg.suffix_steps,
+            cond=prefix.cond,
+            null_cond=prefix.null_cond,
+            guidance_scale=dist_cfg.terminal_guidance_scale,
+        )
+    fwd.dist_real = prefix.real
+    fwd.dist_fake = fake
+    fwd.extra_metrics = {
+        **(fwd.extra_metrics or {}),
+        "dist/terminal_batch": float(fake.shape[0]),
+        "dist/terminal_prefix_t": prefix.t_scalar.detach().float(),
+        "dist/terminal_fake_rms": fake.detach().float().square().mean().sqrt(),
+        "dist/suffix_steps": float(prefix.suffix_steps),
     }
     return fwd
 
@@ -1591,6 +1841,91 @@ def maybe_apply_adversarial(
     _set_requires_grad(discriminator, True)
 
 
+def maybe_apply_distribution_matching(
+    *,
+    cfg: dict,
+    fwd: TrainForwardBatch,
+    denoiser: Denoiser,
+    feature_extractor: DifferentiableFIDInception | None,
+    step: int,
+) -> None:
+    dist_cfg = build_distribution_matching_config(cfg)
+    scheduled_weight = distribution_matching_weight(dist_cfg, step)
+    if feature_extractor is None or scheduled_weight <= 0.0:
+        return
+    if fwd.dist_real is None or fwd.dist_fake is None:
+        raise RuntimeError("terminal distribution payload was not attached to the forward batch")
+    if not denoiser.correction_parameters():
+        raise RuntimeError("distribution matching has no trainable solver correction parameters")
+
+    real_pixels = model_images_to_fid_pixels(
+        fwd.dist_real.float(),
+        cfg,
+        straight_through_quantize=True,
+    )
+    fake_pixels = model_images_to_fid_pixels(
+        fwd.dist_fake.float(),
+        cfg,
+        straight_through_quantize=True,
+    )
+    with torch.no_grad():
+        real_features = feature_extractor(real_pixels)
+    fake_features = feature_extractor(fake_pixels)
+    kid = polynomial_mmd2(
+        fake_features,
+        real_features,
+        degree=dist_cfg.degree,
+        unbiased=True,
+    )
+
+    if dist_cfg.gradient_ratio > 0.0:
+        fresh_norm, raw_aux_norm, cosine = _parameter_gradient_pair_stats(
+            fwd.loss,
+            kid,
+            denoiser,
+        )
+        warmup_fraction = min(scheduled_weight / max(dist_cfg.weight, 1.0e-12), 1.0)
+        target_ratio = dist_cfg.gradient_ratio * warmup_fraction
+        scale = (
+            target_ratio * fresh_norm / raw_aux_norm.clamp_min(1.0e-12)
+        ).detach().clamp(max=dist_cfg.scale_max)
+        actual_ratio = scale * raw_aux_norm.detach() / fresh_norm.detach().clamp_min(1.0e-12)
+        dot = cosine.detach() * fresh_norm.detach() * raw_aux_norm.detach()
+        combined_norm = (
+            fresh_norm.detach().square()
+            + 2.0 * scale * dot
+            + scale.square() * raw_aux_norm.detach().square()
+        ).clamp_min(0.0).sqrt()
+        combined_cosine = (
+            fresh_norm.detach().square() + scale * dot
+        ) / (fresh_norm.detach() * combined_norm).clamp_min(1.0e-12)
+    else:
+        scale = torch.as_tensor(scheduled_weight, device=kid.device, dtype=kid.dtype)
+        target_ratio = 0.0
+        actual_ratio = torch.zeros((), device=kid.device)
+        fresh_norm = torch.zeros((), device=kid.device)
+        raw_aux_norm = torch.zeros((), device=kid.device)
+        cosine = torch.zeros((), device=kid.device)
+        combined_cosine = torch.ones((), device=kid.device)
+
+    contribution = scale * kid
+    fwd.loss = fwd.loss + contribution
+    fwd.extra_metrics = {
+        **(fwd.extra_metrics or {}),
+        "dist/kid": kid.detach(),
+        "dist/loss_contrib": contribution.detach(),
+        "dist/scale": scale.detach(),
+        "dist/gradient_target": target_ratio,
+        "dist/gradient_ratio_actual": actual_ratio.detach(),
+        "dist/fresh_parameter_grad_norm": fresh_norm.detach(),
+        "dist/raw_parameter_grad_norm": raw_aux_norm.detach(),
+        "dist/parameter_cosine": cosine.detach(),
+        "dist/combined_fresh_cosine": combined_cosine.detach(),
+        "dist/feature_fake_rms": fake_features.detach().float().square().mean().sqrt(),
+        "dist/feature_real_rms": real_features.detach().float().square().mean().sqrt(),
+    }
+
+
 def should_log_training_step(*, loop_cfg: LoopConfig, resume: ResumeState) -> bool:
     force_log = resume.run_step <= 20
     return force_log or (resume.global_step % loop_cfg.log_every == 0)
@@ -1607,12 +1942,19 @@ def _configure_parameter_gradient_vjp(cfg: dict) -> bool:
 
     clean_cfg = cfg.get("clean_loop", {}) or {}
     compile_cfg = cfg.get("compile", {}) or {}
-    needs_reusable_backward = (
+    clean_needs_reusable_backward = (
         bool(compile_cfg.get("enabled", False))
         and bool(clean_cfg.get("enabled", False))
         and int(clean_cfg.get("version", 1)) == 2
         and str(clean_cfg.get("aux_gradient_space", "output")).lower() == "parameter"
     )
+    distribution_cfg = cfg.get("distribution_matching", {}) or {}
+    distribution_needs_reusable_backward = (
+        bool(compile_cfg.get("enabled", False))
+        and bool(distribution_cfg.get("enabled", False))
+        and float(distribution_cfg.get("gradient_ratio", 0.0)) > 0.0
+    )
+    needs_reusable_backward = clean_needs_reusable_backward or distribution_needs_reusable_backward
     if not needs_reusable_backward:
         return False
 
@@ -1717,7 +2059,23 @@ def train(cfg: dict) -> None:
         time_sampler=time_sampler,
         time_condition_jitter=cfg.get("time_condition_jitter", None),
         model_conditioning=cfg.get("model_conditioning", None),
+        solver_correction=cfg.get("solver_correction", None),
     )
+    distribution_cfg = build_distribution_matching_config(cfg)
+    distribution_feature_extractor = None
+    if distribution_cfg.enabled:
+        # FeatureExtractorInceptionV3 initializes layers before loading fixed
+        # weights. Keep that irrelevant initialization out of the experiment's
+        # global CPU RNG stream so pre-aux fresh batches remain branch-identical.
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(0)
+            inception = FeatureExtractorInceptionV3(
+                "inception-v3-compat",
+                ["2048"],
+                feature_extractor_internal_dtype="float32",
+                verbose=False,
+            ).to(runtime.device)
+        distribution_feature_extractor = DifferentiableFIDInception(inception).to(runtime.device).eval()
     clean_loop_cfg = build_clean_loop_config(cfg)
     clean_loop_bank = None
     if clean_loop_cfg.enabled:
@@ -1741,8 +2099,10 @@ def train(cfg: dict) -> None:
             runtime.logger.log_text("\n".join(time_sampler_shape))
         runtime.logger.log_text(f"[time_condition_jitter] {cfg.get('time_condition_jitter', {'enabled': False})}")
         runtime.logger.log_text(f"[model_conditioning] {cfg.get('model_conditioning', {'ignore_time': False})}")
+        runtime.logger.log_text(f"[solver_correction] {cfg.get('solver_correction', {'enabled': False})}")
         runtime.logger.log_text(f"[clean_loop] {cfg.get('clean_loop', {'enabled': False})}")
         runtime.logger.log_text(f"[adversarial] {cfg.get('adversarial', {'enabled': False})}")
+        runtime.logger.log_text(f"[distribution_matching] {cfg.get('distribution_matching', {'enabled': False})}")
     fused_optimizer = bool(cfg["train"].get("fused_optimizer", False)) and runtime.device.type == "cuda"
     optimizer = torch.optim.AdamW(
         denoiser.parameters(),
@@ -1891,6 +2251,13 @@ def train(cfg: dict) -> None:
                         clean_teacher_ema=clean_teacher_ema,
                     )
                     maybe_apply_adversarial(cfg=cfg, fwd=fwd, process=process, discriminator=discriminator, d_optimizer=d_optimizer, scaler=scaler, step=resume.global_step)
+                    maybe_apply_distribution_matching(
+                        cfg=cfg,
+                        fwd=fwd,
+                        denoiser=denoiser,
+                        feature_extractor=distribution_feature_extractor,
+                        step=resume.global_step,
+                    )
                     backward_loss(fwd.loss, current_accum_steps=current_accum_steps, scaler=scaler)
                 grad_norm = None
                 if did_optimizer_step:

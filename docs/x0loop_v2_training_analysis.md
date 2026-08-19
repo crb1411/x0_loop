@@ -824,6 +824,77 @@ float-ST forward 最大误差严格为 0，差异来自 CUDA 对不同 batch sha
 path；不允许直接污染共享 backbone。原始 artifact 位于
 `runs/x0loop_v2_from_scratch/cycle06/readiness/fresh_time_step58500/inception_mmd/`。
 
+### Cycle 06：solver-index gated terminal distribution correction
+
+本周期遵循 `docs/x0loop_research_principles.md` v1。启动前冻结的可证伪假设是：在不替换
+fresh loss、不修改 Heun-20/CFG-2.2 inference kernel 的前提下，只让真实终点分布梯度更新
+低噪声末四个 solver index 的小型 residual correction，能够比同结构无分布损失对照获得
+更低的最终 FID；若不能，则当前 exact-Inception minibatch KID 信号没有转化为生成质量收益。
+
+实现使用 12,643 参数的 `SolverIndexCorrection`，相对 59,475,496 参数的主模型约 0.021%。
+它读取当前 state、停止梯度的 base model output 和 solver-index embedding，只在 20-step
+grid 的 index 16--19 开启；输出层零初始化，因此初始 inference function 与
+FRESH-TIME 相同。正常 fresh loss 仍更新完整 backbone 和 correction。分布辅助先用当前
+EMA 按真正的 Heun-20/CFG-2.2、正确 endpoint 无梯度 rollout 到 index 16，再用当前 student
+完成最后四个 solver pair 的截断反传；base output 在这条路径上停止梯度，KID 梯度只进入
+correction。这是明确的 EMA-prefix/current-suffix online 定义，不把它表述为同一时刻的纯
+EMA 轨迹；Heun predictor/corrector、最后一步 Euler、CFG 合并规则和 correction 加法在训练
+与 evaluator 中完全一致。若它失败，off-policy EMA/student lag 仍是复盘项之一。
+
+终点目标直接比较当前 CIFAR-10 real batch 与生成终点的 exact FID-Inception-2048 feature，
+使用 degree-3 unbiased polynomial MMD。辅助 batch 为 16（主 batch 的 0.0625），step 10,000
+开始并用 1,000 steps warmup，实际 correction 参数梯度范数固定为当前 fresh 全参数梯度范数
+的 0.10，上限保护不变。固定 Inception 不进入 optimizer、EMA 或 checkpoint。该设计不再
+使用 paired ancestral GT、历史 x0、moving/frozen teacher 或 replay bank。
+
+实现前 smoke 和公平性审计均通过：
+
+| check | result |
+|---|---:|
+| eager `GATED-CONTROL` one-step | pass，峰值 10.51 GiB |
+| eager `GATED-DIST` forced-aux one-step | pass，实际梯度比 0.10000，峰值 12.93 GiB |
+| compiled distribution VJP | pass，无 donated-buffer mutation |
+| correction checkpoint strict load + EMA Heun-20 trace | missing/unexpected keys 均为 0 |
+| compiled 50-step forced-aux stable median | 0.2907 s/step，880.9 img/s，峰值 9.84 GiB |
+| forced-aux parameter cosine median | aux/fresh 0.0752，combined/fresh 0.9952 |
+
+为避免新增模块初始化悄然移动训练数据、噪声或 dropout 随机流，correction 和固定 Inception
+构造都使用隔离的 CPU RNG fork。一步匹配 smoke 中，在 distribution 尚未启用时，
+`GATED-CONTROL` 与 `GATED-DIST` 的 loss、fresh loss、z/x0/v MSE、grad norm 和 LR 逐项
+完全相同；三者与 `FRESH-TIME` 的 loss、z/x0/v MSE 和 LR 也完全相同。FRESH 的 grad norm
+为 17.2608，而两个 gated 分支为 20.6561，这是零输出 correction 的末层仍会收到 fresh
+梯度所致，属于 `GATED-CONTROL` 要隔离的结构效应，不是随机流错位。
+
+三次正式训练的配置在看结果前固定如下，运行顺序为 FRESH-TIME、GATED-CONTROL、
+GATED-DIST，均在 GPU 6 独立从 seed 42 随机初始化训练 300 epochs（58,500 optimizer
+steps），不共享 checkpoint：
+
+| branch | correction | terminal KID | 因果用途 |
+|---|---|---|---|
+| FRESH-TIME | off | off | 同 commit、同随机流基线复现 |
+| GATED-CONTROL | index 16--19 | off | 测量新增参数和 fresh-gradient 路径本身的效应 |
+| GATED-DIST | index 16--19 | step 10k 后 | 测量终点分布梯度相对结构对照的增量 |
+
+三支都在 step 15k/30k/45k 运行固定 seed、固定 label 顺序的 5k FID；训练结束 checkpoint
+各运行一次 EMA Heun-20/CFG-2.2 50k FID。每支按最低中途 5k FID 在 15k/30k/45k 中预选
+一个 checkpoint，再补一次 50k FID、KID、precision/recall；同时保留 ending checkpoint
+结果，不以事后结果改变选点规则。只有接近或超过基线的候选才扩展 NFE 4/8 和额外 seed。
+
+停止规则同样预先冻结：非有限 loss/gradient 或 checkpoint 不可恢复立即停止；
+GATED-DIST 若在 15k 的 5k FID 至少为同 step GATED-CONTROL 的 1.5 倍，且固定-root trace
+同时出现终点 RMS 偏差超过 10% 或低噪声 correction 坍缩，则作为有效证伪提前停止；若未
+满足，至少运行到 30k。若 15k、30k 两点都比 control 差 25% 以上且轨迹退化方向一致，
+同样提前停止。其他情况完整训练 300 epochs，避免凭单次 5k 波动剪枝。
+
+50-step 性能 smoke 只是短窗口预算而非正式 MFU 结论。按当前稳定值，GATED-DIST 在
+10k warmup 后的 48.5k steps 约需 3.9 小时，连同 warmup、首次编译、三次 5k FID、最终
+50k FID 和写盘约 4.2--4.5 小时；FRESH-TIME 约 1.1--1.3 小时，GATED-CONTROL 预计接近
+基线。三支顺序执行总预算约 6.5--7.5 小时。正式日志完成后必须用完整稳定窗口重算
+step time、MFU、GPU 利用率和各阶段时间占比，不能用该 smoke 外推替代实测。
+
+本周期当前正式训练计数为 0/3。完成三支（或按上述规则有效证伪）后，必须先做全局复盘
+和同 root 全 Heun grid 采样分析，再允许设计 Cycle 07。
+
 ## 时间与吞吐分析
 
 300 epochs 在 CIFAR-10、batch 256 下是 58,500 optimizer steps（每 epoch 约

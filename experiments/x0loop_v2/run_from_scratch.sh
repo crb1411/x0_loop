@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: $0 fresh|fresh-fixed-repro|fresh-time|bank-fix|bank-x0|online|online-x0|online-x0-time|online-x0-time-frozen|denoise-gan|terminal-gan" >&2
+  echo "usage: $0 fresh|fresh-fixed-repro|fresh-time|gated-control|gated-dist|bank-fix|bank-x0|online|online-x0|online-x0-time|online-x0-time-frozen|denoise-gan|terminal-gan" >&2
   exit 2
 fi
 
@@ -32,7 +32,13 @@ adv_batch_ratio=${X0LOOP_ADV_BATCH_RATIO:-0.125}
 adv_gradient_ratio=${X0LOOP_ADV_GRADIENT_RATIO:-0.1}
 adv_start_step=${X0LOOP_ADV_START_STEP:-10000}
 adv_warmup_steps=${X0LOOP_ADV_WARMUP_STEPS:-1000}
+dist_batch_ratio=${X0LOOP_DIST_BATCH_RATIO:-0.0625}
+dist_gradient_ratio=${X0LOOP_DIST_GRADIENT_RATIO:-0.10}
+dist_start_step=${X0LOOP_DIST_START_STEP:-10000}
+dist_warmup_steps=${X0LOOP_DIST_WARMUP_STEPS:-1000}
 branch_teacher_mode=moving
+correction_enabled=false
+dist_enabled=false
 
 case "$branch" in
   fresh)
@@ -64,6 +70,29 @@ case "$branch" in
     model_ignore_time=false
     time_jitter_enabled=false
     branch_aux_gradient_space=output
+    ;;
+  gated-control)
+    clean_enabled=false
+    clean_mode=bank_fix
+    branch_aux_target=velocity
+    adv_enabled=false
+    adv_fake_space=x0_hat
+    model_ignore_time=false
+    time_jitter_enabled=false
+    branch_aux_gradient_space=output
+    correction_enabled=true
+    ;;
+  gated-dist)
+    clean_enabled=false
+    clean_mode=bank_fix
+    branch_aux_target=velocity
+    adv_enabled=false
+    adv_fake_space=x0_hat
+    model_ignore_time=false
+    time_jitter_enabled=false
+    branch_aux_gradient_space=output
+    correction_enabled=true
+    dist_enabled=true
     ;;
   bank-fix)
     clean_enabled=true
@@ -180,6 +209,7 @@ CUDA_VISIBLE_DEVICES=$gpu uv run python -m x0loop.train \
   --set "compile.dynamic=$compile_dynamic" \
   --set "model_conditioning.ignore_time=$model_ignore_time" \
   --set "time_condition_jitter.enabled=$time_jitter_enabled" \
+  --set "solver_correction.enabled=$correction_enabled" \
   --set "train.resume=$resume" \
   --set "train.epochs=$epochs" \
   --set "train.run_steps=$run_steps" \
@@ -204,6 +234,11 @@ CUDA_VISIBLE_DEVICES=$gpu uv run python -m x0loop.train \
   --set "adversarial.gradient_ratio=$adv_gradient_ratio" \
   --set "adversarial.start_step=$adv_start_step" \
   --set "adversarial.warmup_steps=$adv_warmup_steps" \
+  --set "distribution_matching.enabled=$dist_enabled" \
+  --set "distribution_matching.batch_ratio=$dist_batch_ratio" \
+  --set "distribution_matching.gradient_ratio=$dist_gradient_ratio" \
+  --set "distribution_matching.start_step=$dist_start_step" \
+  --set "distribution_matching.warmup_steps=$dist_warmup_steps" \
   --set "gen_eval.enabled=$fid_enabled" \
   --set "gen_eval.final.enabled=$final_fid_enabled" \
   --set "gen_eval.every_steps=$fid_every" \

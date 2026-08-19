@@ -138,7 +138,14 @@ class Logger:
         fresh_scale = val("clean/fresh_scale", 1.0)
         fresh_loss = val("fresh/loss", total_loss)
         step_width = len(str(int(total_steps))) if total_steps is not None and total_steps > 0 else 0
-        if "gan/g_adv_loss" in kv:
+        if "dist/kid" in kv:
+            loss_part = (
+                f"(loss) {cls._fmt_sig(total_loss)} = "
+                f"(fresh) {cls._fmt_sig(val('fresh/loss_contrib', fresh_loss))} + "
+                f"(dist_scale) {cls._fmt_sig(val('dist/scale'))} * "
+                f"(kid) {cls._fmt_sig(val('dist/kid'))}"
+            )
+        elif "gan/g_adv_loss" in kv:
             loss_part = (
                 f"(loss) {cls._fmt_sig(total_loss)} = "
                 f"(fresh) {cls._fmt_sig(val('fresh/loss_contrib', fresh_loss))} + "
@@ -242,6 +249,20 @@ class Logger:
                 gan.append(f"{label}={cls._fmt_num(kv[key])}")
         if gan:
             parts.append(f"(gan) {' '.join(gan)}")
+
+        distribution = []
+        for key, label in (
+            ("dist/terminal_batch", "batch"),
+            ("dist/gradient_target", "grad_target"),
+            ("dist/gradient_ratio_actual", "grad_ratio"),
+            ("dist/parameter_cosine", "param_cos"),
+            ("dist/combined_fresh_cosine", "combined_cos"),
+            ("dist/terminal_fake_rms", "fake_rms"),
+        ):
+            if key in kv:
+                distribution.append(f"{label}={cls._fmt_num(kv[key])}")
+        if distribution:
+            parts.append(f"(dist) {' '.join(distribution)}")
 
         progress = []
         if "progress_pct" in kv:

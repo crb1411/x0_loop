@@ -51,6 +51,11 @@ time_condition_jitter:
 model_conditioning:
   ignore_time: true
   time_constant: 0.5
+solver_correction:
+  enabled: false
+  solver_steps: 20
+  start_index: 16
+  hidden_channels: 32
 clean_loop:
   enabled: false
   version: 2
@@ -96,6 +101,21 @@ adversarial:
     steps: 20
     sampler: heun
     guidance_scale: 2.2
+distribution_matching:
+  enabled: false
+  objective: inception_kid
+  weight: 1.0
+  start_step: 10000
+  warmup_steps: 1000
+  batch_ratio: 0.0625
+  gradient_ratio: 0.10
+  scale_max: 10.0
+  degree: 3
+  terminal:
+    steps: 20
+    sampler: heun
+    guidance_scale: 2.2
+    suffix_steps: 4
 discriminator:
   name: x0_resnet
   base_channels: 16

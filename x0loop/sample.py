@@ -43,7 +43,12 @@ def main():
     model = model.to(device)
     schedule = build_schedule(cfg)
     process = build_process(cfg, schedule).to(device)
-    denoiser = Denoiser(model, process=process)
+    denoiser = Denoiser(
+        model,
+        process=process,
+        model_conditioning=cfg.get("model_conditioning", None),
+        solver_correction=cfg.get("solver_correction", None),
+    )
 
     ema = EMA(denoiser, decay=float(cfg["train"].get("ema_decay", 0.9999))) if bool(cfg["train"].get("use_ema", True)) else None
     ckpt_mode = cfg.get("distributed", {}).get("checkpoint", {}).get("mode", "full")

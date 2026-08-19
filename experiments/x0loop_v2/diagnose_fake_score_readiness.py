@@ -104,6 +104,7 @@ def _load_ema_denoiser(cfg: dict, checkpoint: dict, device: torch.device) -> tup
         time_sampler=time_sampler,
         time_condition_jitter=cfg.get("time_condition_jitter"),
         model_conditioning=cfg.get("model_conditioning"),
+        solver_correction=cfg.get("solver_correction"),
     ).to(device)
     _load_model_state_with_fallback(denoiser, checkpoint["model"], strict=True)
     ema = EMA(denoiser, decay=float((cfg.get("train", {}) or {}).get("ema_decay", 0.996)))

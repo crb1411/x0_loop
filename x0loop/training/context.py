@@ -103,3 +103,7 @@ class ForwardBatch:
     adv_cond: torch.Tensor | None = None
     adv_t: torch.Tensor | None = None
     adv_output: torch.Tensor | None = None
+    # Fixed-feature terminal distribution payload. The real/fake tensors are
+    # model-space images; the exact FID conversion happens once in the loss.
+    dist_real: torch.Tensor | None = None
+    dist_fake: torch.Tensor | None = None

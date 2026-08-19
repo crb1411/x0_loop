@@ -154,6 +154,7 @@ def _load_model(cfg: dict, ckpt_path: str, device: torch.device):
         net.to(device),
         process=process,
         model_conditioning=cfg.get("model_conditioning", None),
+        solver_correction=cfg.get("solver_correction", None),
     )
 
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
