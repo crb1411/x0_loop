@@ -12,7 +12,7 @@ if ! declare -p EXTRA_SETS >/dev/null 2>&1; then
 fi
 
 find_free_port() {
-  python - <<'PY'
+  uv run python - <<'PY'
 import socket
 s = socket.socket()
 s.bind(("", 0))
@@ -83,7 +83,7 @@ write_launch_header() {
 
 start_training() {
   setsid train_run/run_and_plot.sh "${LOG_FILE}" "${X0LOOP_RUN_TIMESTAMP}" "${ROOT}" -- \
-    torchrun \
+    uv run torchrun \
     --nnodes=1 \
     --node_rank=0 \
     --nproc_per_node="${NPROC_PER_NODE}" \

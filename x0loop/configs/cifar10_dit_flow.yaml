@@ -1,6 +1,6 @@
 dataset:
   name: cifar10
-  root: /root/data/cifar10_data
+  root: /mnt/data/crb/data
 
 model:
   image_size: 32

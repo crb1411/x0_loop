@@ -124,6 +124,12 @@ def build_loop_config(cfg: dict, loader: DataLoader, distributed_cfg: dict) -> L
     micro_steps_per_epoch = len(loader)
     optimizer_steps_per_epoch = math.ceil(micro_steps_per_epoch / gradient_accumulation_steps)
     total_steps = epochs * optimizer_steps_per_epoch
+    max_steps = cfg["train"].get("max_steps")
+    if max_steps is not None:
+        max_steps = int(max_steps)
+        if max_steps <= 0:
+            raise ValueError(f"train.max_steps must be > 0 when set, got {max_steps}")
+        total_steps = min(total_steps, max_steps)
     lr_for_step, lr_sched_meta = build_step_lr_schedule(cfg["train"], total_steps=total_steps, steps_per_epoch=optimizer_steps_per_epoch)
     grad_clip_cfg = cfg.get("train", {}).get("max_clip_grad", None)
     if grad_clip_cfg is None:
@@ -474,10 +480,14 @@ def train(cfg: dict) -> None:
         denoiser.train()
         iter_start = time.time()
         for epoch in range(resume.start_epoch, loop_cfg.epochs):
+            if resume.global_step >= loop_cfg.total_steps:
+                break
             if data_ctx.sampler is not None:
                 data_ctx.sampler.set_epoch(epoch)
             use_label_cond = int(cfg["model"].get("num_classes", 0)) > 0
             for micro_step, (x0, y) in enumerate(data_ctx.loader):
+                if resume.global_step >= loop_cfg.total_steps:
+                    break
                 accum_index = micro_step % loop_cfg.gradient_accumulation_steps
                 update_step = accum_index == 0
                 remaining_micro_steps = loop_cfg.micro_steps_per_epoch - micro_step

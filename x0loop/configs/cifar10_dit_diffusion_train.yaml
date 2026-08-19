@@ -1,6 +1,6 @@
 dataset:
   name: cifar10 # cifar10 | mnist | imagefolder | tiny-imagenet | tiny_imagenet
-  root: /root/data/cifar10_data
+  root: /mnt/data/crb/data
   download: false # false | true
 
 model:

@@ -1,0 +1,26 @@
+[project]
+name = "x0-loop"
+version = "0.1.0"
+description = "Image-generation training experiments on CIFAR-10"
+requires-python = ">=3.11"
+dependencies = [
+  "matplotlib",
+  "pytest",
+  "pyyaml",
+  "tensorboard",
+  "torch==2.11.0",
+  "torch-fidelity",
+  "torchvision==0.26.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

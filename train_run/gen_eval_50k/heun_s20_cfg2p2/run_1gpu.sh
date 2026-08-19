@@ -6,12 +6,12 @@ ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "${ROOT}"
 
 EXP="heun_s20_cfg2p2_50k"
-CKPT="/data/seek/aigc/x0_loop/runs/ablations/cifar10_flow_x0_vloss/jit/learnable_endpoint/scheme2_beta0p8/20260616_081221/checkpoints/ckpt_step_00100000.pt"
+CKPT="./runs/ablations/cifar10_flow_x0_vloss/jit/learnable_endpoint/scheme2_beta0p8/20260616_081221/checkpoints/ckpt_step_00100000.pt"
 EVAL_CFG="${ROOT}/train_run/gen_eval_50k/heun_s20_cfg2p2/eval.yaml"
-OUT_DIR="/data/seek/aigc/x0_loop/runs/gen_eval_50k/heun_s20_cfg2p2"
+OUT_DIR="./runs/gen_eval_50k/heun_s20_cfg2p2"
 LOG_DIR="${OUT_DIR}/logs"
 LOG_FILE="${LOG_DIR}/eval_1gpu.log"
-PYTHON="${PYTHON:-/root/miniconda3/envs/vl/bin/python}"
+PYTHON="${PYTHON:-.venv/bin/python}"
 
 mkdir -p "${LOG_DIR}"
 

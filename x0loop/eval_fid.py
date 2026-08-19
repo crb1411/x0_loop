@@ -7,7 +7,7 @@ samples) and the checkpoint path are needed. Each process evaluates on one GPU:
     CUDA_VISIBLE_DEVICES=0 python -m x0loop.eval_fid \
         --ckpt /path/ckpt_step_00100000.pt \
         --eval-config train_run/sampler_ablation/<exp>/eval.yaml \
-        --set logging.out_dir=/data/.../runs/sampler_ablation/<exp>
+        --set logging.out_dir=runs/sampler_ablation/<exp>
 """
 
 from __future__ import annotations

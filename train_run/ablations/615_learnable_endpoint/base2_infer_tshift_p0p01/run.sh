@@ -44,7 +44,7 @@ export NPROC_PER_NODE
 } >> "${LOG_FILE}" 2>&1
 
 CMD=(train_run/run_and_plot.sh "${LOG_FILE}" "${TIMESTAMP}" "${ROOT}" -- \
-  torchrun \
+  uv run torchrun \
   --nnodes=1 \
   --node_rank=0 \
   --nproc_per_node="${NPROC_PER_NODE}" \

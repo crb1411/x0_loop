@@ -11,15 +11,20 @@
 #   sample_grid.png                        — 所有样本的平铺网格
 #   infer_config.yaml                      — 本次推理的完整配置
 
-cd /data/seek/aigc/x0_loop
+set -euo pipefail
+
+if [ ! -d "x0loop" ] || [ ! -d "infer" ]; then
+  echo "请从项目根目录运行: bash infer/infer_cifar10.sh" >&2
+  exit 2
+fi
 export CUDA_VISIBLE_DEVICES=0
 
 # ─── 在这里配置 checkpoint 路径 ───────────────────────────────────────────
-CKPT="/data/seek/aigc/x0_loop/runs/cifar10_diffusion/20260530_141408_train/checkpoints/ckpt_step_00192000.pt"
+CKPT="./runs/cifar10_diffusion/20260530_141408_train/checkpoints/ckpt_step_00192000.pt"
 # ─────────────────────────────────────────────────────────────────────────
 
 # 允许命令行传入覆盖
-if [ -n "$1" ]; then
+if [ -n "${1:-}" ]; then
   CKPT="$1"
 fi
 
@@ -28,6 +33,6 @@ if [ ! -f "$CKPT" ]; then
   exit 1
 fi
 
-python -m x0loop.infer \
+uv run python -m x0loop.infer \
   --ckpt         "$CKPT" \
   --infer-config infer/infer.yaml

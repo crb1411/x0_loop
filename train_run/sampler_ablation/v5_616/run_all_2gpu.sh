@@ -16,7 +16,7 @@ if [[ ! -f "${EXP_FILE}" ]]; then
 fi
 
 mapfile -t EXPERIMENTS < "${EXP_FILE}"
-OUT_BASE="/data/seek/aigc/x0_loop/runs/sampler_ablation/v5_616"
+OUT_BASE="./runs/sampler_ablation/v5_616"
 TODO=()
 for exp in "${EXPERIMENTS[@]}"; do
   if compgen -G "${OUT_BASE}/${exp}/gen_eval_metrics_*.jsonl" > /dev/null; then

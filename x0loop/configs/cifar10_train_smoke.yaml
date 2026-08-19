@@ -1,0 +1,95 @@
+dataset:
+  name: cifar10
+  root: /mnt/data/crb/data
+  download: false
+  normalization: standard
+
+model:
+  name: dit
+  image_size: 32
+  in_channels: 3
+  out_channels: 3
+  patch_size: 4
+  dim: 64
+  depth: 2
+  heads: 4
+  mlp_ratio: 2.0
+  dropout: 0.0
+  num_classes: 10
+
+process:
+  name: flow
+  output_target: v
+  sampler: euler
+
+schedule:
+  mode: flow
+  num_steps: 1000
+
+loss:
+  target: v
+  formula: mse
+
+augment:
+  name: geom
+  mode: data_only
+  hflip_prob: 0.5
+  max_translation: 0
+  crop_min_scale: 1.0
+  enable_crop_resize: false
+
+train:
+  seed: 42
+  deterministic: false
+  epochs: 1
+  max_steps: 2
+  batch_size: 8
+  gradient_accumulation_steps: 1
+  class_dropout_prob: 0.1
+  num_workers: 2
+  lr: 1.0e-4
+  weight_decay: 0.0
+  max_clip_grad: 1.0
+  use_ema: true
+  ema_decay: 0.999
+  resume: null
+
+logging:
+  out_dir: runs/smoke/cifar10
+  log_every: 1
+  window_size: 2
+  use_tb: false
+  sample_every: 0
+  sample_rank0_only: true
+
+eval:
+  enabled: false
+
+gen_eval:
+  enabled: false
+
+sample:
+  steps: 2
+  num: 4
+  sampler: euler
+  guidance_scale: 1.0
+  save_trace: false
+
+distributed:
+  mode: none
+  backend: nccl
+  fsdp: false
+  fsdp_mode: none
+  precision: bf16
+  grad_clip_norm: 1.0
+  activation_ckpt: false
+  checkpoint:
+    mode: full
+    every_steps: 0
+
+compile:
+  enabled: false
+  allow_fsdp: false
+  mode: default
+  fullgraph: false
+  dynamic: false

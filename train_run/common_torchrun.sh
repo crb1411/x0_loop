@@ -7,7 +7,7 @@
 #   run_x0loop_train <config.yaml> [checkpoint.pt] [extra --set args...]
 
 find_free_port() {
-  python - <<'PY'
+  uv run python - <<'PY'
 import socket
 s = socket.socket()
 s.bind(("", 0))
@@ -61,7 +61,7 @@ run_x0loop_train() {
     resume_args+=(--set "train.resume=${resume_path}")
   fi
 
-  torchrun \
+  uv run torchrun \
     --nnodes=1 \
     --node_rank=0 \
     --nproc_per_node="${NPROC_PER_NODE}" \

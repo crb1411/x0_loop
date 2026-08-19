@@ -7,7 +7,7 @@ v2 focuses on the v1 best region:
   - small heun/unipc controls at stronger CFG
 
 Output metrics land under:
-  /data/seek/aigc/x0_loop/runs/sampler_ablation/v2_616/<exp>/
+  ./runs/sampler_ablation/v2_616/<exp>/
 """
 
 from __future__ import annotations
@@ -18,10 +18,10 @@ import stat
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 CKPT = (
-    "/data/seek/aigc/x0_loop/runs/ablations/cifar10_flow_x0_vloss/jit/"
+    "./runs/ablations/cifar10_flow_x0_vloss/jit/"
     "learnable_endpoint/scheme2_beta0p8/20260616_081221/checkpoints/ckpt_step_00100000.pt"
 )
-OUT_BASE = "/data/seek/aigc/x0_loop/runs/sampler_ablation/v2_616"
+OUT_BASE = "./runs/sampler_ablation/v2_616"
 NUM_SAMPLES = 10000
 BATCH_SIZE = 256
 
@@ -78,7 +78,7 @@ gen_eval:
   sampler: {sampler}
   guidance_scale: {cfg}
   input2: cifar10-train
-  datasets_root: /root/data/cifar10_data
+  datasets_root: /mnt/data/crb/data
   datasets_download: false
   keep_images: false
   keep_images_count: 100
@@ -115,7 +115,7 @@ export CUDA_VISIBLE_DEVICES="${{CUDA_VISIBLE_DEVICES:-0}}"
 echo "[sampler_ablation_v2_616] exp=${{EXP}} sampler={sampler} steps={steps} cfg={cfg} GPU=${{CUDA_VISIBLE_DEVICES}}" | tee -a "${{LOG_FILE}}"
 echo "[sampler_ablation_v2_616] out=${{OUT_DIR}}" | tee -a "${{LOG_FILE}}"
 
-python -m x0loop.eval_fid \\
+uv run python -m x0loop.eval_fid \\
   --ckpt "${{CKPT}}" \\
   --eval-config "${{EVAL_CFG}}" \\
   --tag "${{EXP}}" \\

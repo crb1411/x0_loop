@@ -41,7 +41,7 @@ def test_learnable_endpoint_flow_mudata_head_loss_and_tbin():
 
     loss_fn = CompositeLoss([AtomicLoss(target="x0", formula="mse"), AtomicLoss(target="mudata", formula="mse")])
     losses = loss_fn(process, fb, out)
-    assert "mudata" in losses
+    assert "loss_mudata" in losses
 
     acc = TimeBinAccumulator(num_bins=2, device=x0.device)
     acc.update(schedule=schedule, process=process, loss_fn=loss_fn, fb=fb, out=out)
@@ -75,4 +75,4 @@ def test_learnable_endpoint_flow_mudata_target_matches_batch_device_cuda():
     loss_fn = CompositeLoss([AtomicLoss(target="mudata", formula="mse")])
     losses = loss_fn(process, fb, out)
 
-    assert losses["mudata"].device.type == "cuda"
+    assert losses["loss_mudata"].device.type == "cuda"

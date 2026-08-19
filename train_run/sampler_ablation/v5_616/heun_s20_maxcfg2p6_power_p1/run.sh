@@ -6,16 +6,16 @@ ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 cd "${ROOT}"
 
 EXP="heun_s20_maxcfg2p6_power_p1"
-CKPT="/data/seek/aigc/x0_loop/runs/ablations/cifar10_flow_x0_vloss/jit/learnable_endpoint/scheme2_beta0p8/20260616_081221/checkpoints/ckpt_step_00100000.pt"
+CKPT="./runs/ablations/cifar10_flow_x0_vloss/jit/learnable_endpoint/scheme2_beta0p8/20260616_081221/checkpoints/ckpt_step_00100000.pt"
 EVAL_CFG="${ROOT}/train_run/sampler_ablation/v5_616/${EXP}/eval.yaml"
-OUT_DIR="/data/seek/aigc/x0_loop/runs/sampler_ablation/v5_616/${EXP}"
+OUT_DIR="./runs/sampler_ablation/v5_616/${EXP}"
 LOG_DIR="${OUT_DIR}/logs"
 mkdir -p "${LOG_DIR}"
 LOG_FILE="${LOG_DIR}/eval.log"
 
 export PYTHONPATH="${ROOT}:${PYTHONPATH:-}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-PYTHON="${PYTHON:-/root/miniconda3/envs/vl/bin/python}"
+PYTHON="${PYTHON:-.venv/bin/python}"
 if [[ ! -x "${PYTHON}" ]]; then
   PYTHON="python"
 fi

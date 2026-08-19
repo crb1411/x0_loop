@@ -8,7 +8,7 @@
 
 ```text
 x0loop/
-  train.py                    # 训练入口: python -m x0loop.train
+  train.py                    # 训练入口: uv run python -m x0loop.train
   eval_fid.py                 # checkpoint standalone geneval 入口
   core/                       # schedule、process 基类、time sampler、配置工具
   processes/                  # flow / diffusion 过程和采样器
@@ -26,10 +26,10 @@ runs/, runs2/                 # 实验输出目录
 
 ## 环境
 
-基础依赖见 `requirements.txt`：
+项目使用仓库根目录下的 uv 环境，并锁定与当前 CUDA 12.8 驱动兼容的 PyTorch 构建：
 
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
 常用依赖包括：
@@ -42,12 +42,12 @@ tensorboard
 pytest
 ```
 
-部分 geneval 指标依赖 `torch-fidelity`。如果运行 FID / IS / KID 时报缺包，需要在当前环境中补装对应包。
+环境同时包含训练曲线所需的 `matplotlib` 和 geneval 指标所需的 `torch-fidelity`。
 
-建议在仓库根目录运行命令，并设置：
+在仓库根目录运行命令，不需要设置机器相关的 `PYTHONPATH`：
 
 ```bash
-export PYTHONPATH=/data/seek/aigc/x0_loop:${PYTHONPATH:-}
+uv run python -m x0loop.train --help
 ```
 
 ## 配置系统
@@ -55,10 +55,10 @@ export PYTHONPATH=/data/seek/aigc/x0_loop:${PYTHONPATH:-}
 训练入口为：
 
 ```bash
-python -m x0loop.train \
+uv run python -m x0loop.train \
   --config path/to/config.yaml \
   --runtime-config x0loop/configs/runtime/ddp_checkpoint_compile.yaml \
-  --set logging.out_dir=/path/to/output
+  --set logging.out_dir=runs/my_experiment
 ```
 
 配置会合并：
@@ -94,6 +94,17 @@ compile: {}
 ## 训练
 
 推荐优先使用已有脚本启动，避免手动拼接 runtime 和输出目录。
+
+CIFAR-10 数据固定放在 `/mnt/data/crb/data`；其余配置、checkpoint、日志和图片输出均使用仓库根目录下的相对路径。
+
+首次准备环境后，可运行两步真实训练 smoke test：
+
+```bash
+uv sync
+uv run python -m x0loop.train \
+  --config x0loop/configs/cifar10_train_smoke.yaml \
+  --runtime-config x0loop/configs/runtime/debug_runtime.yaml
+```
 
 ### base 训练
 

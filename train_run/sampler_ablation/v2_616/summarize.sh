@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Collect finished v2_616 sampler-ablation results into one table.
 set -euo pipefail
-OUT_BASE="/data/seek/aigc/x0_loop/runs/sampler_ablation/v2_616"
+OUT_BASE="./runs/sampler_ablation/v2_616"
 
-python - "$OUT_BASE" <<'PY'
+uv run python - "$OUT_BASE" <<'PY'
 import glob, json, os, sys
 base = sys.argv[1]
 latest = {}
