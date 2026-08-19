@@ -64,6 +64,34 @@ def test_flow_euler_and_heun_reach_constant_x0():
         assert model.calls == expected_calls
         assert "x" in result["trace"][0]
         assert result["trace"][0]["x"].shape == target.shape
+        assert result["trace"][0]["x_next"].shape == target.shape
+        assert "s" in result["trace"][0]
+        if sampler in {"euler", "heun", "ddim"}:
+            assert result["trace"][0]["x_euler"].shape == target.shape
+            assert result["trace"][0]["velocity"].shape == target.shape
+
+
+def test_heun_trace_exposes_local_solver_correction():
+    shape = (2, 3, 4, 4)
+    schedule = TimeSchedule(mode="flow", num_steps=1000)
+    process = FlowProcess(schedule=schedule, output_target="x0", sampler="heun")
+    model = IncrementX0Model()
+
+    result = process.sample(
+        model=model,
+        steps=3,
+        shape=shape,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        sampler="heun",
+        return_trace=True,
+    )
+
+    first = result["trace"][0]
+    assert torch.allclose(first["x_euler"], first["x"] + (first["s"] - first["t"]) * first["velocity"])
+    assert not torch.allclose(first["x_next"], first["x_euler"])
+    # The final step deliberately falls back to Euler.
+    assert torch.allclose(result["trace"][-1]["x_next"], result["trace"][-1]["x_euler"])
 
 
 def test_flow_clean_loop_sampler_refines_x0hat_inputs():

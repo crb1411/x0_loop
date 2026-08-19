@@ -233,11 +233,11 @@ class FlowProcess(BaseProcess):
                 velocity = self._velocity(x, t, out)
                 # iter_pairs moves from t=1 to t=0, so dt is negative.
                 dt = s_scalar - t_scalar
+                x_euler = x + dt * velocity
                 # Keep the final step Euler: evaluating an x0-predicting model at t=0
                 # would require an unstable eps reconstruction.
                 if method == "heun" and not is_last:
                     # Heun averages the velocity before and after an Euler predictor.
-                    x_euler = x + dt * velocity
                     s = torch.full((shape[0],), float(s_scalar.item()), device=device, dtype=torch.float32)
                     s_model = self._model_time(model, s)
                     s_guidance_scale = self.guidance_scale_at_t(guidance_scale, s, guidance_schedule)
@@ -245,18 +245,26 @@ class FlowProcess(BaseProcess):
                     velocity_s = self._velocity(x_euler, s, out_s)
                     x = x + dt * 0.5 * (velocity + velocity_s)
                 else:
-                    x = x + dt * velocity
+                    x = x_euler
 
             last_x0_hat = x0_hat
             if return_trace:
-                trace.append({
+                trace_item = {
                     "t": t_scalar.detach().cpu(),
                     "path_t": t_scalar.detach().cpu(),
+                    "s": s_scalar.detach().cpu(),
                     "model_t": t_model[0].detach().cpu(),
                     "guidance_scale": float(step_guidance_scale),
                     "x": xt.detach().cpu(),
                     "x0_hat": x0_hat.detach().cpu(),
-                })
+                    "x_next": x.detach().cpu(),
+                }
+                if method in {"euler", "heun"}:
+                    # Retaining the Euler proposal makes the accepted Heun
+                    # correction directly measurable during trajectory review.
+                    trace_item["x_euler"] = x_euler.detach().cpu()
+                    trace_item["velocity"] = velocity.detach().cpu()
+                trace.append(trace_item)
 
         result: dict[str, Any] = {"x": x, "x0_hat": last_x0_hat}
         if return_trace:

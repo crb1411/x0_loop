@@ -81,6 +81,8 @@
 
 待三次训练完成后填写。至少保存同一组 root noise 和 label 在三个模型上的 Heun
 trace，并逐 step 比较状态、velocity、x0_hat、局部 Euler/Heun defect 以及最终图像。
+分析工具固定使用 `experiments/x0loop_v2/analyze_sampling_trajectory.py`，输出完整 trace、
+最终图像网格、逐步 JSON 指标和 Markdown 摘要。
 
 ### Cycle 01 设计结论与下一轮修改
 
@@ -103,4 +105,14 @@ trace，并逐 step 比较状态、velocity、x0_hat、局部 Euler/Heun defect 
 X0LOOP_GPU=6 experiments/x0loop_v2/run_from_scratch.sh fresh
 X0LOOP_GPU=6 experiments/x0loop_v2/run_from_scratch.sh bank-fix
 X0LOOP_GPU=7 experiments/x0loop_v2/run_from_scratch.sh online
+```
+
+三次训练完成后的固定 root 采样分析：
+
+```bash
+CUDA_VISIBLE_DEVICES=7 uv run python -m experiments.x0loop_v2.analyze_sampling_trajectory \
+  --checkpoint fresh=runs/x0loop_v2_from_scratch/cycle01/fresh/checkpoints/ckpt_step_00058500.pt \
+  --checkpoint bank_fix=runs/x0loop_v2_from_scratch/cycle01/bank-fix/checkpoints/ckpt_step_00058500.pt \
+  --checkpoint online=runs/x0loop_v2_from_scratch/cycle01/online/checkpoints/ckpt_step_00058500.pt \
+  --out runs/x0loop_v2_from_scratch/cycle01/trajectory_analysis
 ```
