@@ -738,6 +738,55 @@ checkpoint 继续保存。全套测试为 89 passed。用 FRESH-TIME step-58.5k 
 smoke，日志确认加载 step 58,500，aux 参数 cosine 为 0.1916、combined/fresh cosine 为
 0.9954、实际比例为 0.10000；实现门槛通过，数值结果仍必须由预注册 5k FID 判断。
 
+### Cycle 05 强 teacher 诊断结论：停止 paired-x0 target
+
+强 teacher 分支从与 PREFIX-FRESH 完全相同的 step-10k checkpoint 继续 5k steps，固定
+aux batch ratio 0.125、参数梯度范数比 0.10、EMA/Heun-20/CFG-2.2、seed 20260819。
+step-15k 的固定 5k FID 为 **16.4361**，未通过预注册的 13.42 门槛，并且比同前缀
+PREFIX-FRESH 的 14.9085 恶化 1.5276（+10.25%）。因此强 teacher 没有证明当前
+inference-occupancy paired-x0 target 值得进入从零 300-epoch 正式实验；本结果只属于
+外部知识蒸馏 readiness，不能解释为 x0loop 收益。
+
+训练过程的辅助参数梯度范数比始终为 0.10000。除含首次编译的第一个 1k block 外，后四个
+1k block 的 aux/fresh 参数 cosine 为 0.4056、0.4086、0.4050 左右，combined/fresh
+cosine 均约 0.9963；稳定 step 为约 0.528--0.532 秒。辅助方向既没有超出预算，也不是
+全局反向冲突，但持续的小幅子空间偏置仍损害 FID。
+
+固定 root 的 256-sample 轨迹分析位于
+`runs/x0loop_v2_from_scratch/cycle05-screen-strong-teacher/trajectory_step15000/`：
+
+| model | final RMS | mean Heun correction | max relative correction |
+|---|---:|---:|---:|
+| PREFIX-FRESH | 1.001185 | 0.002119 | 0.219728 |
+| STRONG-STUDENT | 0.993560 | 0.001888 | 0.192242 |
+| STRONG-TEACHER | 0.997317 | 0.002267 | 0.197959 |
+
+STRONG-STUDENT 相对 PREFIX-FRESH 的 final RMS 仅低 0.76%，满足预注册的 3% 尺度条件，
+且 Heun correction 更小；但两者最终样本 RMS 距离为 0.23403，FID 反而显著变差。
+student 与 strong teacher 的最终样本距离仍为 0.31007。至此可以排除“只要 teacher 足够强，
+paired-x0 就会把 inference state 拉向更好分布”这一工作假设；更低 trajectory defect、合理
+动态范围、正梯度 cosine 都不能替代真实分布锚点。
+
+按预注册规则，后续彻底停止 moving/frozen/external-teacher paired-x0 target，不进行
+aux ratio、teacher checkpoint 或 bank size 扫描。下一设计必须同时满足：
+
+1. 完整保留 fresh loss；分布辅助项仍以参数梯度范数控制在 fresh 的 10% 起步。
+2. 直接用真实 CIFAR-10 与实际 Heun-20/CFG-2.2 终点样本构造分布目标，不使用 paired
+   ancestral GT、EMA x0 或 teacher x0 作为生成质量代理。
+3. 分布梯度只进入显式的 solver-index gated correction path，初始主干函数与 FRESH-TIME
+   完全等价；这样可以隔离“分布目标是否有效”和“污染完整 vector field”两个问题。
+4. 在启动训练前先通过 frozen-generator held-out critic readiness 与固定 batch 参数梯度
+   检查；禁止重复 Cycle 03 中 co-trained critic AUC 接近 0.5 时仍更新 generator 的错误。
+5. 下一组三分支定义为同初始化、从零 300 epochs 的 `FRESH-TIME`、`GATED-CONTROL`
+   （有 correction path 但无分布梯度）和 `GATED-DIST`。训练和 FID sampler 都必须加载
+   同一 correction path；每完成三支后再做一次全局复盘。
+
+在实现 `GATED-DIST` 前，先对新的 FRESH-TIME step-58.5k EMA 运行一次不更新 generator
+的终点 critic readiness。门槛在看结果前冻结为：class-matched fixed split 上 held-out
+AUROC ≥ 0.70、train/held-out AUROC gap ≤ 0.05、real-minus-fake logit margin > 0。三项同时
+通过才允许使用对抗分布梯度；任一失败则不训练 GAN generator，改用非对抗、可微分的
+固定特征分布距离。这个 readiness 不计入三次正式训练。
+
 ## 时间与吞吐分析
 
 300 epochs 在 CIFAR-10、batch 256 下是 58,500 optimizer steps（每 epoch 约
