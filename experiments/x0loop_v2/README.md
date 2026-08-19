@@ -35,6 +35,8 @@ reproducible:
 | branch | rollout source | auxiliary target |
 |---|---|---|
 | `fresh` | none | none |
+| `fresh-fixed-repro` | none, fixed model time 0.5 | none |
+| `fresh-time` | none, explicit path time | none |
 | `bank-fix` | stratified EMA Heun replay | legacy teacher velocity |
 | `bank-x0` | stratified EMA Heun replay | teacher native x0 |
 | `online` | current EMA online Heun rollout | legacy teacher velocity |
@@ -101,6 +103,42 @@ CUDA_VISIBLE_DEVICES=7 uv run python -m \
   --checkpoint method=runs/.../method/checkpoints/ckpt_step_00015000.pt \
   --out runs/.../trajectory_analysis_step15000 \
   --seed 20260819 --num-samples 64 --steps 20 --guidance-scale 2.2
+```
+
+Before Cycle 04 generator training, test whether the terminal critic is usable
+on a frozen generator and a disjoint held-out set:
+
+```bash
+CUDA_VISIBLE_DEVICES=6 uv run python -m experiments.x0loop_v2.diagnose_critic_readiness \
+  --checkpoint runs/x0loop_v2_from_scratch/cycle03/terminal-gan/checkpoints/ckpt_step_00015000.pt \
+  --out runs/x0loop_v2_from_scratch/cycle04/readiness/terminal_step15000
+```
+
+This uses the exact EMA Heun-20/CFG-2.2 kernel, class-matches real and fake
+examples, and reports random-init, Cycle 03 co-trained, and freshly trained
+critic held-out AUROC. It freezes the generator and therefore is a diagnostic,
+not one of the next three x0loop trainings.
+
+Then measure whether the registered 10% output-gradient control remains 10%
+after both losses are mapped through the shared backbone:
+
+```bash
+CUDA_VISIBLE_DEVICES=6 uv run python -m experiments.x0loop_v2.analyze_gradient_alignment \
+  --checkpoint runs/x0loop_v2_from_scratch/cycle03/terminal-gan/checkpoints/ckpt_step_00015000.pt \
+  --readiness-critic runs/x0loop_v2_from_scratch/cycle04/readiness/terminal_step15000/fresh_critic_best.pt \
+  --fixed-dataset runs/x0loop_v2_from_scratch/cycle04/readiness/terminal_step15000/fixed_terminal_dataset.pt \
+  --out runs/x0loop_v2_from_scratch/cycle04/readiness/terminal_step15000
+```
+
+Finally, before any DMD generator update, verify that an x0/flow fake score can
+adapt to the held-out terminal distribution:
+
+```bash
+CUDA_VISIBLE_DEVICES=6 uv run python -m experiments.x0loop_v2.diagnose_fake_score_readiness \
+  --checkpoint runs/x0loop_v2_from_scratch/cycle03/terminal-gan/checkpoints/ckpt_step_00015000.pt \
+  --fixed-dataset runs/x0loop_v2_from_scratch/cycle04/readiness/terminal_step15000/fixed_terminal_dataset.pt \
+  --out runs/x0loop_v2_from_scratch/cycle04/readiness/terminal_step15000/fake_score_x0_v2 \
+  --loss-target direct_x0 --time-distribution uniform --min-t 0.05 --max-t 0.95
 ```
 
 Report stable step time, throughput, memory, training-core MFU, and method-level

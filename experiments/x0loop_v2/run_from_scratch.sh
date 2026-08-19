@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: $0 fresh|bank-fix|bank-x0|online|online-x0|denoise-gan|terminal-gan" >&2
+  echo "usage: $0 fresh|fresh-fixed-repro|fresh-time|bank-fix|bank-x0|online|online-x0|denoise-gan|terminal-gan" >&2
   exit 2
 fi
 
@@ -37,6 +37,26 @@ case "$branch" in
     branch_aux_target=velocity
     adv_enabled=false
     adv_fake_space=x0_hat
+    model_ignore_time=true
+    time_jitter_enabled=true
+    ;;
+  fresh-fixed-repro)
+    clean_enabled=false
+    clean_mode=bank_fix
+    branch_aux_target=velocity
+    adv_enabled=false
+    adv_fake_space=x0_hat
+    model_ignore_time=true
+    time_jitter_enabled=true
+    ;;
+  fresh-time)
+    clean_enabled=false
+    clean_mode=bank_fix
+    branch_aux_target=velocity
+    adv_enabled=false
+    adv_fake_space=x0_hat
+    model_ignore_time=false
+    time_jitter_enabled=false
     ;;
   bank-fix)
     clean_enabled=true
@@ -44,6 +64,8 @@ case "$branch" in
     branch_aux_target=velocity
     adv_enabled=false
     adv_fake_space=x0_hat
+    model_ignore_time=true
+    time_jitter_enabled=true
     ;;
   bank-x0)
     clean_enabled=true
@@ -51,6 +73,8 @@ case "$branch" in
     branch_aux_target=x0
     adv_enabled=false
     adv_fake_space=x0_hat
+    model_ignore_time=true
+    time_jitter_enabled=true
     ;;
   online)
     clean_enabled=true
@@ -58,6 +82,8 @@ case "$branch" in
     branch_aux_target=velocity
     adv_enabled=false
     adv_fake_space=x0_hat
+    model_ignore_time=true
+    time_jitter_enabled=true
     ;;
   online-x0)
     clean_enabled=true
@@ -65,6 +91,8 @@ case "$branch" in
     branch_aux_target=x0
     adv_enabled=false
     adv_fake_space=x0_hat
+    model_ignore_time=true
+    time_jitter_enabled=true
     ;;
   denoise-gan)
     clean_enabled=false
@@ -72,6 +100,8 @@ case "$branch" in
     branch_aux_target=velocity
     adv_enabled=true
     adv_fake_space=x0_hat
+    model_ignore_time=true
+    time_jitter_enabled=true
     ;;
   terminal-gan)
     clean_enabled=false
@@ -79,6 +109,8 @@ case "$branch" in
     branch_aux_target=velocity
     adv_enabled=true
     adv_fake_space=terminal_x0
+    model_ignore_time=true
+    time_jitter_enabled=true
     ;;
   *)
     echo "unknown branch: $branch" >&2
@@ -106,6 +138,8 @@ CUDA_VISIBLE_DEVICES=$gpu uv run python -m x0loop.train \
   --set "compile.enabled=$compile_enabled" \
   --set "compile.mode=$compile_mode" \
   --set "compile.dynamic=$compile_dynamic" \
+  --set "model_conditioning.ignore_time=$model_ignore_time" \
+  --set "time_condition_jitter.enabled=$time_jitter_enabled" \
   --set "train.resume=$resume" \
   --set "train.epochs=$epochs" \
   --set "train.run_steps=$run_steps" \

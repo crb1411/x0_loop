@@ -403,6 +403,119 @@ inference occupancy 与截断反传思想：[Self Forcing](https://arxiv.org/abs
 4. 只有诊断通过后，才冻结 FRESH、score-difference、gated-ablation 三次训练的假设、
    预算和停止规则。否则更换目标或 critic 定义，不消耗三次训练周期。
 
+#### 冻结生成器 critic readiness 结果
+
+诊断固定 TERMINAL-GAN step-15k EMA，不更新生成器，使用实际 Heun-20/CFG-2.2 kernel
+生成 8,192 个训练 fake 与 2,048 个完全隔离的 held-out fake；real 来自 CIFAR-10 train
+的无重叠样本，并逐项使用相同 class label。固定数据生成耗时 174.1 秒；同 Cycle 03
+架构的 fresh critic 训练 2,000 steps 耗时约 73 秒。阈值无关的 held-out AUROC 为主判断：
+
+| critic | held-out AUROC | sign accuracy | logit margin | 解释 |
+|---|---:|---:|---:|---|
+| random init | 0.4882 | 0.5000 | -0.0042 | 随机基线正常 |
+| Cycle 03 共训练 critic | 0.5230 | 0.5000 | 0.0032 | 几乎没有分布方向 |
+| frozen-G fresh critic | 0.7824 | 0.5317 | 0.4010 | 同架构具备可分容量 |
+
+fresh critic 的 train/held-out AUROC 差只有 0.0126。sign accuracy 较低是 hinge/R1 后 logit
+整体平移造成的校准现象，不能覆盖 AUROC 与 margin 证据。结论是：Cycle 03 失败的首要
+问题不是 base-16 critic 容量，而是 generator/critic 同时变化时，critic 未能跟上当前
+生成分布。该结果支持 two-time-scale 和 generator-gradient readiness gate，不支持简单
+加宽 D 或增大 GAN loss。原始结果位于
+`runs/x0loop_v2_from_scratch/cycle04/readiness/terminal_step15000/critic_readiness.*`。
+
+#### 输出梯度控制到参数梯度的映射
+
+随后在 4 个固定 batch、每 batch 256（terminal auxiliary 为 32）上，不执行 optimizer
+step，分别计算 fresh 与 terminal generator loss 对 59.48M 参数的梯度。两种 critic 的
+输出端比例都被精确设为 0.10，但映射到共享参数后为：
+
+| critic | 输出梯度比 | 参数梯度比 | 参数 cosine | fresh/combined cosine | 负 dot 参数量占比 |
+|---|---:|---:|---:|---:|---:|
+| Cycle 03 共训练 critic | 0.1000 | 0.2228 | -0.4964 | 0.9767 | 0.7834 |
+| frozen-G fresh critic | 0.1000 | 0.3018 | -0.0380 | 0.9561 | 0.9840 |
+
+Cycle 03 的弱 critic 不仅没有可靠 margin，其 generator 方向还与 fresh 明显反向；输出端
+10% 实际成为参数端 22.3%。fresh critic 虽能区分分布，但参数方向整体近乎正交，实际
+比例达到 30.2%。分层上，共训练 critic 在最后四个 blocks 的比值为 39.7%、cosine
+-0.538；fresh critic 的 conditioning 比值为 42.2%、cosine -0.408。因而 Cycle 03 的
+“梯度已控制为 10%”只在输出张量成立，不能证明共享 backbone 更新温和。
+
+这两项诊断共同改变 Cycle 04 设计：
+
+1. 普通 real/fake classifier 只证明分布可分，不能作为 score-difference 的替代品；不把
+   frozen-G fresh critic 直接接回 generator。
+2. 新辅助目标必须控制**实际可训练参数**梯度，而非只控制最后输出；同时报告全局与分层
+   cosine/比例。
+3. score-difference 的 fake score 先在固定 terminal 分布上独立训练并通过 held-out
+   denoising readiness；正式训练采用 fake-score 多步更新、generator 较慢更新。
+4. terminal 辅助反传只进入 solver-index gated correction path；完整 fresh loss 继续
+   更新 base 与 correction。inference 的同一末段必须启用该 correction，保证闭环。
+5. 为隔离 correction architecture 与 score 目标，下一组三次筛选改为 `FRESH`、
+   `GATED-FRESH`、`GATED-DMD`，而不是缺少架构对照的 shared-DMD/gated-DMD。三者仍共享
+   step-10k 前缀；只有筛选胜出后才从随机初始化运行 300 epochs。
+
+官方 DMD2 实现训练 fake score 时对生成样本重新加噪并回归生成 x0，generator 每若干
+fake-score 更新才接收一次 normalized real/fake score difference；本项目只移植这一数学
+结构，不照搬其 SD/EDM 噪声参数化，并继续使用本项目正确的 learnable endpoint、条件
+标签和 Heun occupancy。下一门槛是先证明该 x0/flow 版本的 fake score 在 held-out fake
+上优于未适配的 real teacher，再冻结三分支精确配置。
+
+fake-score readiness 在看到结果前冻结为：复用上述 8,192/2,048 fixed terminal split，
+从同一 step-15k EMA 初始化 real teacher 与 fake score；real teacher 全程冻结，fake score
+只更新 JiT backbone，endpoint `mu_data` 固定。训练 1,000 steps、batch 64、AdamW
+`lr=1e-4, betas=(0.9,0.95), weight_decay=0`，时间按原 logit-normal sampler 抽取，使用
+项目原生 v-target composite loss；不使用 classifier、GAN 或 generator gradient。每 100
+steps 在固定 uniform-t、固定 endpoint noise 的 2,048 held-out fake 上比较两者 x0/v MSE。
+通过门槛预先定义为：step-1000 fake-score 的 held-out x0 与 v MSE 都至少比 frozen real
+teacher 低 10%，且 10 个 time bin 中没有任何一 bin 比 teacher 高 10% 以上。未通过则不
+启动 `GATED-DMD`，先修正 fake-score 参数化或时间权重。
+
+fake-score readiness v1 已按上述定义完成并失败：1,000 steps 耗时 64.5 秒，稳定
+0.0592 秒/step、峰值 3.54 GiB；teacher/fake 的 held-out x0 MSE 为
+0.120435/0.120697（比值 1.0022），v MSE 为 3.34291/3.05321（比值 0.9133）。虽然所有
+time bin 都没有恶化超过 10%，但 aggregate 双 10% 门槛不通过。分箱显示改善几乎全来自
+`t<0.1`：该处 v MSE 因 `1/t` 映射被放大，native v-target 把大部分优化能力投入低噪声；
+`t>0.5` 的 x0 MSE 只改善约 0%–1%，最高噪声 bin 还退化 1.05%。因此不把 v1 fake score
+接入 generator。
+
+readiness v2 在结果前冻结为仅修改被证据指向的两项：fake score 直接回归其原生模型
+输出 x0，score query/train/eval 都使用 uniform `t∈[0.05,0.95]`，避开 DMD normalized
+score 在两个 endpoint 的病态区间。数据 split、EMA 初始化、1,000 steps、batch、LR、
+优化器和双 10%/逐 bin 门槛均保持不变。若 v2 仍失败，停止实现 Cycle 04 generator
+训练，先重新评估当前 time-agnostic JiT 是否有能力同时表示 real/fake score。
+
+readiness v2 同样按门槛失败：teacher/fake 的 held-out x0 MSE 为
+0.093464/0.094190（比值 1.0078），v MSE 为 0.252497/0.254194（比值 1.0067）；所有
+bin 虽都未超过 10% 退化线，但没有任何总体适配收益。step100–1000 在同一范围振荡，
+不能解释为预算刚好不够。因为 terminal 样本本来就是这个 EMA 的 Heun-20 生成分布，
+real teacher 已对其近似自洽，当前 fake score 无法识别出稳定的 real/fake score gap。
+按预注册停止 DMD generator 实现，不通过降低门槛或选择最好中途 step 强行启动训练。
+
+### Cycle 04 实际方向：先验证显式时间条件
+
+结构审计确认 Cycle 01–03 的 JiT 在训练与每个 Heun solver step 都收到固定模型时间
+`0.5`；真实 path t 只参与 noising/解析变换，不进入 backbone。它可以解释两类共同现象：
+末段辅助更新会污染全部 solver step，以及同一 backbone 很难同时表示 real/fake score。
+仓库中的历史 time-aware 配置同时改变过 CFG 等因素且没有留存可审计结果，不能作为证据。
+
+下一组三次训练冻结为新的、从随机初始化开始的 prerequisite 周期：
+
+1. `FRESH-FIXED-REPRO`：当前代码和固定时间定义，从零复现 300 epochs，消除 Cycle 01
+   之后编译/性能改动的版本差异；GPU 6。
+2. `FRESH-TIME`：除 `model_conditioning.ignore_time=false`、关闭在 fixed-time 下原本无效的
+   time jitter 外，其余完全相同；从零 300 epochs。它先回答显式时间是否改善基础 FID，
+   不把 baseline architecture 收益冒充 x0loop。
+3. `ONLINE-X0-TIME`：只有 `FRESH-TIME` 在 step-15k 不劣于 matched FRESH 才启动；同样
+   从随机初始化，完整 fresh + 32 online Heun states，EMA native x0 target，并将 auxiliary
+   控制改为实际参数梯度 0.10，而非输出梯度 0.10。训练/评估均使用 time-aware
+   Heun-20/CFG-2.2。
+
+前两支共享 seed、初始化规则、数据、58,500-step/300-epoch 预算、LR/EMA 和评估协议，
+但不共享 checkpoint。15k 固定 5k FID 是 prerequisite 门：若 `FRESH-TIME` 明显更差，
+它按预注册提前停止，不启动第三支，并以另一个 fixed-time 机制对照补足本周期第三次训练；
+若不劣，继续 30k/45k，胜出候选才做 50k。第三支相对 matched `FRESH-TIME` 的 15k FID
+不改善即停止。每条方法修改后都重新生成同-root Heun 全轨迹。
+
 ## 时间与吞吐分析
 
 300 epochs 在 CIFAR-10、batch 256 下是 58,500 optimizer steps（每 epoch 约
