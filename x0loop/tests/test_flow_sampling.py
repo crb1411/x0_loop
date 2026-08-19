@@ -1,4 +1,5 @@
 import torch
+import pytest
 
 from x0loop.core.schedules import TimeSchedule
 from x0loop.losses.atomic import AtomicLoss, CompositeLoss
@@ -52,6 +53,14 @@ class LabelOutputModel(torch.nn.Module):
         del t
         self.calls += 1
         return cond.to(x.dtype).reshape(-1, 1, 1, 1).expand_as(x)
+
+
+def test_jit_rejects_invalid_class_labels_in_eager_mode():
+    from x0loop.models.jit import JiT, JiTConfig
+
+    model = JiT(JiTConfig(image_size=4, patch_size=2, dim=32, depth=1, heads=4, num_classes=2, in_context_len=0))
+    with pytest.raises(ValueError, match="class-label cond"):
+        model(torch.randn(1, 3, 4, 4), torch.rand(1), torch.tensor([3]))
 
 
 def test_flow_euler_and_heun_reach_constant_x0():

@@ -3,6 +3,11 @@ dataset:
   root: /mnt/data/crb/data
   download: false
   normalization: standard
+research:
+  principles_version: v1
+  launch_branch: null
+  git_commit: null
+  git_dirty: null
 model:
   name: jit
   image_size: 32
@@ -55,6 +60,9 @@ clean_loop:
   aux_batch_ratio: 0.25
   aux_gradient_ratio: 0.2
   aux_scale_max: 10.0
+  # Preserve the Cycle 01 definition in the base config. The explicit
+  # bank-x0/online-x0 launch branches override this to native x0 distillation.
+  aux_target: velocity
   solver_steps: 20
   sampler: heun
   guidance_scale: 2.2
@@ -90,6 +98,7 @@ train:
   lr_scheduler:
     name: constant
   weight_decay: 0.01
+  fused_optimizer: true
   max_clip_grad: 10.0
   use_ema: true
   ema_decay: 0.996

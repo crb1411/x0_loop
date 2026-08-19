@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: $0 fresh|bank-fix|online" >&2
+  echo "usage: $0 fresh|bank-fix|bank-x0|online|online-x0" >&2
   exit 2
 fi
 
@@ -21,19 +21,36 @@ final_fid_enabled=${X0LOOP_FINAL_FID_ENABLED:-true}
 clean_warmup=${X0LOOP_CLEAN_WARMUP:-10000}
 compile_enabled=${X0LOOP_COMPILE_ENABLED:-true}
 compile_mode=${X0LOOP_COMPILE_MODE:-default}
+compile_dynamic=${X0LOOP_COMPILE_DYNAMIC:-false}
+aux_batch_ratio=${X0LOOP_AUX_BATCH_RATIO:-0.125}
+aux_gradient_ratio=${X0LOOP_AUX_GRADIENT_RATIO:-0.2}
+aux_target=${X0LOOP_AUX_TARGET:-}
 
 case "$branch" in
   fresh)
     clean_enabled=false
     clean_mode=bank_fix
+    branch_aux_target=velocity
     ;;
   bank-fix)
     clean_enabled=true
     clean_mode=bank_fix
+    branch_aux_target=velocity
+    ;;
+  bank-x0)
+    clean_enabled=true
+    clean_mode=bank_fix
+    branch_aux_target=x0
     ;;
   online)
     clean_enabled=true
     clean_mode=online
+    branch_aux_target=velocity
+    ;;
+  online-x0)
+    clean_enabled=true
+    clean_mode=online
+    branch_aux_target=x0
     ;;
   *)
     echo "unknown branch: $branch" >&2
@@ -41,11 +58,26 @@ case "$branch" in
     ;;
 esac
 
+if [[ -z "$aux_target" ]]; then
+  aux_target=$branch_aux_target
+fi
+
+git_commit=$(git rev-parse HEAD)
+git_dirty=false
+if [[ -n "$(git status --porcelain)" ]]; then
+  git_dirty=true
+fi
+
 CUDA_VISIBLE_DEVICES=$gpu uv run python -m x0loop.train \
   --config experiments/x0loop_v2/config.yaml \
   --runtime-config x0loop/configs/runtime/single_gpu.yaml \
+  --set research.principles_version=v1 \
+  --set "research.launch_branch=$branch" \
+  --set "research.git_commit=$git_commit" \
+  --set "research.git_dirty=$git_dirty" \
   --set "compile.enabled=$compile_enabled" \
   --set "compile.mode=$compile_mode" \
+  --set "compile.dynamic=$compile_dynamic" \
   --set "train.resume=$resume" \
   --set "train.epochs=$epochs" \
   --set "train.run_steps=$run_steps" \
@@ -58,8 +90,9 @@ CUDA_VISIBLE_DEVICES=$gpu uv run python -m x0loop.train \
   --set "clean_loop.enabled=$clean_enabled" \
   --set "clean_loop.mode=$clean_mode" \
   --set "clean_loop.warmup_steps=$clean_warmup" \
-  --set clean_loop.aux_batch_ratio=0.125 \
-  --set clean_loop.aux_gradient_ratio=0.2 \
+  --set "clean_loop.aux_batch_ratio=$aux_batch_ratio" \
+  --set "clean_loop.aux_gradient_ratio=$aux_gradient_ratio" \
+  --set "clean_loop.aux_target=$aux_target" \
   --set "gen_eval.enabled=$fid_enabled" \
   --set "gen_eval.final.enabled=$final_fid_enabled" \
   --set "gen_eval.every_steps=$fid_every" \

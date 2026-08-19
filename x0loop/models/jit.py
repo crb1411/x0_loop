@@ -182,7 +182,12 @@ class JiT(nn.Module):
             if self.label_emb is None:
                 raise ValueError("Received class-label cond but JiTConfig.num_classes <= 0.")
             cond = cond.to(device=device, dtype=torch.long)
-            if bool((cond < 0).any()) or bool((cond > self.null_class_id).any()):
+            # Data-dependent Python booleans split every compiled forward into
+            # multiple graphs. Training labels are validated by the dataset;
+            # retain the defensive check for eager/debug execution.
+            if not torch.compiler.is_compiling() and (
+                bool((cond < 0).any()) or bool((cond > self.null_class_id).any())
+            ):
                 raise ValueError(f"JiT class-label cond must be in [0, {self.null_class_id}].")
             return self.label_emb(cond).to(dtype)
         if cond.ndim == 2:

@@ -25,6 +25,7 @@ class CleanLoopConfig:
     aux_batch_ratio: float = 0.25
     aux_gradient_ratio: float = 0.2
     aux_scale_max: float = 10.0
+    aux_target: str = "velocity"
     solver_steps: int = 20
     sampler: str = "heun"
     guidance_scale: float = 2.2
@@ -53,6 +54,7 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
     aux_batch_ratio = float(raw.get("aux_batch_ratio", raw.get("bank_prob", 0.25)))
     aux_gradient_ratio = float(raw.get("aux_gradient_ratio", 0.2))
     aux_scale_max = float(raw.get("aux_scale_max", 10.0))
+    aux_target = str(raw.get("aux_target", "velocity")).lower()
     solver_steps = int(raw.get("solver_steps", 20))
     sampler = str(raw.get("sampler", "heun")).lower()
     guidance_scale = float(raw.get("guidance_scale", 2.2))
@@ -89,6 +91,8 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
         raise ValueError(f"clean_loop.aux_gradient_ratio must be in [0,1], got {aux_gradient_ratio}")
     if aux_scale_max <= 0.0:
         raise ValueError(f"clean_loop.aux_scale_max must be > 0, got {aux_scale_max}")
+    if aux_target not in {"velocity", "x0"}:
+        raise ValueError(f"clean_loop.aux_target must be velocity | x0, got {aux_target!r}")
     if solver_steps <= 0:
         raise ValueError(f"clean_loop.solver_steps must be > 0, got {solver_steps}")
     if sampler != "heun":
@@ -117,6 +121,7 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
         aux_batch_ratio=aux_batch_ratio,
         aux_gradient_ratio=aux_gradient_ratio,
         aux_scale_max=aux_scale_max,
+        aux_target=aux_target,
         solver_steps=solver_steps,
         sampler=sampler,
         guidance_scale=guidance_scale,
@@ -270,6 +275,7 @@ def build_clean_loop_bank_input(
 class TrajectoryBatch:
     x: torch.Tensor
     target_v: torch.Tensor
+    target_x0: torch.Tensor
     t: torch.Tensor
     cond: torch.Tensor | None
     solver_index: torch.Tensor
@@ -279,67 +285,128 @@ class TrajectoryBatch:
 
 
 class TrajectoryBank:
-    """CPU replay for inference-kernel states and EMA velocity targets.
+    """Tensor-ring replay for inference states and EMA velocity/native-x0 targets.
 
     Unlike the legacy FIFO, every item identifies its exact Heun grid point and
     trajectory ancestry. Sampling is stratified over solver index so roots do
-    not crowd out the sampler's low-noise states.
+    not crowd out the sampler's low-noise states. Formal runs keep the ring on
+    the training GPU; CPU remains supported for unit tests and constrained
+    environments.
     """
 
-    def __init__(self, cfg: CleanLoopConfig):
+    def __init__(self, cfg: CleanLoopConfig, *, device: torch.device | str = "cpu"):
         self.cfg = cfg
-        self._items: list[dict[str, torch.Tensor | None]] = []
+        self.device = torch.device(device)
+        self.x: torch.Tensor | None = None
+        self.target_v: torch.Tensor | None = None
+        self.target_x0: torch.Tensor | None = None
+        self.t: torch.Tensor | None = None
+        self.cond: torch.Tensor | None = None
+        self.solver_index: torch.Tensor | None = None
+        self.depth: torch.Tensor | None = None
+        self.root_noise_id: torch.Tensor | None = None
+        self.producer_step: torch.Tensor | None = None
+        self.next_idx = 0
+        self.count = 0
         self._next_root_id = 0
 
     def __len__(self) -> int:
-        return len(self._items)
+        return self.count
 
     def new_root_ids(self, n: int, *, device: torch.device) -> torch.Tensor:
         start = self._next_root_id
         self._next_root_id += int(n)
         return torch.arange(start, start + int(n), device=device, dtype=torch.long)
 
+    def _allocate(self, batch: TrajectoryBatch) -> None:
+        capacity = self.cfg.bank_size
+        shape = (capacity, *batch.x.shape[1:])
+        self.x = torch.empty(shape, device=self.device, dtype=self.cfg.storage_dtype)
+        self.target_v = torch.empty(shape, device=self.device, dtype=self.cfg.storage_dtype)
+        self.target_x0 = torch.empty(shape, device=self.device, dtype=self.cfg.storage_dtype)
+        self.t = torch.empty(capacity, device=self.device, dtype=torch.float32)
+        self.solver_index = torch.empty(capacity, device=self.device, dtype=torch.long)
+        self.depth = torch.empty(capacity, device=self.device, dtype=torch.long)
+        self.root_noise_id = torch.empty(capacity, device=self.device, dtype=torch.long)
+        self.producer_step = torch.empty(capacity, device=self.device, dtype=torch.long)
+        if batch.cond is not None:
+            self.cond = torch.empty(
+                (capacity, *batch.cond.shape[1:]),
+                device=self.device,
+                dtype=batch.cond.dtype,
+            )
+
     @torch.no_grad()
     def add(self, batch: TrajectoryBatch) -> None:
-        for i in range(batch.x.shape[0]):
-            item: dict[str, torch.Tensor | None] = {
-                "x": batch.x[i].detach().to(device="cpu", dtype=self.cfg.storage_dtype),
-                "target_v": batch.target_v[i].detach().to(device="cpu", dtype=self.cfg.storage_dtype),
-                "t": batch.t[i].detach().float().cpu(),
-                "cond": batch.cond[i].detach().cpu() if batch.cond is not None else None,
-                "solver_index": batch.solver_index[i].detach().long().cpu(),
-                "depth": batch.depth[i].detach().long().cpu(),
-                "root_noise_id": batch.root_noise_id[i].detach().long().cpu(),
-                "producer_step": batch.producer_step[i].detach().long().cpu(),
-            }
-            self._items.append(item)
-        overflow = len(self._items) - self.cfg.bank_size
-        if overflow > 0:
-            del self._items[:overflow]
+        if batch.x.shape[0] == 0:
+            return
+        if self.x is None:
+            self._allocate(batch)
+        assert self.x is not None and self.target_v is not None and self.target_x0 is not None and self.t is not None
+        assert self.solver_index is not None and self.depth is not None
+        assert self.root_noise_id is not None and self.producer_step is not None
+
+        n = int(batch.x.shape[0])
+        offset = max(0, n - self.cfg.bank_size)
+        n = min(n, self.cfg.bank_size)
+        indices = (torch.arange(n, device=self.device) + self.next_idx) % self.cfg.bank_size
+
+        def source(value: torch.Tensor, *, dtype: torch.dtype) -> torch.Tensor:
+            return value[offset:].detach().to(device=self.device, dtype=dtype)
+
+        self.x[indices] = source(batch.x, dtype=self.cfg.storage_dtype)
+        self.target_v[indices] = source(batch.target_v, dtype=self.cfg.storage_dtype)
+        self.target_x0[indices] = source(batch.target_x0, dtype=self.cfg.storage_dtype)
+        self.t[indices] = source(batch.t, dtype=torch.float32)
+        self.solver_index[indices] = source(batch.solver_index, dtype=torch.long)
+        self.depth[indices] = source(batch.depth, dtype=torch.long)
+        self.root_noise_id[indices] = source(batch.root_noise_id, dtype=torch.long)
+        self.producer_step[indices] = source(batch.producer_step, dtype=torch.long)
+        if batch.cond is not None:
+            if self.cond is None:
+                raise ValueError("TrajectoryBank conditioning changed after allocation")
+            self.cond[indices] = source(batch.cond, dtype=self.cond.dtype)
+        elif self.cond is not None:
+            raise ValueError("TrajectoryBank conditioning changed after allocation")
+
+        self.next_idx = (self.next_idx + n) % self.cfg.bank_size
+        self.count = min(self.cfg.bank_size, self.count + n)
 
     def sample(self, n: int, *, device: torch.device, dtype: torch.dtype) -> TrajectoryBatch:
-        if n <= 0 or not self._items:
+        if n <= 0 or self.count == 0:
             raise ValueError("TrajectoryBank.sample requires a non-empty bank and n > 0")
-        by_index: dict[int, list[int]] = {}
-        for pos, item in enumerate(self._items):
-            index = int(item["solver_index"].item())  # type: ignore[union-attr]
-            by_index.setdefault(index, []).append(pos)
-        levels = list(by_index)
-        chosen = [by_index[levels[i % len(levels)]][int(torch.randint(len(by_index[levels[i % len(levels)]]), ()).item())] for i in range(min(int(n), len(self._items)))]
-        items = [self._items[i] for i in chosen]
+        assert self.x is not None and self.target_v is not None and self.target_x0 is not None and self.t is not None
+        assert self.solver_index is not None and self.depth is not None
+        assert self.root_noise_id is not None and self.producer_step is not None
 
-        def stack(name: str) -> torch.Tensor:
-            return torch.stack([item[name] for item in items])  # type: ignore[list-item]
+        sample_n = min(int(n), self.count)
+        positions = torch.arange(self.count, device=self.device)
+        stored_levels = self.solver_index[positions]
+        levels = torch.unique(stored_levels, sorted=True)
+        # Randomize which levels receive the remainder when sample_n is not a
+        # multiple of the number of occupied levels. Cycling sorted levels made
+        # a 32-sample/20-level bank assign every extra item to levels 0..11,
+        # permanently biasing replay toward the high-noise half of Heun.
+        level_order = levels[torch.randperm(levels.numel(), device=self.device)]
+        wanted_levels = level_order[torch.arange(sample_n, device=self.device) % levels.numel()]
+        matches = wanted_levels[:, None] == stored_levels[None, :]
+        scores = torch.rand((sample_n, self.count), device=self.device)
+        scores.masked_fill_(~matches, -1.0)
+        chosen = positions[scores.argmax(dim=1)]
 
-        cond_items = [item["cond"] for item in items]
-        cond = None if cond_items[0] is None else torch.stack(cond_items).to(device=device)  # type: ignore[arg-type]
+        def select(value: torch.Tensor, *, output_dtype: torch.dtype | None = None) -> torch.Tensor:
+            selected = value[chosen]
+            return selected.to(device=device, dtype=output_dtype or selected.dtype)
+
+        cond = None if self.cond is None else select(self.cond)
         return TrajectoryBatch(
-            x=stack("x").to(device=device, dtype=dtype),
-            target_v=stack("target_v").to(device=device, dtype=dtype),
-            t=stack("t").to(device=device),
+            x=select(self.x, output_dtype=dtype),
+            target_v=select(self.target_v, output_dtype=dtype),
+            target_x0=select(self.target_x0, output_dtype=dtype),
+            t=select(self.t),
             cond=cond,
-            solver_index=stack("solver_index").to(device=device),
-            depth=stack("depth").to(device=device),
-            root_noise_id=stack("root_noise_id").to(device=device),
-            producer_step=stack("producer_step").to(device=device),
+            solver_index=select(self.solver_index),
+            depth=select(self.depth),
+            root_noise_id=select(self.root_noise_id),
+            producer_step=select(self.producer_step),
         )

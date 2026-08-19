@@ -126,6 +126,49 @@ class ProgressEstimator:
         }
 
 
+class TrainingIntervalTimer:
+    """Measure training time while synchronizing CUDA only at log cadence."""
+
+    def __init__(self, device: torch.device):
+        self.device = device
+        self.use_cuda_events = device.type == "cuda"
+        self.start_event: torch.cuda.Event | None = None
+        self.start_time = 0.0
+        self.micro_steps = 0
+        self.images = 0
+
+    def begin(self) -> None:
+        self.micro_steps = 0
+        self.images = 0
+        if self.use_cuda_events:
+            self.start_event = torch.cuda.Event(enable_timing=True)
+            self.start_event.record()
+        else:
+            self.start_time = time.perf_counter()
+
+    def record_step(self, *, batch_size: int, world_size: int) -> None:
+        self.micro_steps += 1
+        self.images += int(batch_size) * int(world_size)
+
+    def flush_into(self, meters: MetricLogger) -> None:
+        if self.micro_steps <= 0:
+            return
+        if self.use_cuda_events:
+            if self.start_event is None:
+                raise RuntimeError("TrainingIntervalTimer.begin() must be called before flush_into()")
+            end_event = torch.cuda.Event(enable_timing=True)
+            end_event.record()
+            end_event.synchronize()
+            elapsed_s = self.start_event.elapsed_time(end_event) / 1000.0
+        else:
+            elapsed_s = time.perf_counter() - self.start_time
+        per_step_s = elapsed_s / float(self.micro_steps)
+        images_per_s = float(self.images) / max(elapsed_s, 1.0e-9)
+        # Preserve the per-micro-step weighting of the previous meter path.
+        for _ in range(self.micro_steps):
+            meters.update(iter_s=per_step_s, img_s=images_per_s)
+
+
 def build_loop_config(cfg: dict, loader: DataLoader, distributed_cfg: dict) -> LoopConfig:
     epochs = int(cfg["train"]["epochs"])
     gradient_accumulation_steps = int(cfg["train"].get("gradient_accumulation_steps", 1))
@@ -488,6 +531,30 @@ def _teacher_velocity(
 
 
 @torch.no_grad()
+def _teacher_targets(
+    *,
+    denoiser: Denoiser,
+    process: BaseProcess,
+    x: torch.Tensor,
+    t: torch.Tensor,
+    cond: torch.Tensor | None,
+    null_cond: torch.Tensor | None,
+    guidance_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    out = denoiser.model_output(
+        x,
+        t,
+        cond=cond,
+        null_cond=null_cond,
+        guidance_scale=guidance_scale,
+    )
+    return (
+        process.velocity_from_output(x, t, out, aux={}),
+        process.x0_from_output(x, t, out, aux={}),
+    )
+
+
+@torch.no_grad()
 def _teacher_heun_step(
     *,
     denoiser: Denoiser,
@@ -499,9 +566,9 @@ def _teacher_heun_step(
     null_cond: torch.Tensor | None,
     guidance_scale: float,
     is_last: bool,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    t = torch.full((x.shape[0],), float(t_scalar.item()), device=x.device, dtype=torch.float32)
-    velocity = _teacher_velocity(
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    t = t_scalar.to(device=x.device, dtype=torch.float32).expand(x.shape[0])
+    velocity, target_x0 = _teacher_targets(
         denoiser=denoiser,
         process=process,
         x=x,
@@ -512,9 +579,9 @@ def _teacher_heun_step(
     )
     dt = s_scalar - t_scalar
     if is_last:
-        return x + dt * velocity, velocity, None
+        return x + dt * velocity, velocity, target_x0, None
     x_euler = x + dt * velocity
-    s = torch.full((x.shape[0],), float(s_scalar.item()), device=x.device, dtype=torch.float32)
+    s = s_scalar.to(device=x.device, dtype=torch.float32).expand(x.shape[0])
     velocity_s = _teacher_velocity(
         denoiser=denoiser,
         process=process,
@@ -524,7 +591,7 @@ def _teacher_heun_step(
         null_cond=null_cond,
         guidance_scale=guidance_scale,
     )
-    return x + dt * 0.5 * (velocity + velocity_s), velocity, velocity_s
+    return x + dt * 0.5 * (velocity + velocity_s), velocity, target_x0, velocity_s
 
 
 @torch.no_grad()
@@ -574,6 +641,7 @@ def _trajectory_batch(
     *,
     x: torch.Tensor,
     target_v: torch.Tensor,
+    target_x0: torch.Tensor,
     t: torch.Tensor,
     cond: torch.Tensor | None,
     solver_index: torch.Tensor,
@@ -583,6 +651,7 @@ def _trajectory_batch(
     return TrajectoryBatch(
         x=x,
         target_v=target_v,
+        target_x0=target_x0,
         t=t,
         cond=cond,
         solver_index=solver_index,
@@ -612,14 +681,16 @@ def _online_trajectory_batch(
     x = process.prior_sample((n, *shape), device=device, dtype=dtype)
     selected_x = torch.empty_like(x)
     selected_v = torch.empty_like(x)
+    selected_x0 = torch.empty_like(x)
     selected_t = torch.empty((n,), device=device, dtype=torch.float32)
-    for index, (t_scalar, s_scalar) in enumerate(pairs):
+    # Resolve the final occupied level once. The former ``bool(active.any())``
+    # synchronized CUDA on every solver level.
+    max_wanted = int(wanted.max().item())
+    for index, (t_scalar, s_scalar) in enumerate(pairs[:max_wanted + 1]):
         active = wanted >= index
-        if not bool(active.any()):
-            break
         active_cond = cond[active] if cond is not None else None
         active_null = null_cond[active] if null_cond is not None else None
-        next_x, velocity, _ = _teacher_heun_step(
+        next_x, velocity, target_x0, _ = _teacher_heun_step(
             denoiser=denoiser,
             process=process,
             x=x[active],
@@ -635,11 +706,13 @@ def _online_trajectory_batch(
         chosen_positions = active_positions[chosen]
         selected_x[chosen_positions] = x[active][chosen]
         selected_v[chosen_positions] = velocity[chosen]
-        selected_t[chosen_positions] = float(t_scalar.item())
+        selected_x0[chosen_positions] = target_x0[chosen].to(dtype=selected_x0.dtype)
+        selected_t[chosen_positions] = t_scalar
         x[active] = next_x
     return _trajectory_batch(
         x=selected_x,
         target_v=selected_v,
+        target_x0=selected_x0,
         t=selected_t,
         cond=cond,
         solver_index=wanted,
@@ -668,8 +741,8 @@ def _refresh_trajectory_bank(
     root_cond = cond[:n_root] if cond is not None else None
     root_null = null_cond[:n_root] if null_cond is not None else None
     root_x = process.prior_sample((n_root, *shape), device=device, dtype=dtype)
-    root_t = torch.full((n_root,), float(pairs[0][0].item()), device=device)
-    root_v = _teacher_velocity(
+    root_t = pairs[0][0].to(device=device, dtype=torch.float32).expand(n_root)
+    root_v, root_x0 = _teacher_targets(
         denoiser=denoiser,
         process=process,
         x=root_x,
@@ -681,6 +754,7 @@ def _refresh_trajectory_bank(
     bank.add(_trajectory_batch(
         x=root_x,
         target_v=root_v,
+        target_x0=root_x0,
         t=root_t,
         cond=root_cond,
         solver_index=torch.zeros(n_root, device=device, dtype=torch.long),
@@ -699,11 +773,7 @@ def _refresh_trajectory_bank(
     parent_x = parents.x[valid]
     parent_index = parents.solver_index[valid]
     parent_cond = parents.cond[valid] if parents.cond is not None else None
-    parent_null = (
-        torch.full_like(parent_cond, int(null_cond[0].item()))
-        if parent_cond is not None and null_cond is not None
-        else None
-    )
+    parent_null = null_cond[:1].expand_as(parent_cond) if parent_cond is not None and null_cond is not None else None
     grid_t = torch.stack([pair[0] for pair in pairs]).to(device=device, dtype=torch.float32)
     grid_s = torch.stack([pair[1] for pair in pairs]).to(device=device, dtype=torch.float32)
     parent_t = grid_t[parent_index]
@@ -720,7 +790,7 @@ def _refresh_trajectory_bank(
     )
     # The correct next-grid target is evaluated at the accepted Heun state,
     # not at the Euler predictor used for the corrector.
-    next_v = _teacher_velocity(
+    next_v, next_x0 = _teacher_targets(
         denoiser=denoiser,
         process=process,
         x=next_x,
@@ -733,6 +803,7 @@ def _refresh_trajectory_bank(
     bank.add(_trajectory_batch(
         x=next_x,
         target_v=next_v,
+        target_x0=next_x0,
         t=next_t,
         cond=parent_cond,
         solver_index=next_index,
@@ -866,8 +937,17 @@ def compute_forward_batch_v2(
                 null_cond=aux_null,
                 guidance_scale=clean_loop_cfg.guidance_scale,
             )
-            aux_v = process.velocity_from_output(aux.x, aux.t, aux_out, aux={})
-            aux_loss = regress("mse", aux_v, aux.target_v).mean()
+            if clean_loop_cfg.aux_target == "x0":
+                aux_prediction = process.x0_from_output(aux.x, aux.t, aux_out, aux={})
+                # Store the EMA model's direct x0 output. Reconstructing it as
+                # x_t - t*v is algebraically equivalent for linear flow, but
+                # unnecessarily routes the target through BF16 velocity
+                # conversion and no longer means "native x0" literally.
+                aux_target = aux.target_x0
+            else:
+                aux_prediction = process.velocity_from_output(aux.x, aux.t, aux_out, aux={})
+                aux_target = aux.target_v
+            aux_loss = regress("mse", aux_prediction, aux_target).mean()
             if clean_loop_cfg.aux_gradient_ratio > 0.0:
                 fresh_grad = torch.autograd.grad(fresh_loss, fresh_out, retain_graph=True)[0]
                 aux_grad = torch.autograd.grad(aux_loss, aux_out, retain_graph=True)[0]
@@ -893,6 +973,7 @@ def compute_forward_batch_v2(
         "clean/bank_size": float(len(clean_loop_bank)),
         "clean/bank_refresh_n": float(bank_refresh_n),
         "clean/aux_gradient_target": clean_loop_cfg.aux_gradient_ratio,
+        "clean/aux_target_x0": float(clean_loop_cfg.aux_target == "x0"),
     }
     if aux is not None and aux_loss is not None and aux_contrib is not None and aux_scale is not None:
         extra_metrics.update({
@@ -966,19 +1047,17 @@ def update_train_meters(
     fwd: TrainForwardBatch,
     *,
     lr: float,
-    iter_time: float,
-    world_size: int,
     grad_norm: torch.Tensor | float | None = None,
 ) -> None:
-    meters.update(loss=float(fwd.loss.detach().item()), lr=float(lr), iter_s=float(iter_time), img_s=fwd.batch_size * world_size / max(iter_time, 1e-6))
+    meters.update(loss=fwd.loss.detach(), lr=float(lr))
     for target, val in fwd.loss_by_target.items():
-        meters.update(**{f"loss_{target}": float(val.detach().item())})
+        meters.update(**{f"loss_{target}": val.detach()})
     for key, val in (fwd.extra_metrics or {}).items():
         if isinstance(val, torch.Tensor):
-            val = float(val.detach().float().mean().item())
-        meters.update(**{key: float(val)})
+            val = val.detach().float().mean()
+        meters.update(**{key: val})
     if grad_norm is not None:
-        grad_norm_value = float(grad_norm.detach().item()) if isinstance(grad_norm, torch.Tensor) else float(grad_norm)
+        grad_norm_value = grad_norm.detach() if isinstance(grad_norm, torch.Tensor) else float(grad_norm)
         meters.update(grad_norm=grad_norm_value)
 
 
@@ -1079,9 +1158,13 @@ def maybe_apply_adversarial(
     _set_requires_grad(discriminator, True)
 
 
-def log_training_step(*, runtime: RuntimeContext, loop_cfg: LoopConfig, resume: ResumeState, meters: MetricLogger, tbin_stats: TimeBinAccumulator, epoch: int, micro_step: int, current_accum_steps: int, progress: ProgressEstimator | None = None) -> None:
+def should_log_training_step(*, loop_cfg: LoopConfig, resume: ResumeState) -> bool:
     force_log = resume.run_step <= 20
-    if not force_log and (resume.global_step % loop_cfg.log_every != 0):
+    return force_log or (resume.global_step % loop_cfg.log_every == 0)
+
+
+def log_training_step(*, runtime: RuntimeContext, loop_cfg: LoopConfig, resume: ResumeState, meters: MetricLogger, tbin_stats: TimeBinAccumulator, epoch: int, micro_step: int, current_accum_steps: int, progress: ProgressEstimator | None = None) -> None:
+    if not should_log_training_step(loop_cfg=loop_cfg, resume=resume):
         return
     meters.reduce_distributed()
     kv = meters.get_log_dict()
@@ -1129,7 +1212,11 @@ def train(cfg: dict) -> None:
     clean_loop_cfg = build_clean_loop_config(cfg)
     clean_loop_bank = None
     if clean_loop_cfg.enabled:
-        clean_loop_bank = TrajectoryBank(clean_loop_cfg) if clean_loop_cfg.version == 2 else CleanLoopBank(clean_loop_cfg)
+        clean_loop_bank = (
+            TrajectoryBank(clean_loop_cfg, device=runtime.device)
+            if clean_loop_cfg.version == 2
+            else CleanLoopBank(clean_loop_cfg)
+        )
     # Data augmentation pipeline and where it is applied (data_only here).
     augment, augment_mode = build_augment(cfg)
     if runtime.is_main:
@@ -1147,7 +1234,14 @@ def train(cfg: dict) -> None:
         runtime.logger.log_text(f"[model_conditioning] {cfg.get('model_conditioning', {'ignore_time': False})}")
         runtime.logger.log_text(f"[clean_loop] {cfg.get('clean_loop', {'enabled': False})}")
         runtime.logger.log_text(f"[adversarial] {cfg.get('adversarial', {'enabled': False})}")
-    optimizer = torch.optim.AdamW(denoiser.parameters(), lr=float(cfg["train"].get("lr", 1e-4)), betas=(0.9, 0.95), weight_decay=float(cfg["train"].get("weight_decay", 0.05)))
+    fused_optimizer = bool(cfg["train"].get("fused_optimizer", False)) and runtime.device.type == "cuda"
+    optimizer = torch.optim.AdamW(
+        denoiser.parameters(),
+        lr=float(cfg["train"].get("lr", 1e-4)),
+        betas=(0.9, 0.95),
+        weight_decay=float(cfg["train"].get("weight_decay", 0.05)),
+        fused=fused_optimizer,
+    )
     d_optimizer = None
     if discriminator is not None:
         dc = cfg.get("discriminator", {}) or {}
@@ -1157,11 +1251,15 @@ def train(cfg: dict) -> None:
             lr=float(dc.get("lr", 2e-4)),
             betas=(float(betas[0]), float(betas[1])),
             weight_decay=float(dc.get("weight_decay", 0.0)),
+            fused=fused_optimizer,
         )
+    if runtime.is_main:
+        runtime.logger.log_text(f"[optimizer] adamw_fused={fused_optimizer}")
     scaler = maybe_make_scaler(precision=model_ctx.precision, use_fsdp=model_ctx.use_fsdp)
     ema = EMA(model=denoiser, decay=float(cfg["train"].get("ema_decay", 0.9999))) if bool(cfg["train"].get("use_ema", True)) else None
     resume = load_resume_state(cfg, denoiser=denoiser, optimizer=optimizer, scaler=scaler, ema=ema, discriminator=discriminator, d_optimizer=d_optimizer, runtime=runtime)
     meters = MetricLogger(window_size=int(cfg["logging"].get("window_size", 20)))
+    interval_timer = TrainingIntervalTimer(runtime.device)
     loop_cfg = build_loop_config(cfg, data_ctx.loader, runtime.distributed_cfg)
     if runtime.is_main:
         log_loop_config(runtime.logger, loop_cfg)
@@ -1198,7 +1296,7 @@ def train(cfg: dict) -> None:
 
     try:
         denoiser.train()
-        iter_start = time.time()
+        interval_timer.begin()
         for epoch in range(resume.start_epoch, end_epoch):
             if _training_limit_reached():
                 break
@@ -1245,13 +1343,16 @@ def train(cfg: dict) -> None:
                 if did_optimizer_step and ema is not None:
                     ema.update(denoiser)
                 tbin_stats.update(schedule=schedule, process=process, loss_fn=loss_fn, fb=fwd.fb, out=fwd.out, extra_values=fwd.extra_tbin)
-                iter_time = time.time() - iter_start
-                iter_start = time.time()
-                update_train_meters(meters, fwd, lr=float(optimizer.param_groups[0]["lr"]), iter_time=iter_time, world_size=runtime.world_size, grad_norm=grad_norm if did_optimizer_step else None)
+                interval_timer.record_step(batch_size=fwd.batch_size, world_size=runtime.world_size)
+                update_train_meters(meters, fwd, lr=float(optimizer.param_groups[0]["lr"]), grad_norm=grad_norm if did_optimizer_step else None)
                 if not did_optimizer_step:
                     continue
                 resume.global_step += 1
                 resume.run_step += 1
+                if should_log_training_step(loop_cfg=display_loop_cfg, resume=resume):
+                    # This is the only normal train-loop CUDA synchronization.
+                    # It resolves both interval timing and all queued metrics.
+                    interval_timer.flush_into(meters)
                 log_training_step(runtime=runtime, loop_cfg=display_loop_cfg, resume=resume, meters=meters, tbin_stats=tbin_stats, epoch=epoch, micro_step=micro_step, current_accum_steps=current_accum_steps, progress=progress)
                 run_eval_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, schedule=schedule, time_sampler=time_sampler, process=process, loss_fn=loss_fn, data_ctx=data_ctx, resume=resume, use_label_cond=use_label_cond)
                 run_sampling_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, loop_cfg=loop_cfg, resume=resume, cond=fwd.cond, use_label_cond=use_label_cond)
@@ -1266,6 +1367,10 @@ def train(cfg: dict) -> None:
                 progress.record_gen_eval(gen_eval_duration)
                 if gen_eval_duration is not None and runtime.is_main:
                     runtime.logger.log_text(f"[progress] gen_eval_duration={_format_duration(gen_eval_duration)} ({gen_eval_duration:.3f}s)")
+                if should_log_training_step(loop_cfg=display_loop_cfg, resume=resume):
+                    # Exclude logging/eval/checkpoint work from the next train
+                    # interval while still including dataloader idle time.
+                    interval_timer.begin()
                 if _training_limit_reached():
                     break
             if _training_limit_reached():

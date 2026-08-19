@@ -139,11 +139,12 @@ class Logger:
         fresh_loss = val("fresh/loss", total_loss)
         step_width = len(str(int(total_steps))) if total_steps is not None and total_steps > 0 else 0
         if "clean/loss_aux" in kv:
+            aux_label = "aux_x0_mse" if val("clean/aux_target_x0", 0.0) >= 0.5 else "aux_velocity_mse"
             loss_part = (
                 f"(loss) {cls._fmt_sig(total_loss)} = "
                 f"(fresh) {cls._fmt_sig(val('fresh/loss_contrib', fresh_loss))} + "
                 f"(aux_scale) {cls._fmt_sig(val('clean/aux_scale'))} * "
-                f"(aux_velocity_mse) {cls._fmt_sig(val('clean/loss_aux'))}"
+                f"({aux_label}) {cls._fmt_sig(val('clean/loss_aux'))}"
             )
         else:
             bank_scale = val("clean/bank_scale", 0.0)
@@ -321,19 +322,54 @@ class MetricLogger:
     def __init__(self, window_size: int = 20):
         self.window_size = window_size
         self.meters: dict[str, SmoothedValue] = {}
+        self._pending_tensor_updates: list[tuple[str, torch.Tensor, int]] = []
         self._last_reduce_ts = 0.0
 
-    def update(self, **kwargs):
+    def _update_number(self, key: str, value: float, *, n: int = 1) -> None:
+        if key not in self.meters:
+            self.meters[key] = SmoothedValue(window_size=self.window_size)
+        self.meters[key].update(float(value), n=n)
+
+    def update(self, *, n: int = 1, **kwargs):
         for k, v in kwargs.items():
             if isinstance(v, torch.Tensor):
-                v = float(v.detach().item())
+                value = v.detach()
+                if value.numel() != 1:
+                    raise ValueError(f"MetricLogger tensor metric {k!r} must be scalar, got shape={tuple(value.shape)}")
+                if value.device.type != "cpu":
+                    self._pending_tensor_updates.append((k, value.reshape(()), int(n)))
+                    continue
+                v = float(value.item())
             if not isinstance(v, (float, int)):
                 continue
-            if k not in self.meters:
-                self.meters[k] = SmoothedValue(window_size=self.window_size)
-            self.meters[k].update(float(v), n=1)
+            self._update_number(k, float(v), n=int(n))
+
+    def flush_pending(self) -> None:
+        """Materialize all queued device scalars with one transfer per device.
+
+        Training queues tensor-valued diagnostics every step and calls this at
+        logging cadence. Packing first avoids a train-loop synchronization for
+        every individual ``Tensor.item()`` while preserving every meter sample.
+        """
+        if not self._pending_tensor_updates:
+            return
+        pending = self._pending_tensor_updates
+        self._pending_tensor_updates = []
+        grouped: dict[torch.device, list[tuple[int, torch.Tensor]]] = {}
+        for index, (_, value, _) in enumerate(pending):
+            grouped.setdefault(value.device, []).append((index, value))
+        resolved: list[float | None] = [None] * len(pending)
+        for values in grouped.values():
+            packed = torch.stack([value.float() for _, value in values])
+            host_values = packed.cpu().tolist()
+            for (index, _), host_value in zip(values, host_values, strict=True):
+                resolved[index] = float(host_value)
+        for (key, _, n), value in zip(pending, resolved, strict=True):
+            assert value is not None
+            self._update_number(key, value, n=n)
 
     def reduce_distributed(self):
+        self.flush_pending()
         if not torch.distributed.is_available() or not torch.distributed.is_initialized():
             return
         device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -350,6 +386,7 @@ class MetricLogger:
         self._last_reduce_ts = time.time()
 
     def get_log_dict(self) -> dict:
+        self.flush_pending()
         out = {}
         for name, meter in self.meters.items():
             if meter.synced_global_avg is not None:
