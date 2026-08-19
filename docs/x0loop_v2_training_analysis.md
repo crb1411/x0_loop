@@ -516,6 +516,32 @@ real teacher 已对其近似自洽，当前 fake score 无法识别出稳定的 
 若不劣，继续 30k/45k，胜出候选才做 50k。第三支相对 matched `FRESH-TIME` 的 15k FID
 不改善即停止。每条方法修改后都重新生成同-root Heun 全轨迹。
 
+### Cycle 04 run 1：FRESH-FIXED-REPRO 完整结果
+
+`FRESH-FIXED-REPRO` 已从随机初始化完成 300 epochs/58,500 steps。运行使用 GPU 6、
+commit `4410c0e`，启动时 `git_dirty=false`；最终 checkpoint、resolved config 和所有指标
+均已落盘。固定 EMA/Heun-20/CFG-2.2/seed-20260819 的筛选曲线为：
+
+| step | 样本数 | FID | 评测耗时 |
+|---:|---:|---:|---:|
+| 15,000 | 5,000 | 16.3331 | 73.3 s |
+| 30,000 | 5,000 | 12.0041 | 70.0 s |
+| 45,000 | 5,000 | 10.7707 | 70.1 s |
+| 58,500 | 50,000 | **6.16413** | 690.8 s |
+
+Cycle 01 旧 fixed-time 最佳 checkpoint 的权威 FID 为 6.21432；新结果只低 0.05019，
+不足以脱离单次评估/训练波动，结论是当前代码成功匹配复现 fixed-time baseline，而不是
+发现了新的 FID 改善。相同 step 的旧/新 5k FID 在 30k 为 11.7266/12.0041，在 45k
+为 10.5959/10.7707，也支持两条曲线接近但并非逐点相同。
+
+最后 1,000 个日志记录的中位训练性能为 0.0667 s/step、3,840.6 image/s、7.15 GiB；
+按每步 5.154 TFLOP 和 H800 dense BF16 989 TFLOP/s 计算，主训练/方法 MFU 均为
+7.82%。训练时 20 秒硬件采样的 GPU busy 平均约 52%，功耗通常 370–389 W，进程平均
+使用约 1.36 个 CPU 核且 I/O wait 为 0；最终 Heun 采样则持续 99%–100% GPU busy、
+约 675–700 W。证据指向 backward/optimizer/逐步 launch 的小 kernel 与同步间隙，而非
+DataLoader、显存容量或硬件降频。下一步按预注册启动 `FRESH-TIME`，不因这条 matched
+baseline 的轻微数值优势修改实验定义。
+
 ## 时间与吞吐分析
 
 300 epochs 在 CIFAR-10、batch 256 下是 58,500 optimizer steps（每 epoch 约
@@ -557,12 +583,14 @@ Heun forward 和辅助 backward，并除以本机 700 W H800 的 dense BF16 989 
 | BANK-X0 | 0.1572 | 1640 | 8.68 | 3.32% | 4.84% | 7.516 |
 | ONLINE-X0 static | 0.4629 | 554 | 13.50 | 1.13% | 3.37% | 15.441 |
 | ONLINE-X0 dynamic smoke | 0.3867 | 666 | 8.61 | 1.35% | 4.04% | 15.441 |
+| Cycle 04 FRESH-FIXED-REPRO | 0.0667 | 3841 | 7.15 | 7.82% | 7.82% | 5.154 |
 
-据此，58,500-step/300-epoch 的当前长窗口预算为：FRESH 纯训练约 1 小时 23 分；
+据此，58,500-step/300-epoch 的当前长窗口预算为：FRESH 稳定 step 的纯训练外推约
+1 小时 5 分；Cycle 04 实际从启动到完成训练和三次中途 FID 为 1 小时 8 分 48 秒；
 向量化、编译后的 BANK 约 2 小时 33 分；ONLINE static 约 7 小时 31 分，dynamic
 约 6 小时 17 分（另加约 3 分 20 秒首次编译）。中途 5k FID 只在
-15k/30k/45k 三次运行，共约
-5 分钟；最终 50k FID 约 15 分钟。实际 wall time 还包含依模式而异的首次编译约
+15k/30k/45k 三次运行，Cycle 04 实测共 3 分 33 秒；最终 50k FID 实测 11 分 31 秒。
+实际 wall time 还包含依模式而异的首次编译约
 1–4 分钟和 checkpoint 写盘。不能仅为提高利用率增大全局 batch：这会减少 300 epochs 内的
 optimizer steps 并改变 FID 对照定义。
 
