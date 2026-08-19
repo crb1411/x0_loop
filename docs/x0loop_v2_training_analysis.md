@@ -542,6 +542,39 @@ Cycle 01 旧 fixed-time 最佳 checkpoint 的权威 FID 为 6.21432；新结果�
 DataLoader、显存容量或硬件降频。下一步按预注册启动 `FRESH-TIME`，不因这条 matched
 baseline 的轻微数值优势修改实验定义。
 
+### Cycle 04 run 2：FRESH-TIME 完整结果
+
+`FRESH-TIME` 同样从随机初始化完成 300 epochs/58,500 steps，运行使用 GPU 6、commit
+`fc1918a`、`git_dirty=false`。除 `model_conditioning.ignore_time=false` 和关闭无效的
+fixed-time jitter 外，训练预算、seed、模型、优化器、EMA 与 evaluator 均与 matched
+fixed baseline 相同。结果为：
+
+| step | 样本数 | fixed FID | time-aware FID | time-aware 改善 |
+|---:|---:|---:|---:|---:|
+| 15,000 | 5,000 | 16.3331 | 14.9119 | 1.4212（8.70%） |
+| 30,000 | 5,000 | 12.0041 | 10.9770 | 1.0271（8.56%） |
+| 45,000 | 5,000 | 10.7707 | 10.2560 | 0.5148（4.78%） |
+| 58,500 | 50,000 | 6.16413 | **5.47036** | **0.69377（11.26%）** |
+
+三个稀疏筛选点与权威 50k FID 全部同向；显式时间条件应成为后续 x0loop 的 matched
+FRESH 基线。这个结果修复的是此前 time-agnostic backbone 的结构性 prerequisite，不能
+冒充 x0loop 收益。最后 1,000 个稳定记录的 time-aware 性能为 0.0664 s/step、
+3,854.8 image/s、7.15 GiB 和 7.85% counted MFU；与 fixed 的 0.0667 s/step、7.82%
+MFU 等价。完成训练和三次中途 FID 用时 1 小时 9 分 59 秒，最终 50k FID 用时
+683.1 秒。
+
+训练定义修改后，使用 256 个相同 root noise/label、Heun-20/CFG-2.2 对两个最终 EMA
+checkpoint 做完整 solver-grid trace。time-aware 最终样本 RMS 为 0.9973，fixed 为
+1.0261；在低噪声 `t=0.1`，相对 Heun correction 由 8.23% 降至 6.78%，最后 x0 drift
+由 0.01399 降至 0.01173（低 16.1%）。time-aware 在高噪声首步 correction 更大
+（19.80% 对 11.96%），但在末段更稳定，符合“早期按 t 重整、末段减少误差修正”的
+解释。两者最终样本 RMS 距离为 0.4200，说明改善不是微小数值扰动。原始逐步统计与固定
+root grid 保存在 `runs/x0loop_v2_from_scratch/cycle04/trajectory_fixed_vs_time/`。
+
+因此 Cycle 04 第三条训练继续采用预注册 `ONLINE-X0-TIME`：它必须与新 time-aware
+FRESH 比较，不能再以旧 fixed baseline 为对手。辅助 batch 为 32、完整保留 fresh，
+训练/评估均使用 time-aware Heun-20/CFG-2.2；辅助强度按参数梯度范数目标 0.10 控制。
+
 ## 时间与吞吐分析
 
 300 epochs 在 CIFAR-10、batch 256 下是 58,500 optimizer steps（每 epoch 约
@@ -584,6 +617,7 @@ Heun forward 和辅助 backward，并除以本机 700 W H800 的 dense BF16 989 
 | ONLINE-X0 static | 0.4629 | 554 | 13.50 | 1.13% | 3.37% | 15.441 |
 | ONLINE-X0 dynamic smoke | 0.3867 | 666 | 8.61 | 1.35% | 4.04% | 15.441 |
 | Cycle 04 FRESH-FIXED-REPRO | 0.0667 | 3841 | 7.15 | 7.82% | 7.82% | 5.154 |
+| Cycle 04 FRESH-TIME | 0.0664 | 3855 | 7.15 | 7.85% | 7.85% | 5.154 |
 
 据此，58,500-step/300-epoch 的当前长窗口预算为：FRESH 稳定 step 的纯训练外推约
 1 小时 5 分；Cycle 04 实际从启动到完成训练和三次中途 FID 为 1 小时 8 分 48 秒；
