@@ -26,7 +26,11 @@ def main() -> None:
     root = Path(args.run_root)
 
     ranked: list[tuple[float, str, int, int, Path]] = []
-    for branch_dir in sorted(path for path in root.iterdir() if path.is_dir()):
+    if list(root.glob("gen_eval_metrics_*.jsonl")):
+        branch_dirs = [root]
+    else:
+        branch_dirs = sorted(path for path in root.iterdir() if path.is_dir())
+    for branch_dir in branch_dirs:
         for row in _rows(branch_dir):
             step = int(row["step"])
             fid = float(row["frechet_inception_distance"])

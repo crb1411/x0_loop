@@ -130,3 +130,10 @@ CUDA_VISIBLE_DEVICES=7 uv run python -m experiments.x0loop_v2.analyze_sampling_t
   --checkpoint online=runs/x0loop_v2_from_scratch/cycle01/online/checkpoints/ckpt_step_00058500.pt \
   --out runs/x0loop_v2_from_scratch/cycle01/trajectory_analysis
 ```
+
+每个分支按固定 5k FID 选择自身最佳 checkpoint，再分别运行权威 50k FID：
+
+```bash
+X0LOOP_GPU=7 experiments/x0loop_v2/eval_cycle_best_fid50k.sh \
+  runs/x0loop_v2_from_scratch/cycle01
+```
