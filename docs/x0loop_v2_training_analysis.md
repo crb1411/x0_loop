@@ -51,8 +51,8 @@
 
 ### Run 02 — BANK-FIX
 
-- 状态：待完成
-- GPU：6（FRESH 完成后启动）
+- 状态：运行中（2026-08-19 13:20 CST 启动）
+- GPU：7
 - 作用：检验对齐 endpoint、Heun-20、CFG-2.2 和 EMA teacher 后，replay 是否提供
   超出 FRESH 的 FID 信号。
 - fresh batch：完整保留。
@@ -62,7 +62,7 @@
 
 ### Run 03 — ONLINE
 
-- 状态：运行中（2026-08-19 11:25 CST 启动；前 10k step 为统一 warmup）
+- 状态：在 step 15,102 提前终止（固定 FID 与 sampler trace 共同证伪）
 - GPU：7
 - 作用：与 BANK-FIX 对比，判断 replay/off-policy 是否是主要瓶颈。
 - trajectory：当前 EMA 在线生成实际 Heun-20/CFG-2.2 occupancy。
@@ -79,10 +79,24 @@
 
 ### Cycle 01 采样轨迹分析
 
-待三次训练完成后填写。至少保存同一组 root noise 和 label 在三个模型上的 Heun
-trace，并逐 step 比较状态、velocity、x0_hat、局部 Euler/Heun defect 以及最终图像。
+三次训练完成后仍需保存同一组 root noise 和 label 在三个模型上的最终 Heun trace，
+并逐 step 比较状态、velocity、x0_hat、局部 Euler/Heun defect 以及最终图像。
 分析工具固定使用 `experiments/x0loop_v2/analyze_sampling_trajectory.py`，输出完整 trace、
 最终图像网格、逐步 JSON 指标和 Markdown 摘要。
+
+ONLINE-15k 出现 FID 大幅退化后，先做了同 step、同 root 的 FRESH/ONLINE 中途诊断：
+
+| 指标 | FRESH-15k | ONLINE-15k |
+|---|---:|---:|
+| 最终样本 RMS | 0.9582 | 0.5118 |
+| 平均 Heun correction RMS | 0.00192 | 0.00700 |
+| 最大相对 Heun correction | 0.142 | 0.640 |
+| t=0.10 的 x0 drift RMS | 0.0125 | 0.1347 |
+
+同 root 图像保留了大致语义结构，但 ONLINE 明显发灰、低对比度。异常集中在低噪声
+末段，并最终把样本动态范围压缩约一半；这与 FID 从 22.18 退化至 26.47 一致，故不是
+单纯的评估噪声。原始产物位于
+`runs/x0loop_v2_from_scratch/cycle01/trajectory_analysis_step15000`。
 
 ### Cycle 01 设计结论与下一轮修改
 
@@ -97,7 +111,11 @@ trace，并逐 step 比较状态、velocity、x0_hat、局部 Euler/Heun defect 
 - 正式 FRESH 已在 GPU 6 启动；稳定训练阶段约 0.11–0.14 s/step（不含 FID）。
 - 正式 ONLINE 已在 GPU 7 启动。step 10,000 前关闭辅助项，以保证 teacher 已形成有效
   EMA lag，并与 FRESH 保持相同 warmup；step 10,000 后才计入在线 rollout 成本和信号。
-- BANK-FIX 将在 FRESH 完成后使用 GPU 6 启动。
+- ONLINE 在 step 15,000 的固定 FID 与同 root sampler trace 共同确认低噪声末段坍缩，
+  因最终 FID 是主目标，不再花约 11 小时继续该被支配定义；中断时额外保存了
+  step-15,102 checkpoint。
+- BANK-FIX 随后在 GPU 7 从共享 FRESH step-5,000 随机初始化前缀启动，继续 53,500
+  steps。这样三个方法在启用辅助项前共享完全相同的模型/优化器前缀。
 - step 5,000 的固定噪声 5k FID：FRESH 与尚未启用辅助项的 ONLINE 都为
   `40.02581897388575`。两者共同日志窗口的 loss、fresh loss、x0/v MSE、LR 和
   grad norm 也逐项完全一致，验证了 warmup 可比性及 FID 随机流隔离。
