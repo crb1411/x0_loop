@@ -10,7 +10,7 @@ CFG="${CFG:-2.2}"
 REFINE_TIME="${REFINE_TIME:-0.5}"
 GUIDANCE_SCHEDULE="${GUIDANCE_SCHEDULE:-null}"
 RUN_FOREGROUND="${RUN_FOREGROUND:-0}"
-PYTHON_CMD="${PYTHON_CMD:-/root/miniconda3/envs/vl/bin/python}"
+PYTHON_CMD="${PYTHON_CMD:-uv run python}"
 
 [ "$#" -eq 1 ] || { echo "usage: $0 /path/to/ckpt_step_XXXXXXXX.pt"; exit 2; }
 
@@ -40,7 +40,7 @@ gen_eval:
   guidance_schedule: $GUIDANCE_SCHEDULE
   refine_time: $REFINE_TIME
   input2: cifar10-train
-  datasets_root: /root/data/cifar10_data
+  datasets_root: /mnt/data/crb/data
   datasets_download: false
   keep_images: false
   metrics: {isc: true, fid: true, kid: true, ppl: false, prc: true, mind: true}

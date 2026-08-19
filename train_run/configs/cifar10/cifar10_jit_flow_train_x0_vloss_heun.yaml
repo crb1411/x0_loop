@@ -1,6 +1,6 @@
 dataset:
   name: cifar10
-  root: /root/data/cifar10_data
+  root: /mnt/data/crb/data
   download: false
 
 model:
@@ -96,7 +96,7 @@ gen_eval:
   sampler: heun
   guidance_scale: 3.0
   input2: cifar10-train
-  datasets_root: /root/data/cifar10_data
+  datasets_root: /mnt/data/crb/data
   datasets_download: false
   keep_images: false
   metrics:

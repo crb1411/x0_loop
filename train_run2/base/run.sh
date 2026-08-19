@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-cd "${ROOT}"
+if [ ! -d "x0loop" ] || [ ! -d "train_run2" ]; then
+  echo "请从项目根目录运行: bash train_run2/base/run.sh" >&2
+  exit 2
+fi
 
 RUN_NAME="base"
-CONFIG_PATH="${ROOT}/train_run2/${RUN_NAME}/config.yaml"
-RUNTIME_CONFIG="${RUNTIME_CONFIG:-${ROOT}/x0loop/configs/runtime/ddp_checkpoint_compile.yaml}"
+CONFIG_PATH="train_run2/base/config.yaml"
+RUNTIME_CONFIG="${RUNTIME_CONFIG:-x0loop/configs/runtime/ddp_checkpoint_compile.yaml}"
 TIMESTAMP="${X0LOOP_RUN_TIMESTAMP:-$(date +"%Y%m%d_%H%M%S")}"
-OUT_DIR="${ROOT}/runs2/ignore_time/${RUN_NAME}/${TIMESTAMP}"
+OUT_DIR="runs/ablations/cifar10_flow_x0_vloss/jit/learnable_endpoint/${RUN_NAME}/${TIMESTAMP}"
 LOG_DIR="${OUT_DIR}/logs"
 LOG_FILE="${LOG_DIR}/launcher.log"
 PID_FILE="${LOG_DIR}/launcher.pid"
 
 mkdir -p "${LOG_DIR}"
-export PYTHONPATH="${ROOT}:${PYTHONPATH:-}"
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export MASTER_PORT="${MASTER_PORT:-$((47000 + RANDOM % 10000))}"
 export X0LOOP_RUN_TIMESTAMP="${TIMESTAMP}"
@@ -26,15 +27,15 @@ fi
 export NPROC_PER_NODE
 
 {
-  echo "[x0loop] root=${ROOT}"
+  echo "[x0loop] root=."
   echo "[ablation] name=${RUN_NAME}"
   echo "[ablation] config=${CONFIG_PATH}"
   echo "[ablation] out_dir=${OUT_DIR}"
   echo "[torchrun] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} NPROC_PER_NODE=${NPROC_PER_NODE} MASTER_PORT=${MASTER_PORT}"
 } >> "${LOG_FILE}" 2>&1
 
-CMD=(train_run/run_and_plot.sh "${LOG_FILE}" "${TIMESTAMP}" "${ROOT}" -- \
-  torchrun \
+CMD=(train_run/run_and_plot.sh "${LOG_FILE}" "${TIMESTAMP}" "." -- \
+  uv run torchrun \
   --nnodes=1 \
   --node_rank=0 \
   --nproc_per_node="${NPROC_PER_NODE}" \

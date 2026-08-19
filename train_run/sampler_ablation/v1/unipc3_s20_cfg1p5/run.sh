@@ -6,9 +6,9 @@ ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 cd "${ROOT}"
 
 EXP="unipc3_s20_cfg1p5"
-CKPT="/data/seek/aigc/x0_loop/runs/ablations/cifar10_flow_x0_vloss/jit/learnable_endpoint/scheme2_beta0p8/20260616_081221/checkpoints/ckpt_step_00100000.pt"
+CKPT="./runs/ablations/cifar10_flow_x0_vloss/jit/learnable_endpoint/scheme2_beta0p8/20260616_081221/checkpoints/ckpt_step_00100000.pt"
 EVAL_CFG="${ROOT}/train_run/sampler_ablation/v1/${EXP}/eval.yaml"
-OUT_DIR="/data/seek/aigc/x0_loop/runs/sampler_ablation/v1/${EXP}"
+OUT_DIR="./runs/sampler_ablation/v1/${EXP}"
 LOG_DIR="${OUT_DIR}/logs"
 mkdir -p "${LOG_DIR}"
 LOG_FILE="${LOG_DIR}/eval.log"
@@ -19,7 +19,7 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 echo "[sampler_ablation] exp=${EXP} sampler=unipc3 steps=20 cfg=1.5 GPU=${CUDA_VISIBLE_DEVICES}" | tee -a "${LOG_FILE}"
 echo "[sampler_ablation] out=${OUT_DIR}" | tee -a "${LOG_FILE}"
 
-python -m x0loop.eval_fid \
+uv run python -m x0loop.eval_fid \
   --ckpt "${CKPT}" \
   --eval-config "${EVAL_CFG}" \
   --tag "${EXP}" \

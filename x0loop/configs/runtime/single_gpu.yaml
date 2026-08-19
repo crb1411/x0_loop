@@ -1,0 +1,13 @@
+distributed:
+  mode: none
+  backend: nccl
+  fsdp: false
+  fsdp_mode: none
+  precision: bf16
+  grad_clip_norm: 3.0
+  activation_ckpt: false
+  checkpoint:
+    mode: full
+    every_steps: 5000
+compile:
+  enabled: false

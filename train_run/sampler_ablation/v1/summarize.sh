@@ -2,9 +2,9 @@
 # Standalone: collect all finished sampler-ablation results into one table (sorted by FID).
 # Usage: bash train_run/sampler_ablation/summarize.sh
 set -euo pipefail
-OUT_BASE="/data/seek/aigc/x0_loop/runs/sampler_ablation/v1"
+OUT_BASE="./runs/sampler_ablation/v1"
 
-python - "$OUT_BASE" <<'PY'
+uv run python - "$OUT_BASE" <<'PY'
 import glob, json, os, sys
 base = sys.argv[1]
 latest = {}

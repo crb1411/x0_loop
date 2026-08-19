@@ -29,7 +29,7 @@ gen_eval: {}
 ```yaml
 dataset:
   name: cifar10
-  root: /root/data/cifar10_data
+  root: /mnt/data/crb/data
   download: false
   split: train
 ```
@@ -514,6 +514,7 @@ train:
   seed: 42
   deterministic: false
   epochs: 1000
+  max_steps: null
   batch_size: 256
   gradient_accumulation_steps: 1
   class_dropout_prob: 0.1
@@ -537,6 +538,7 @@ Fields:
 - `seed`: base random seed.
 - `deterministic`: toggles deterministic backend behavior where supported.
 - `epochs`: number of epochs.
+- `max_steps`: optional positive cap on optimizer steps; useful for smoke tests.
 - `batch_size`: per-process dataloader batch size.
 - `gradient_accumulation_steps`: optimizer step every N micro-batches.
 - `class_dropout_prob`: classifier-free guidance label dropout probability.
@@ -633,7 +635,7 @@ gen_eval:
   sampler: heun
   guidance_scale: 3.0
   input2: cifar10-train
-  datasets_root: /root/data/cifar10_data
+  datasets_root: /mnt/data/crb/data
   datasets_download: false
   keep_images: false
   metrics:

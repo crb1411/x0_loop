@@ -15,7 +15,7 @@ gen_eval:
   sampler: heun
   guidance_scale: 2.3
   input2: cifar10-train
-  datasets_root: /root/data/cifar10_data
+  datasets_root: /mnt/data/crb/data
   datasets_download: false
   keep_images: false
   keep_images_count: 100

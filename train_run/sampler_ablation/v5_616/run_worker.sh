@@ -8,7 +8,7 @@ cd "${ROOT}"
 GPU="${1:?usage: run_worker.sh GPU PARITY}"
 PARITY="${2:?usage: run_worker.sh GPU PARITY}"
 EXP_FILE="${ROOT}/train_run/sampler_ablation/v5_616/experiments.txt"
-OUT_BASE="/data/seek/aigc/x0_loop/runs/sampler_ablation/v5_616"
+OUT_BASE="./runs/sampler_ablation/v5_616"
 
 mapfile -t EXPERIMENTS < "${EXP_FILE}"
 

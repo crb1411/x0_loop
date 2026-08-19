@@ -20,6 +20,16 @@ class CleanLoopConfig:
     t1_min: float = 1.0e-5
     t1_max_resample_attempts: int = 8
     storage_dtype: torch.dtype = torch.float16
+    version: int = 1
+    mode: str = "legacy"
+    aux_batch_ratio: float = 0.25
+    aux_gradient_ratio: float = 0.2
+    aux_scale_max: float = 10.0
+    solver_steps: int = 20
+    sampler: str = "heun"
+    guidance_scale: float = 2.2
+    root_fraction: float = 0.25
+    drop_fraction: float = 0.5
 
 
 def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
@@ -37,6 +47,16 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
     t1_delta = float(raw.get("t1_delta", raw.get("t1_max_delta", 1.0 / 50.0)))
     t1_min = float(raw.get("t1_min", 1.0e-5))
     t1_max_resample_attempts = int(raw.get("t1_max_resample_attempts", 8))
+    version = int(raw.get("version", 1))
+    mode = str(raw.get("mode", "legacy" if version == 1 else "bank_fix")).lower()
+    aux_batch_ratio = float(raw.get("aux_batch_ratio", raw.get("bank_prob", 0.25)))
+    aux_gradient_ratio = float(raw.get("aux_gradient_ratio", 0.2))
+    aux_scale_max = float(raw.get("aux_scale_max", 10.0))
+    solver_steps = int(raw.get("solver_steps", 20))
+    sampler = str(raw.get("sampler", "heun")).lower()
+    guidance_scale = float(raw.get("guidance_scale", 2.2))
+    root_fraction = float(raw.get("root_fraction", 0.25))
+    drop_fraction = float(raw.get("drop_fraction", 0.5))
     if bank_size <= 0:
         raise ValueError(f"clean_loop.bank_size must be > 0, got {bank_size}")
     if not (0.0 <= bank_prob <= 1.0):
@@ -57,6 +77,24 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
         raise ValueError(f"clean_loop.t1_delta must be > 0, got {t1_delta}")
     if t1_max_resample_attempts <= 0:
         raise ValueError(f"clean_loop.t1_max_resample_attempts must be > 0, got {t1_max_resample_attempts}")
+    if version not in {1, 2}:
+        raise ValueError(f"clean_loop.version must be 1 or 2, got {version}")
+    if mode not in {"legacy", "drop", "bank_fix", "online"}:
+        raise ValueError("clean_loop.mode must be legacy | drop | bank_fix | online")
+    if not (0.0 < aux_batch_ratio <= 1.0):
+        raise ValueError(f"clean_loop.aux_batch_ratio must be in (0,1], got {aux_batch_ratio}")
+    if not (0.0 <= aux_gradient_ratio <= 1.0):
+        raise ValueError(f"clean_loop.aux_gradient_ratio must be in [0,1], got {aux_gradient_ratio}")
+    if aux_scale_max <= 0.0:
+        raise ValueError(f"clean_loop.aux_scale_max must be > 0, got {aux_scale_max}")
+    if solver_steps <= 0:
+        raise ValueError(f"clean_loop.solver_steps must be > 0, got {solver_steps}")
+    if sampler != "heun":
+        raise ValueError("clean_loop v2 currently locks the training kernel to sampler=heun")
+    if not (0.0 <= root_fraction <= 1.0):
+        raise ValueError(f"clean_loop.root_fraction must be in [0,1], got {root_fraction}")
+    if not (0.0 <= drop_fraction < 1.0):
+        raise ValueError(f"clean_loop.drop_fraction must be in [0,1), got {drop_fraction}")
     return CleanLoopConfig(
         enabled=True,
         bank_size=bank_size,
@@ -70,6 +108,16 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
         t1_delta=t1_delta,
         t1_min=t1_min,
         t1_max_resample_attempts=t1_max_resample_attempts,
+        version=version,
+        mode=mode,
+        aux_batch_ratio=aux_batch_ratio,
+        aux_gradient_ratio=aux_gradient_ratio,
+        aux_scale_max=aux_scale_max,
+        solver_steps=solver_steps,
+        sampler=sampler,
+        guidance_scale=guidance_scale,
+        root_fraction=root_fraction,
+        drop_fraction=drop_fraction,
     )
 
 
@@ -203,9 +251,90 @@ def build_clean_loop_bank_input(
 ) -> torch.Tensor:
     if cfg.bank_input_mode == "step":
         return process.step(xt, t, t1, model_out, aux={})
-    endpoint = torch.randn_like(x0_hat)
+    # Preserve the process-specific endpoint distribution.  In particular,
+    # LearnableEndpointFlowProcess uses (1-beta) * mu_data + beta * noise.
+    endpoint = process.prior_sample(x0_hat.shape, x0_hat.device, x0_hat.dtype)
     alpha = process.schedule.alpha(t1)
     sigma = process.schedule.sigma(t1)
     a = process._reshape_coeff(alpha, x0_hat)
     s = process._reshape_coeff(sigma, x0_hat)
     return a * x0_hat + s * endpoint
+
+
+@dataclass
+class TrajectoryBatch:
+    x: torch.Tensor
+    target_v: torch.Tensor
+    t: torch.Tensor
+    cond: torch.Tensor | None
+    solver_index: torch.Tensor
+    depth: torch.Tensor
+    root_noise_id: torch.Tensor
+    producer_step: torch.Tensor
+
+
+class TrajectoryBank:
+    """CPU replay for inference-kernel states and EMA velocity targets.
+
+    Unlike the legacy FIFO, every item identifies its exact Heun grid point and
+    trajectory ancestry. Sampling is stratified over solver index so roots do
+    not crowd out the sampler's low-noise states.
+    """
+
+    def __init__(self, cfg: CleanLoopConfig):
+        self.cfg = cfg
+        self._items: list[dict[str, torch.Tensor | None]] = []
+        self._next_root_id = 0
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def new_root_ids(self, n: int, *, device: torch.device) -> torch.Tensor:
+        start = self._next_root_id
+        self._next_root_id += int(n)
+        return torch.arange(start, start + int(n), device=device, dtype=torch.long)
+
+    @torch.no_grad()
+    def add(self, batch: TrajectoryBatch) -> None:
+        for i in range(batch.x.shape[0]):
+            item: dict[str, torch.Tensor | None] = {
+                "x": batch.x[i].detach().to(device="cpu", dtype=self.cfg.storage_dtype),
+                "target_v": batch.target_v[i].detach().to(device="cpu", dtype=self.cfg.storage_dtype),
+                "t": batch.t[i].detach().float().cpu(),
+                "cond": batch.cond[i].detach().cpu() if batch.cond is not None else None,
+                "solver_index": batch.solver_index[i].detach().long().cpu(),
+                "depth": batch.depth[i].detach().long().cpu(),
+                "root_noise_id": batch.root_noise_id[i].detach().long().cpu(),
+                "producer_step": batch.producer_step[i].detach().long().cpu(),
+            }
+            self._items.append(item)
+        overflow = len(self._items) - self.cfg.bank_size
+        if overflow > 0:
+            del self._items[:overflow]
+
+    def sample(self, n: int, *, device: torch.device, dtype: torch.dtype) -> TrajectoryBatch:
+        if n <= 0 or not self._items:
+            raise ValueError("TrajectoryBank.sample requires a non-empty bank and n > 0")
+        by_index: dict[int, list[int]] = {}
+        for pos, item in enumerate(self._items):
+            index = int(item["solver_index"].item())  # type: ignore[union-attr]
+            by_index.setdefault(index, []).append(pos)
+        levels = list(by_index)
+        chosen = [by_index[levels[i % len(levels)]][int(torch.randint(len(by_index[levels[i % len(levels)]]), ()).item())] for i in range(min(int(n), len(self._items)))]
+        items = [self._items[i] for i in chosen]
+
+        def stack(name: str) -> torch.Tensor:
+            return torch.stack([item[name] for item in items])  # type: ignore[list-item]
+
+        cond_items = [item["cond"] for item in items]
+        cond = None if cond_items[0] is None else torch.stack(cond_items).to(device=device)  # type: ignore[arg-type]
+        return TrajectoryBatch(
+            x=stack("x").to(device=device, dtype=dtype),
+            target_v=stack("target_v").to(device=device, dtype=dtype),
+            t=stack("t").to(device=device),
+            cond=cond,
+            solver_index=stack("solver_index").to(device=device),
+            depth=stack("depth").to(device=device),
+            root_noise_id=stack("root_noise_id").to(device=device),
+            producer_step=stack("producer_step").to(device=device),
+        )

@@ -7,13 +7,12 @@ samples) and the checkpoint path are needed. Each process evaluates on one GPU:
     CUDA_VISIBLE_DEVICES=0 python -m x0loop.eval_fid \
         --ckpt /path/ckpt_step_00100000.pt \
         --eval-config train_run/sampler_ablation/<exp>/eval.yaml \
-        --set logging.out_dir=/data/.../runs/sampler_ablation/<exp>
+        --set logging.out_dir=runs/sampler_ablation/<exp>
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 
 import torch
 
@@ -39,18 +38,6 @@ def _apply_prefix_transform(state_dict: dict, name: str) -> dict:
     return _strip_state_dict_prefix(state_dict, name)
 
 
-def _find_launch_config(ckpt_path: str) -> str | None:
-    cur = os.path.dirname(os.path.abspath(ckpt_path))
-    while True:
-        path = os.path.join(cur, "launch_config.yaml")
-        if os.path.isfile(path):
-            return path
-        parent = os.path.dirname(cur)
-        if parent == cur:
-            return None
-        cur = parent
-
-
 def parse_args():
     p = argparse.ArgumentParser(description="Standalone FID/IS/KID eval from a checkpoint.")
     p.add_argument("--ckpt", type=str, required=True, help="Path to ckpt_step_*.pt")
@@ -63,16 +50,11 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # Single load: the checkpoint carries the model and EMA. Prefer the launch
-    # YAML next to the run so evaluation sees the same high-level options used
-    # at training time, including model_conditioning.
+    # Single load: the checkpoint carries the training config, model and EMA.
     ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     base_cfg = dict(ckpt.get("config") or {})
     if not base_cfg:
         raise ValueError(f"Checkpoint {args.ckpt} has no embedded 'config'; cannot rebuild the model.")
-    launch_config = _find_launch_config(args.ckpt)
-    if launch_config is not None:
-        base_cfg = _deep_merge_dict(base_cfg, _load_yaml(launch_config))
 
     cfg = _deep_merge_dict(base_cfg, _load_yaml(args.eval_config))
     _apply_set_overrides(cfg, args.overrides)
@@ -81,11 +63,7 @@ def main():
     schedule = build_schedule(cfg)
     process = build_process(cfg, schedule).to(runtime.device)
     model_ctx = build_model_context(cfg, runtime)
-    denoiser = Denoiser(
-        model_ctx.model,
-        process=process,
-        model_conditioning=cfg.get("model_conditioning", None),
-    )
+    denoiser = Denoiser(model_ctx.model, process=process)
 
     use_ema = bool(cfg.get("train", {}).get("use_ema", True)) and ("ema" in ckpt)
     ema = EMA(model=denoiser, decay=float(cfg.get("train", {}).get("ema_decay", 0.999))) if use_ema else None
@@ -107,8 +85,6 @@ def main():
         missing = getattr(info, "missing_keys", None) if info is not None else None
         runtime.logger.log_text(
             f"[eval_fid] ckpt={args.ckpt} step={step} use_ema={use_ema} "
-            f"launch_config={launch_config or 'none'} "
-            f"model_conditioning={cfg.get('model_conditioning', {'ignore_time': False})} "
             f"sampler={gen_cfg['sampler']} steps={gen_cfg['steps']} cfg={gen_cfg['guidance_scale']} "
             f"num_samples={gen_cfg['num_samples']} missing_keys={missing}"
         )

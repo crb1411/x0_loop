@@ -1,6 +1,6 @@
 dataset:
   name: tiny-imagenet # cifar10 | mnist | imagefolder | tiny-imagenet | tiny_imagenet
-  root: /root/data/tiny-imagenet-200
+  root: /mnt/data/crb/data/tiny-imagenet-200
   split: train # train | val | test, used by imagefolder/tiny-imagenet when split subdir exists
 
 model:

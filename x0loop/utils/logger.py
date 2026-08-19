@@ -137,18 +137,26 @@ class Logger:
         total_loss = val("loss")
         fresh_scale = val("clean/fresh_scale", 1.0)
         fresh_loss = val("fresh/loss", total_loss)
-        bank_scale = val("clean/bank_scale", 0.0)
-        bank_weight = val("clean/loss_bank_weight", 0.0)
-        bank_loss = val("clean/loss_bank", 0.0)
         step_width = len(str(int(total_steps))) if total_steps is not None and total_steps > 0 else 0
-        loss_part = (
-            f"(loss) {cls._fmt_sig(total_loss)} = "
-            f"(fresh_scale) {cls._fmt_sig(fresh_scale)} * "
-            f"(weighted_fresh_loss) {cls._fmt_sig(fresh_loss)} + "
-            f"(bank_scale) {cls._fmt_sig(bank_scale)} * "
-            f"(bank_weight) {cls._fmt_sig(bank_weight)} * "
-            f"(bank_x0_mse) {cls._fmt_sig(bank_loss)}"
-        )
+        if "clean/loss_aux" in kv:
+            loss_part = (
+                f"(loss) {cls._fmt_sig(total_loss)} = "
+                f"(fresh) {cls._fmt_sig(val('fresh/loss_contrib', fresh_loss))} + "
+                f"(aux_scale) {cls._fmt_sig(val('clean/aux_scale'))} * "
+                f"(aux_velocity_mse) {cls._fmt_sig(val('clean/loss_aux'))}"
+            )
+        else:
+            bank_scale = val("clean/bank_scale", 0.0)
+            bank_weight = val("clean/loss_bank_weight", 0.0)
+            bank_loss = val("clean/loss_bank", 0.0)
+            loss_part = (
+                f"(loss) {cls._fmt_sig(total_loss)} = "
+                f"(fresh_scale) {cls._fmt_sig(fresh_scale)} * "
+                f"(weighted_fresh_loss) {cls._fmt_sig(fresh_loss)} + "
+                f"(bank_scale) {cls._fmt_sig(bank_scale)} * "
+                f"(bank_weight) {cls._fmt_sig(bank_weight)} * "
+                f"(bank_x0_mse) {cls._fmt_sig(bank_loss)}"
+            )
         parts: list[str] = [loss_part]
         mid_tbin = cls._format_mid_tbin(kv.get("summary"))
         if mid_tbin is not None:
@@ -182,7 +190,7 @@ class Logger:
         clean = []
         clean_int_values = [
             kv[key]
-            for key in ("clean/bank_size", "clean/bank_n", "clean/fresh_n", "clean/warmup_left", "clean/fresh_add_n", "clean/bank_add_n")
+            for key in ("clean/bank_size", "clean/bank_n", "clean/fresh_n", "clean/aux_n", "clean/warmup_left", "clean/fresh_add_n", "clean/bank_add_n")
             if key in kv
         ]
         clean_int_width = max(5, *(len(cls._fmt_int(v)) for v in clean_int_values)) if clean_int_values else 5
@@ -190,6 +198,10 @@ class Logger:
             ("clean/bank_size", "bank_size"),
             ("clean/bank_n", "bank_n"),
             ("clean/fresh_n", "fresh_n"),
+            ("clean/aux_n", "aux_n"),
+            ("clean/aux_output_grad_ratio", "aux_grad_ratio"),
+            ("clean/solver_index", "solver_index"),
+            ("clean/depth", "depth"),
             ("clean/bank_prob", "bank_prob"),
             ("clean/t_bank", "t_bank"),
             ("clean/t1", "t1"),
@@ -199,7 +211,7 @@ class Logger:
             ("clean/bank_age", "bank_age"),
         ):
             if key in kv:
-                if key in {"clean/bank_size", "clean/bank_n", "clean/fresh_n", "clean/warmup_left", "clean/fresh_add_n", "clean/bank_add_n"}:
+                if key in {"clean/bank_size", "clean/bank_n", "clean/fresh_n", "clean/aux_n", "clean/warmup_left", "clean/fresh_add_n", "clean/bank_add_n"}:
                     clean.append(f"{label}={cls._fmt_int(kv[key], width=clean_int_width)}")
                 else:
                     clean.append(f"{label}={cls._fmt_num(kv[key])}")

@@ -1,6 +1,6 @@
 dataset:
   name: tiny-imagenet
-  root: /root/data/tiny-imagenet-200
+  root: /mnt/data/crb/data/tiny-imagenet-200
   split: train
 
 model:

@@ -15,7 +15,7 @@ EXPERIMENTS=(
 )
 
 find_free_port() {
-  python - <<'PY'
+  uv run python - <<'PY'
 import socket
 s = socket.socket()
 s.bind(("127.0.0.1", 0))

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import math
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from types import SimpleNamespace
 
 import torch
@@ -19,6 +20,8 @@ from x0loop.models.denoiser import Denoiser
 from x0loop.training.clean_loop import (
     CleanLoopBank,
     CleanLoopConfig,
+    TrajectoryBank,
+    TrajectoryBatch,
     build_clean_loop_bank_input,
     build_clean_loop_config,
     sample_clean_loop_t1,
@@ -131,6 +134,15 @@ def build_loop_config(cfg: dict, loader: DataLoader, distributed_cfg: dict) -> L
     micro_steps_per_epoch = len(loader)
     optimizer_steps_per_epoch = math.ceil(micro_steps_per_epoch / gradient_accumulation_steps)
     total_steps = epochs * optimizer_steps_per_epoch
+    max_steps = cfg["train"].get("max_steps")
+    if max_steps is not None:
+        max_steps = int(max_steps)
+        if max_steps <= 0:
+            raise ValueError(f"train.max_steps must be > 0 when set, got {max_steps}")
+        total_steps = min(total_steps, max_steps)
+    run_steps = cfg["train"].get("run_steps")
+    if run_steps is not None and int(run_steps) <= 0:
+        raise ValueError(f"train.run_steps must be > 0 when set, got {run_steps}")
     lr_for_step, lr_sched_meta = build_step_lr_schedule(cfg["train"], total_steps=total_steps, steps_per_epoch=optimizer_steps_per_epoch)
     grad_clip_cfg = cfg.get("train", {}).get("max_clip_grad", None)
     if grad_clip_cfg is None:
@@ -255,8 +267,28 @@ def compute_forward_batch(
     use_label_cond: bool,
     step: int,
     clean_loop_cfg: CleanLoopConfig | None = None,
-    clean_loop_bank: CleanLoopBank | None = None,
+    clean_loop_bank: CleanLoopBank | TrajectoryBank | None = None,
+    ema: EMA | None = None,
 ) -> TrainForwardBatch:
+    if clean_loop_cfg is not None and clean_loop_cfg.enabled and clean_loop_cfg.version == 2:
+        if not isinstance(clean_loop_bank, TrajectoryBank):
+            raise TypeError("clean_loop v2 requires a TrajectoryBank")
+        return compute_forward_batch_v2(
+            cfg=cfg,
+            runtime=runtime,
+            model_ctx=model_ctx,
+            denoiser=denoiser,
+            process=process,
+            augment=augment,
+            augment_mode=augment_mode,
+            x0=x0,
+            y=y,
+            use_label_cond=use_label_cond,
+            step=step,
+            clean_loop_cfg=clean_loop_cfg,
+            clean_loop_bank=clean_loop_bank,
+            ema=ema,
+        )
     x0 = x0.to(runtime.device, non_blocking=True)
     bsz = x0.shape[0]
     cond = y.to(runtime.device, non_blocking=True) if (use_label_cond and isinstance(y, torch.Tensor)) else None
@@ -417,6 +449,396 @@ def compute_forward_batch(
             "clean/bank_add_n": float(bank_add_n),
         })
     return TrainForwardBatch(loss=total_loss, loss_by_target=unweighted, batch_size=bsz, cond=fresh_cond, fb=fresh_fb, out=fresh_out, extra_metrics=extra_metrics)
+
+
+@contextmanager
+def _ema_teacher(denoiser: Denoiser, ema: EMA | None):
+    was_training = denoiser.training
+    if ema is not None:
+        ema.store(denoiser)
+        ema.copy_to(denoiser)
+    denoiser.eval()
+    try:
+        yield
+    finally:
+        if ema is not None:
+            ema.restore(denoiser)
+        denoiser.train(was_training)
+
+
+@torch.no_grad()
+def _teacher_velocity(
+    *,
+    denoiser: Denoiser,
+    process: BaseProcess,
+    x: torch.Tensor,
+    t: torch.Tensor,
+    cond: torch.Tensor | None,
+    null_cond: torch.Tensor | None,
+    guidance_scale: float,
+) -> torch.Tensor:
+    out = denoiser.model_output(
+        x,
+        t,
+        cond=cond,
+        null_cond=null_cond,
+        guidance_scale=guidance_scale,
+    )
+    return process.velocity_from_output(x, t, out, aux={})
+
+
+@torch.no_grad()
+def _teacher_heun_step(
+    *,
+    denoiser: Denoiser,
+    process: BaseProcess,
+    x: torch.Tensor,
+    t_scalar: torch.Tensor,
+    s_scalar: torch.Tensor,
+    cond: torch.Tensor | None,
+    null_cond: torch.Tensor | None,
+    guidance_scale: float,
+    is_last: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    t = torch.full((x.shape[0],), float(t_scalar.item()), device=x.device, dtype=torch.float32)
+    velocity = _teacher_velocity(
+        denoiser=denoiser,
+        process=process,
+        x=x,
+        t=t,
+        cond=cond,
+        null_cond=null_cond,
+        guidance_scale=guidance_scale,
+    )
+    dt = s_scalar - t_scalar
+    if is_last:
+        return x + dt * velocity, velocity, None
+    x_euler = x + dt * velocity
+    s = torch.full((x.shape[0],), float(s_scalar.item()), device=x.device, dtype=torch.float32)
+    velocity_s = _teacher_velocity(
+        denoiser=denoiser,
+        process=process,
+        x=x_euler,
+        t=s,
+        cond=cond,
+        null_cond=null_cond,
+        guidance_scale=guidance_scale,
+    )
+    return x + dt * 0.5 * (velocity + velocity_s), velocity, velocity_s
+
+
+def _trajectory_batch(
+    *,
+    x: torch.Tensor,
+    target_v: torch.Tensor,
+    t: torch.Tensor,
+    cond: torch.Tensor | None,
+    solver_index: torch.Tensor,
+    root_noise_id: torch.Tensor,
+    producer_step: int,
+) -> TrajectoryBatch:
+    return TrajectoryBatch(
+        x=x,
+        target_v=target_v,
+        t=t,
+        cond=cond,
+        solver_index=solver_index,
+        depth=solver_index.clone(),
+        root_noise_id=root_noise_id,
+        producer_step=torch.full_like(solver_index, int(producer_step)),
+    )
+
+
+@torch.no_grad()
+def _online_trajectory_batch(
+    *,
+    denoiser: Denoiser,
+    process: BaseProcess,
+    clean_cfg: CleanLoopConfig,
+    n: int,
+    shape: tuple[int, ...],
+    device: torch.device,
+    dtype: torch.dtype,
+    cond: torch.Tensor | None,
+    null_cond: torch.Tensor | None,
+    root_ids: torch.Tensor,
+    step: int,
+) -> TrajectoryBatch:
+    pairs = process.schedule.iter_pairs(clean_cfg.solver_steps, device=device)
+    wanted = torch.randint(len(pairs), (n,), device=device)
+    x = process.prior_sample((n, *shape), device=device, dtype=dtype)
+    selected_x = torch.empty_like(x)
+    selected_v = torch.empty_like(x)
+    selected_t = torch.empty((n,), device=device, dtype=torch.float32)
+    for index, (t_scalar, s_scalar) in enumerate(pairs):
+        active = wanted >= index
+        if not bool(active.any()):
+            break
+        active_cond = cond[active] if cond is not None else None
+        active_null = null_cond[active] if null_cond is not None else None
+        next_x, velocity, _ = _teacher_heun_step(
+            denoiser=denoiser,
+            process=process,
+            x=x[active],
+            t_scalar=t_scalar,
+            s_scalar=s_scalar,
+            cond=active_cond,
+            null_cond=active_null,
+            guidance_scale=clean_cfg.guidance_scale,
+            is_last=index == len(pairs) - 1,
+        )
+        chosen = wanted[active] == index
+        active_positions = active.nonzero(as_tuple=False).flatten()
+        chosen_positions = active_positions[chosen]
+        selected_x[chosen_positions] = x[active][chosen]
+        selected_v[chosen_positions] = velocity[chosen]
+        selected_t[chosen_positions] = float(t_scalar.item())
+        x[active] = next_x
+    return _trajectory_batch(
+        x=selected_x,
+        target_v=selected_v,
+        t=selected_t,
+        cond=cond,
+        solver_index=wanted,
+        root_noise_id=root_ids,
+        producer_step=step,
+    )
+
+
+@torch.no_grad()
+def _refresh_trajectory_bank(
+    *,
+    denoiser: Denoiser,
+    process: BaseProcess,
+    clean_cfg: CleanLoopConfig,
+    bank: TrajectoryBank,
+    n: int,
+    shape: tuple[int, ...],
+    device: torch.device,
+    dtype: torch.dtype,
+    cond: torch.Tensor | None,
+    null_cond: torch.Tensor | None,
+    step: int,
+) -> None:
+    pairs = process.schedule.iter_pairs(clean_cfg.solver_steps, device=device)
+    n_root = max(1, int(round(n * clean_cfg.root_fraction)))
+    root_cond = cond[:n_root] if cond is not None else None
+    root_null = null_cond[:n_root] if null_cond is not None else None
+    root_x = process.prior_sample((n_root, *shape), device=device, dtype=dtype)
+    root_t = torch.full((n_root,), float(pairs[0][0].item()), device=device)
+    root_v = _teacher_velocity(
+        denoiser=denoiser,
+        process=process,
+        x=root_x,
+        t=root_t,
+        cond=root_cond,
+        null_cond=root_null,
+        guidance_scale=clean_cfg.guidance_scale,
+    )
+    bank.add(_trajectory_batch(
+        x=root_x,
+        target_v=root_v,
+        t=root_t,
+        cond=root_cond,
+        solver_index=torch.zeros(n_root, device=device, dtype=torch.long),
+        root_noise_id=bank.new_root_ids(n_root, device=device),
+        producer_step=step,
+    ))
+
+    n_advance = max(0, n - n_root)
+    if n_advance == 0 or len(bank) == 0:
+        return
+    parents = bank.sample(n_advance, device=device, dtype=dtype)
+    for index in parents.solver_index.unique().tolist():
+        index = int(index)
+        if index >= len(pairs) - 1:
+            continue
+        mask = parents.solver_index == index
+        parent_cond = parents.cond[mask] if parents.cond is not None else None
+        parent_null = torch.full_like(parent_cond, int(null_cond[0].item())) if parent_cond is not None and null_cond is not None else None
+        next_x, _, _ = _teacher_heun_step(
+            denoiser=denoiser,
+            process=process,
+            x=parents.x[mask],
+            t_scalar=pairs[index][0],
+            s_scalar=pairs[index][1],
+            cond=parent_cond,
+            null_cond=parent_null,
+            guidance_scale=clean_cfg.guidance_scale,
+            is_last=False,
+        )
+        next_index = torch.full((next_x.shape[0],), index + 1, device=device, dtype=torch.long)
+        next_t = torch.full((next_x.shape[0],), float(pairs[index][1].item()), device=device)
+        # The correct next-grid target is evaluated at the accepted Heun state,
+        # not at the Euler predictor used for the corrector.
+        next_v = _teacher_velocity(
+            denoiser=denoiser,
+            process=process,
+            x=next_x,
+            t=next_t,
+            cond=parent_cond,
+            null_cond=parent_null,
+            guidance_scale=clean_cfg.guidance_scale,
+        )
+        bank.add(_trajectory_batch(
+            x=next_x,
+            target_v=next_v,
+            t=next_t,
+            cond=parent_cond,
+            solver_index=next_index,
+            root_noise_id=parents.root_noise_id[mask],
+            producer_step=step,
+        ))
+
+
+def compute_forward_batch_v2(
+    *,
+    cfg: dict,
+    runtime: RuntimeContext,
+    model_ctx: ModelContext,
+    denoiser: Denoiser,
+    process: BaseProcess,
+    augment: BaseAugment,
+    augment_mode: str,
+    x0: torch.Tensor,
+    y: object,
+    use_label_cond: bool,
+    step: int,
+    clean_loop_cfg: CleanLoopConfig,
+    clean_loop_bank: TrajectoryBank,
+    ema: EMA | None,
+) -> TrainForwardBatch:
+    x0 = x0.to(runtime.device, non_blocking=True)
+    bsz = x0.shape[0]
+    raw_cond = y.to(runtime.device, non_blocking=True) if (use_label_cond and isinstance(y, torch.Tensor)) else None
+    if clean_loop_cfg.mode == "drop":
+        n_fresh = max(1, int(round(bsz * (1.0 - clean_loop_cfg.drop_fraction))))
+    else:
+        n_fresh = bsz
+    fresh_x0 = x0[:n_fresh]
+    fresh_cond = raw_cond[:n_fresh] if raw_cond is not None else None
+    if fresh_cond is not None:
+        fresh_cond = apply_classifier_free_label_dropout(
+            fresh_cond,
+            null_class_id=int(model_ctx.model_cfg.num_classes),
+            drop_prob=float(cfg["train"].get("class_dropout_prob", 0.0)),
+        )
+    if augment_mode == "data_only":
+        x0 = augment.apply(x0, augment.sample_params(bsz, device=runtime.device))
+        fresh_x0 = x0[:n_fresh]
+
+    # Draw the normal training state before any rollout RNG is consumed. This
+    # keeps fresh t/noise aligned between FRESH, BANK-FIX, and ONLINE branches.
+    fresh_fb = denoiser.make_forward_batch(fresh_x0)
+
+    aux = None
+    n_aux = max(1, int(round(bsz * clean_loop_cfg.aux_batch_ratio)))
+    amp_enabled = model_ctx.precision in {"bf16", "fp16"}
+    if clean_loop_cfg.mode in {"bank_fix", "online"} and step >= clean_loop_cfg.warmup_steps:
+        aux_cond = raw_cond[:n_aux] if raw_cond is not None else None
+        null_cond = torch.full_like(aux_cond, int(model_ctx.model_cfg.num_classes)) if aux_cond is not None else None
+        rng_devices = list(range(torch.cuda.device_count())) if runtime.device.type == "cuda" else []
+        rollout_seed = int(cfg["train"].get("seed", 0)) + 1_000_003 + step * runtime.world_size + runtime.rank
+        with torch.random.fork_rng(devices=rng_devices):
+            torch.manual_seed(rollout_seed)
+            with _ema_teacher(denoiser, ema), torch.autocast(
+                device_type=runtime.device.type,
+                dtype=amp_dtype_for_precision(model_ctx.precision),
+                enabled=amp_enabled,
+            ):
+                if clean_loop_cfg.mode == "online":
+                    aux = _online_trajectory_batch(
+                        denoiser=denoiser,
+                        process=process,
+                        clean_cfg=clean_loop_cfg,
+                        n=n_aux,
+                        shape=tuple(x0.shape[1:]),
+                        device=runtime.device,
+                        dtype=x0.dtype,
+                        cond=aux_cond,
+                        null_cond=null_cond,
+                        root_ids=clean_loop_bank.new_root_ids(n_aux, device=runtime.device),
+                        step=step,
+                    )
+                else:
+                    _refresh_trajectory_bank(
+                        denoiser=denoiser,
+                        process=process,
+                        clean_cfg=clean_loop_cfg,
+                        bank=clean_loop_bank,
+                        n=n_aux,
+                        shape=tuple(x0.shape[1:]),
+                        device=runtime.device,
+                        dtype=x0.dtype,
+                        cond=aux_cond,
+                        null_cond=null_cond,
+                        step=step,
+                    )
+                    aux = clean_loop_bank.sample(n_aux, device=runtime.device, dtype=x0.dtype)
+
+    with torch.autocast(device_type=runtime.device.type, dtype=amp_dtype_for_precision(model_ctx.precision), enabled=amp_enabled):
+        if denoiser.loss_fn is None:
+            raise ValueError("Denoiser requires loss_fn for training.")
+        fresh_out = denoiser.forward(fresh_fb.xt, denoiser.training_time_condition(fresh_fb.t), cond=fresh_cond)
+        loss_dict = denoiser.loss_fn(process, fresh_fb, fresh_out)
+        fresh_loss = loss_dict["total"]
+        fresh_scale = float(n_fresh) / float(bsz) if clean_loop_cfg.mode == "drop" else 1.0
+        total_loss = fresh_scale * fresh_loss
+        aux_loss = aux_contrib = aux_scale = aux_output_grad_ratio = None
+        if aux is not None:
+            aux_cond_out = denoiser.forward(aux.x, aux.t, cond=aux.cond)
+            if aux.cond is not None and clean_loop_cfg.guidance_scale != 1.0:
+                aux_null = torch.full_like(aux.cond, int(model_ctx.model_cfg.num_classes))
+                aux_uncond_out = denoiser.forward(aux.x, aux.t, cond=aux_null)
+                aux_out = denoiser.cfg_combine(aux_cond_out, aux_uncond_out, clean_loop_cfg.guidance_scale)
+            else:
+                aux_out = aux_cond_out
+            aux_v = process.velocity_from_output(aux.x, aux.t, aux_out, aux={})
+            aux_loss = regress("mse", aux_v, aux.target_v).mean()
+            if clean_loop_cfg.aux_gradient_ratio > 0.0:
+                fresh_grad = torch.autograd.grad(fresh_loss, fresh_out, retain_graph=True)[0]
+                aux_grad = torch.autograd.grad(aux_loss, aux_out, retain_graph=True)[0]
+                fresh_grad_norm = fresh_grad.float().norm()
+                aux_grad_norm = aux_grad.float().norm()
+                aux_scale = (
+                    clean_loop_cfg.aux_gradient_ratio
+                    * fresh_grad_norm
+                    / aux_grad_norm.clamp_min(1.0e-12)
+                ).clamp(max=clean_loop_cfg.aux_scale_max).detach()
+                aux_output_grad_ratio = (aux_scale * aux_grad_norm / fresh_grad_norm.clamp_min(1.0e-12)).detach()
+                aux_contrib = aux_scale * aux_loss
+                total_loss = total_loss + aux_contrib
+        with torch.no_grad():
+            unweighted = _diagnostic_losses(process, fresh_fb, fresh_out)
+
+    extra_metrics: dict[str, torch.Tensor | float] = {
+        "fresh/loss": fresh_loss.detach(),
+        "fresh/loss_contrib": (fresh_scale * fresh_loss).detach(),
+        "clean/fresh_n": float(n_fresh),
+        "clean/fresh_scale": fresh_scale,
+        "clean/aux_n": float(0 if aux is None else aux.x.shape[0]),
+        "clean/bank_size": float(len(clean_loop_bank)),
+        "clean/aux_gradient_target": clean_loop_cfg.aux_gradient_ratio,
+    }
+    if aux is not None and aux_loss is not None and aux_contrib is not None and aux_scale is not None:
+        extra_metrics.update({
+            "clean/loss_aux": aux_loss.detach(),
+            "clean/loss_aux_contrib": aux_contrib.detach(),
+            "clean/aux_scale": aux_scale,
+            "clean/aux_output_grad_ratio": aux_output_grad_ratio if aux_output_grad_ratio is not None else 0.0,
+            "clean/solver_index": aux.solver_index.float().mean(),
+            "clean/depth": aux.depth.float().mean(),
+            "clean/bank_age": (float(step) - aux.producer_step.float().mean()).clamp_min(0.0),
+        })
+    return TrainForwardBatch(
+        loss=total_loss,
+        loss_by_target=unweighted,
+        batch_size=bsz,
+        cond=fresh_cond,
+        fb=fresh_fb,
+        out=fresh_out,
+        extra_metrics=extra_metrics,
+    )
 
 
 def backward_loss(loss: torch.Tensor, *, current_accum_steps: int, scaler: torch.amp.GradScaler | None) -> None:
@@ -631,7 +1053,9 @@ def train(cfg: dict) -> None:
         model_conditioning=cfg.get("model_conditioning", None),
     )
     clean_loop_cfg = build_clean_loop_config(cfg)
-    clean_loop_bank = CleanLoopBank(clean_loop_cfg) if clean_loop_cfg.enabled else None
+    clean_loop_bank = None
+    if clean_loop_cfg.enabled:
+        clean_loop_bank = TrajectoryBank(clean_loop_cfg) if clean_loop_cfg.version == 2 else CleanLoopBank(clean_loop_cfg)
     # Data augmentation pipeline and where it is applied (data_only here).
     augment, augment_mode = build_augment(cfg)
     if runtime.is_main:
@@ -667,9 +1091,25 @@ def train(cfg: dict) -> None:
     loop_cfg = build_loop_config(cfg, data_ctx.loader, runtime.distributed_cfg)
     if runtime.is_main:
         log_loop_config(runtime.logger, loop_cfg)
-    progress = ProgressEstimator(cfg, loop_cfg, start_step=resume.global_step)
+    run_step_limit = cfg["train"].get("run_steps")
+    run_step_limit = int(run_step_limit) if run_step_limit is not None else None
+    display_loop_cfg = loop_cfg
+    if run_step_limit is not None:
+        display_loop_cfg = replace(loop_cfg, total_steps=resume.global_step + run_step_limit)
+    progress = ProgressEstimator(cfg, display_loop_cfg, start_step=resume.global_step)
     tbin_stats = TimeBinAccumulator(num_bins=loop_cfg.tbin_count, device=runtime.device)
     epoch = resume.start_epoch
+    end_epoch = loop_cfg.epochs
+    if run_step_limit is not None:
+        continuation_epochs = math.ceil(run_step_limit / max(1, loop_cfg.optimizer_steps_per_epoch)) + 1
+        end_epoch = max(end_epoch, resume.start_epoch + continuation_epochs)
+
+    def _training_limit_reached() -> bool:
+        if run_step_limit is not None:
+            return resume.run_step >= run_step_limit
+        if cfg["train"].get("max_steps") is not None:
+            return resume.global_step >= loop_cfg.total_steps
+        return False
 
     def _save_final_checkpoint() -> None:
         final_extra_state = None
@@ -685,11 +1125,15 @@ def train(cfg: dict) -> None:
     try:
         denoiser.train()
         iter_start = time.time()
-        for epoch in range(resume.start_epoch, loop_cfg.epochs):
+        for epoch in range(resume.start_epoch, end_epoch):
+            if _training_limit_reached():
+                break
             if data_ctx.sampler is not None:
                 data_ctx.sampler.set_epoch(epoch)
             use_label_cond = int(cfg["model"].get("num_classes", 0)) > 0
             for micro_step, (x0, y) in enumerate(data_ctx.loader):
+                if _training_limit_reached():
+                    break
                 accum_index = micro_step % loop_cfg.gradient_accumulation_steps
                 update_step = accum_index == 0
                 remaining_micro_steps = loop_cfg.micro_steps_per_epoch - micro_step
@@ -715,6 +1159,7 @@ def train(cfg: dict) -> None:
                         step=resume.global_step,
                         clean_loop_cfg=clean_loop_cfg,
                         clean_loop_bank=clean_loop_bank,
+                        ema=ema,
                     )
                     maybe_apply_adversarial(cfg=cfg, fwd=fwd, process=process, discriminator=discriminator, d_optimizer=d_optimizer, scaler=scaler, step=resume.global_step)
                     backward_loss(fwd.loss, current_accum_steps=current_accum_steps, scaler=scaler)
@@ -733,7 +1178,7 @@ def train(cfg: dict) -> None:
                     continue
                 resume.global_step += 1
                 resume.run_step += 1
-                log_training_step(runtime=runtime, loop_cfg=loop_cfg, resume=resume, meters=meters, tbin_stats=tbin_stats, epoch=epoch, micro_step=micro_step, current_accum_steps=current_accum_steps, progress=progress)
+                log_training_step(runtime=runtime, loop_cfg=display_loop_cfg, resume=resume, meters=meters, tbin_stats=tbin_stats, epoch=epoch, micro_step=micro_step, current_accum_steps=current_accum_steps, progress=progress)
                 run_eval_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, schedule=schedule, time_sampler=time_sampler, process=process, loss_fn=loss_fn, data_ctx=data_ctx, resume=resume, use_label_cond=use_label_cond)
                 run_sampling_if_due(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, loop_cfg=loop_cfg, resume=resume, cond=fwd.cond, use_label_cond=use_label_cond)
                 run_mudata_observation_if_due(cfg=cfg, runtime=runtime, process=process, resume=resume)
@@ -747,6 +1192,10 @@ def train(cfg: dict) -> None:
                 progress.record_gen_eval(gen_eval_duration)
                 if gen_eval_duration is not None and runtime.is_main:
                     runtime.logger.log_text(f"[progress] gen_eval_duration={_format_duration(gen_eval_duration)} ({gen_eval_duration:.3f}s)")
+                if _training_limit_reached():
+                    break
+            if _training_limit_reached():
+                break
         # Always persist the latest state at end of training, regardless of cadence.
         _save_final_checkpoint()
         final_gen_eval_duration = run_final_generative_eval(cfg=cfg, model=denoiser, runtime=runtime, model_ctx=model_ctx, process=process, ema=ema, resume=resume)

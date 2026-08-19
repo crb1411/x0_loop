@@ -1,6 +1,6 @@
 dataset:
   name: mnist
-  root: /root/data/mnist
+  root: /mnt/data/crb/data/mnist
   download: false
 
 model:

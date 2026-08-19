@@ -41,7 +41,7 @@ set -e
     if [ -n "${METRICS_FILE}" ] && [ -f "${METRICS_FILE}" ]; then
       echo "[x0loop] plotting metrics: ${METRICS_FILE}"
       set +e
-      python "${ROOT}/tools/plot_training_trends.py" "${METRICS_FILE}"
+      uv run python "${ROOT}/tools/plot_training_trends.py" "${METRICS_FILE}"
       PLOT_STATUS=$?
       set -e
       if [ "${PLOT_STATUS}" -ne 0 ]; then

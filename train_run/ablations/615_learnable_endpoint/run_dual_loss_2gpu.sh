@@ -12,7 +12,7 @@ EXPERIMENTS=(
 )
 
 find_free_port() {
-  python - <<'PY'
+  uv run python - <<'PY'
 import socket
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     s.bind(("127.0.0.1", 0))

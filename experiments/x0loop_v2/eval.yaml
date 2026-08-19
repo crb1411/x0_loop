@@ -1,0 +1,26 @@
+gen_eval:
+  enabled: true
+  every_steps: 1
+  num_samples: 50000
+  batch_size: 256
+  sampler: heun
+  guidance_scale: 2.2
+  guidance_schedule: null
+  input2: cifar10-train
+  datasets_root: /mnt/data/crb/data
+  datasets_download: false
+  keep_images: false
+  metrics:
+    isc: false
+    fid: true
+    kid: true
+    ppl: false
+    prc: true
+    mind: false
+  final:
+    enabled: true
+    num_samples: 50000
+    batch_size: 256
+    sampler: heun
+    guidance_scale: 2.2
+    guidance_schedule: null

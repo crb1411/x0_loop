@@ -1,6 +1,6 @@
 dataset:
   name: cifar10
-  root: /root/data/cifar10_data
+  root: /mnt/data/crb/data
   download: false
   normalization: standard
 model:
@@ -120,7 +120,7 @@ gen_eval:
   guidance_scale: 2.2
   guidance_schedule: null
   input2: cifar10-train
-  datasets_root: /root/data/cifar10_data
+  datasets_root: /mnt/data/crb/data
   datasets_download: false
   keep_images: false
   metrics:
@@ -160,5 +160,3 @@ compile:
   mode: default
   fullgraph: false
   dynamic: false
-_config_path: /data/seek/aigc/x0_loop/train_run2/base_ignore_time/config.yaml
-_runtime_config_path: /data/seek/aigc/x0_loop/x0loop/configs/runtime/ddp_checkpoint_compile.yaml

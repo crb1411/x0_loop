@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 
-CKPT="${1:-/data/seek/aigc/x0_loop/runs2/clean_loop/cleanloopv1_500ep_tbank0p75/20260702_225558/checkpoints/ckpt_step_00097500.pt}"
+if [[ $# -ne 1 ]]; then
+  echo "usage: $0 CHECKPOINT" >&2
+  exit 2
+fi
+CKPT="$1"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 RUN_ONE="$ROOT/infer/geneval/run_geneval.sh"
 

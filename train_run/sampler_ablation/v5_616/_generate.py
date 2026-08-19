@@ -7,7 +7,7 @@ v5 evaluates time-decayed CFG:
 `guidance_scale` is w_max. The effective scale decays to 1 as t -> 0.
 
 Output metrics land under:
-  /data/seek/aigc/x0_loop/runs/sampler_ablation/v5_616/<exp>/
+  ./runs/sampler_ablation/v5_616/<exp>/
 """
 
 from __future__ import annotations
@@ -18,10 +18,10 @@ import stat
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 CKPT = (
-    "/data/seek/aigc/x0_loop/runs/ablations/cifar10_flow_x0_vloss/jit/"
+    "./runs/ablations/cifar10_flow_x0_vloss/jit/"
     "learnable_endpoint/scheme2_beta0p8/20260616_081221/checkpoints/ckpt_step_00100000.pt"
 )
-OUT_BASE = "/data/seek/aigc/x0_loop/runs/sampler_ablation/v5_616"
+OUT_BASE = "./runs/sampler_ablation/v5_616"
 NUM_SAMPLES = 10000
 BATCH_SIZE = 256
 
@@ -105,7 +105,7 @@ gen_eval:
   sampler: {sampler}
   guidance_scale: {cfg}
 {schedule_block}  input2: cifar10-train
-  datasets_root: /root/data/cifar10_data
+  datasets_root: /mnt/data/crb/data
   datasets_download: false
   keep_images: false
   keep_images_count: 100
@@ -138,7 +138,7 @@ LOG_FILE="${{LOG_DIR}}/eval.log"
 
 export PYTHONPATH="${{ROOT}}:${{PYTHONPATH:-}}"
 export CUDA_VISIBLE_DEVICES="${{CUDA_VISIBLE_DEVICES:-0}}"
-PYTHON="${{PYTHON:-/root/miniconda3/envs/vl/bin/python}}"
+PYTHON="${{PYTHON:-.venv/bin/python}}"
 if [[ ! -x "${{PYTHON}}" ]]; then
   PYTHON="python"
 fi
