@@ -14,7 +14,12 @@ from x0loop.training.clean_loop import (
     build_clean_loop_config,
     sample_clean_loop_t1,
 )
-from x0loop.training.engine import _parameter_gradient_norm, _teacher_heun_step_batched, _teacher_targets
+from x0loop.training.engine import (
+    _configure_parameter_gradient_vjp,
+    _parameter_gradient_norm,
+    _teacher_heun_step_batched,
+    _teacher_targets,
+)
 from x0loop.utils.checkpoint import _adapt_ema_state_to_model, _load_model_state_with_fallback
 
 
@@ -102,6 +107,46 @@ def test_parameter_gradient_norm_matches_manual_norm_without_populating_grad():
     assert layer.weight.grad is None
     loss.backward()
     assert torch.allclose(layer.weight.grad, expected_gradient)
+
+
+def test_compiled_parameter_gradient_control_disables_donated_buffers():
+    from torch._functorch import config as functorch_config
+
+    previous = functorch_config.donated_buffer
+    try:
+        functorch_config.donated_buffer = True
+        changed = _configure_parameter_gradient_vjp({
+            "compile": {"enabled": True},
+            "clean_loop": {
+                "enabled": True,
+                "version": 2,
+                "aux_gradient_space": "parameter",
+            },
+        })
+        assert changed
+        assert functorch_config.donated_buffer is False
+    finally:
+        functorch_config.donated_buffer = previous
+
+
+def test_eager_parameter_gradient_control_keeps_donated_buffers():
+    from torch._functorch import config as functorch_config
+
+    previous = functorch_config.donated_buffer
+    try:
+        functorch_config.donated_buffer = True
+        changed = _configure_parameter_gradient_vjp({
+            "compile": {"enabled": False},
+            "clean_loop": {
+                "enabled": True,
+                "version": 2,
+                "aux_gradient_space": "parameter",
+            },
+        })
+        assert not changed
+        assert functorch_config.donated_buffer is True
+    finally:
+        functorch_config.donated_buffer = previous
 
 
 def test_clean_loop_bank_fifo_capacity_and_sample_shapes():

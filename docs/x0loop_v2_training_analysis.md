@@ -582,14 +582,29 @@ fresh/aux 原始参数梯度范数 0.50636/0.10259、scale 0.49356，实际比�
 随机初始化时 EMA 与 student 相同导致 native-x0 auxiliary 近零、scale cap 暂时无法达到
 目标，因此正式分支保持预注册 10k warmup，不能从 step 0 开辅助。
 
-动态 compile 会因 exact VJP 的 retained graph 与 AOTAutograd donated buffer 冲突，两个
-独立 smoke 均在 optimizer 前明确失败，故正式分支锁定 `compile.dynamic=false`；这不是
+动态 compile 会因可变 active batch 触发大量重编译，且早期 exact-VJP smoke 暴露 retained
+graph 与 AOTAutograd donated buffer 冲突，故正式分支锁定 `compile.dynamic=false`；这不是
 数值早停而是启动前排除无效性能路径。成熟 checkpoint 的 100-step static benchmark
 后 8 个稳定日志点为 0.5265 s/step、486.2 image/s、13.94 GiB、参数梯度比 0.10000。
 计入 fresh/aux 两次测量 VJP、online teacher 和组合 backward 后，每步 19.736 TFLOP，
 主训练 MFU 0.99%、方法级 MFU 3.79%。预计 15k 门槛约 57–60 分钟；若通过并完整运行，
 总训练约 7.2 小时，另加稀疏/最终 FID。15k 门槛固定为必须优于同 step
 `FRESH-TIME=14.9119`，否则停止并进入三次训练周期复盘。
+
+正式 `ONLINE-X0-TIME` 首次启动使用 commit `d2a9324`、GPU 6、随机初始化和 10k
+warmup。它正常完成 step 10,000 并保存 checkpoint，但在同一进程首次切换到参数梯度
+VJP 时、任何 auxiliary optimizer step 发生之前退出。根因是此前普通 compiled backward
+已按单次消费启用 functorch donated-buffer，而参数梯度控制需要两次
+`retain_graph=True` VJP 后再做组合 backward。根据研究原则，这属于代码故障，不计作
+Cycle 04 第三次有效训练；step-10k checkpoint 是未受辅助项影响的完整 warmup 状态，可
+用于故障修复后的原 run continuation。
+
+修复在模型首次 compile 前，仅对 `compile + clean-loop-v2 + parameter-gradient` 组合关闭
+`functorch.donated_buffer`，不改变 FRESH、BANK 或输出梯度路径。两项针对性验证均通过：
+从随机初始化运行 4 steps、在 step 2→3 跨越 warmup 边界后正常结束；从正式 run 自己的
+step-10k checkpoint 运行成熟 auxiliary step，得到 `aux_scale=0.51951`、实际参数梯度比
+`0.10000`。全套测试为 83 passed。正式第三支随后从同一 step-10k checkpoint 续跑，
+保持原预注册 15k FID gate；修复前没有 auxiliary 更新，因此不存在回滚或挑选 checkpoint。
 
 ## 时间与吞吐分析
 

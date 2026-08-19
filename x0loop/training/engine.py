@@ -1523,6 +1523,32 @@ def should_log_training_step(*, loop_cfg: LoopConfig, resume: ResumeState) -> bo
     return force_log or (resume.global_step % loop_cfg.log_every == 0)
 
 
+def _configure_parameter_gradient_vjp(cfg: dict) -> bool:
+    """Keep compiled backward graphs reusable for parameter-gradient control.
+
+    Functorch's donated-buffer optimization assumes a compiled backward graph is
+    consumed once.  Parameter-space gradient matching evaluates two VJPs with
+    ``retain_graph=True`` before the real backward, so that optimization must be
+    disabled before the model's first compiled forward/backward.
+    """
+
+    clean_cfg = cfg.get("clean_loop", {}) or {}
+    compile_cfg = cfg.get("compile", {}) or {}
+    needs_reusable_backward = (
+        bool(compile_cfg.get("enabled", False))
+        and bool(clean_cfg.get("enabled", False))
+        and int(clean_cfg.get("version", 1)) == 2
+        and str(clean_cfg.get("aux_gradient_space", "output")).lower() == "parameter"
+    )
+    if not needs_reusable_backward:
+        return False
+
+    from torch._functorch import config as functorch_config
+
+    functorch_config.donated_buffer = False
+    return True
+
+
 def log_training_step(*, runtime: RuntimeContext, loop_cfg: LoopConfig, resume: ResumeState, meters: MetricLogger, tbin_stats: TimeBinAccumulator, epoch: int, micro_step: int, current_accum_steps: int, progress: ProgressEstimator | None = None) -> None:
     if not should_log_training_step(loop_cfg=loop_cfg, resume=resume):
         return
@@ -1545,6 +1571,11 @@ def log_training_step(*, runtime: RuntimeContext, loop_cfg: LoopConfig, resume: 
 def train(cfg: dict) -> None:
     # Distributed/device setup: ranks, device, seeds, logger, out_dir.
     runtime = init_runtime(cfg)
+    reusable_compiled_backward = _configure_parameter_gradient_vjp(cfg)
+    if reusable_compiled_backward and runtime.is_main:
+        runtime.logger.log_text(
+            "[compile] functorch.donated_buffer=false for parameter-gradient VJP"
+        )
     # Dataset + dataloaders (train/eval) and the distributed sampler.
     data_ctx = build_data_context(cfg, runtime)
     # The network and its runtime wrappers (DDP/FSDP, precision, EMA target).
