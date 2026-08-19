@@ -73,9 +73,9 @@
 
 | Run | 最低 5k FID | 对应 step | 最终 50k FID | NFE 4 | NFE 8 | NFE 20 | Precision | Recall |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| FRESH | 40.0258 | 5,000（当前） | — | — | — | — | — | — |
+| FRESH | 22.1847 | 10,000（当前） | — | — | — | — | — | — |
 | BANK-FIX | — | — | — | — | — | — | — | — |
-| ONLINE | 40.0258 | 5,000（warmup） | — | — | — | — | — | — |
+| ONLINE | 22.1847 | 10,000（warmup） | — | — | — | — | — | — |
 
 ### Cycle 01 采样轨迹分析
 
@@ -108,6 +108,10 @@ trace，并逐 step 比较状态、velocity、x0_hat、局部 Euler/Heun defect 
   配置安全读取；正式实验关闭重复的训练内 trace（保留 5k FID 和训练后三模型固定-root
   trace）。两条分支统一从 step 5,000 checkpoint 恢复，并限制 continuation 为 53,500
   steps，确保最终仍恰好为 global step 58,500。
+- 恢复后 step 10,000 checkpoint 与 5k FID 均成功，FRESH/ONLINE 同为
+  `22.184701185475376`。ONLINE 随后启用 aux：batch 32，首批窗口 solver index 均值
+  约 9.48（目标为 0–19 均匀 occupancy），输出梯度比为 0.20，稳定 step 时间约
+  0.87 秒。按该实测速度保留原始在线设计，不使用冷启动 smoke 的 16.2 秒外推。
 
 ## 运行命令
 
