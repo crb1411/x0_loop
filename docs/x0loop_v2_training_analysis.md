@@ -787,6 +787,25 @@ AUROC ≥ 0.70、train/held-out AUROC gap ≤ 0.05、real-minus-fake logit margi
 通过才允许使用对抗分布梯度；任一失败则不训练 GAN generator，改用非对抗、可微分的
 固定特征分布距离。这个 readiness 不计入三次正式训练。
 
+该 critic readiness 已完成并失败。固定样本生成耗时 174.46 秒；fresh critic 训练到
+step 2,000 时是最佳 held-out checkpoint，其 train/held-out AUROC 为 0.7211/0.6665，
+gap 0.0546，logit margin 0.4412。因此只通过 margin，AUROC 与泛化 gap 均未过预注册门槛。
+不继续增加 critic steps、宽度或对抗权重，也不把这个分类器接入 generator。
+
+非对抗备选冻结为 exact FID-Inception-2048 feature 上的 degree-3 polynomial MMD
+U-statistic，即 KID 的核心无偏估计。前向使用与 evaluator 相同的 torch-fidelity 权重、
+TensorFlow-compatible resize、标准化和 8-bit floor；量化采用 straight-through derivative，
+使数值路径与 FID 一致且仅为反传提供局部导数。生成器仍冻结，readiness 三项门槛为：
+
+1. 100 个 held-out batch 上，fake-real KID 与 real-real KID 的均值差为正且 z-score ≥ 3；
+2. 同一 fake batch、4 个独立 real reference 得到的像素梯度，两两 cosine 中位数 ≥ 0.20；
+3. 4 个独立 fake batch 各做一次 model-space RMS=0.01 的归一化梯度步，用未参与求梯度的
+   real reference 复测，至少 3/4 loss 下降。
+
+此外 differentiable forward 与真正 uint8 evaluator feature 的最大绝对误差必须 ≤ 1e-5。
+全部通过才实现 `GATED-DIST`；任一失败则固定 Inception minibatch MMD 也不具备稳定训练
+信号资格，需要重新设计 distribution objective，而不是扫描 kernel/batch/阈值。
+
 ## 时间与吞吐分析
 
 300 epochs 在 CIFAR-10、batch 256 下是 58,500 optimizer steps（每 epoch 约
