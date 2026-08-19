@@ -38,6 +38,15 @@ def _apply_prefix_transform(state_dict: dict, name: str) -> dict:
     return _strip_state_dict_prefix(state_dict, name)
 
 
+def _build_denoiser(cfg: dict, model: torch.nn.Module, process: torch.nn.Module) -> Denoiser:
+    """Rebuild the training-time wrapper, including its time conditioning."""
+    return Denoiser(
+        model,
+        process=process,
+        model_conditioning=cfg.get("model_conditioning", None),
+    )
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Standalone FID/IS/KID eval from a checkpoint.")
     p.add_argument("--ckpt", type=str, required=True, help="Path to ckpt_step_*.pt")
@@ -63,7 +72,7 @@ def main():
     schedule = build_schedule(cfg)
     process = build_process(cfg, schedule).to(runtime.device)
     model_ctx = build_model_context(cfg, runtime)
-    denoiser = Denoiser(model_ctx.model, process=process)
+    denoiser = _build_denoiser(cfg, model_ctx.model, process)
 
     use_ema = bool(cfg.get("train", {}).get("use_ema", True)) and ("ema" in ckpt)
     ema = EMA(model=denoiser, decay=float(cfg.get("train", {}).get("ema_decay", 0.999))) if use_ema else None

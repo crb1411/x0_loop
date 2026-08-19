@@ -1,5 +1,6 @@
 import torch
 
+from x0loop.eval_fid import _build_denoiser
 from x0loop.training.generative_eval import _cfg, _fixed_eval_rng
 
 
@@ -21,3 +22,13 @@ def test_fixed_eval_rng_does_not_change_training_rng_stream():
 
     assert torch.equal(actual_first, expected_first)
     assert torch.equal(actual_second, expected_second)
+
+
+def test_standalone_fid_preserves_model_time_conditioning():
+    denoiser = _build_denoiser(
+        {"model_conditioning": {"ignore_time": True, "time_constant": 0.5}},
+        torch.nn.Identity(),
+        torch.nn.Identity(),
+    )
+    actual = denoiser.model_time_condition(torch.tensor([0.1, 0.9]))
+    assert torch.equal(actual, torch.tensor([0.5, 0.5]))
