@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import time
 from contextlib import contextmanager, nullcontext
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 import torch
@@ -169,6 +169,18 @@ class TrainingIntervalTimer:
             meters.update(iter_s=per_step_s, img_s=images_per_s)
 
 
+@dataclass(frozen=True)
+class TerminalAdversarialPrefix:
+    """Detached inference state immediately before the final solver interval."""
+
+    x: torch.Tensor
+    t_scalar: torch.Tensor
+    s_scalar: torch.Tensor
+    real: torch.Tensor
+    cond: torch.Tensor | None
+    null_cond: torch.Tensor | None
+
+
 def build_loop_config(cfg: dict, loader: DataLoader, distributed_cfg: dict) -> LoopConfig:
     epochs = int(cfg["train"]["epochs"])
     gradient_accumulation_steps = int(cfg["train"].get("gradient_accumulation_steps", 1))
@@ -313,10 +325,26 @@ def compute_forward_batch(
     clean_loop_bank: CleanLoopBank | TrajectoryBank | None = None,
     ema: EMA | None = None,
 ) -> TrainForwardBatch:
+    # Terminal adversarial rollout consumes a separate, deterministically
+    # forked RNG stream and is generated before any trainable forward. This
+    # preserves FRESH t/noise/data equivalence and lets EMA weights be swapped
+    # in without mutating parameters already referenced by an autograd graph.
+    terminal_prefix = _prepare_terminal_adversarial_prefix(
+        cfg=cfg,
+        runtime=runtime,
+        model_ctx=model_ctx,
+        denoiser=denoiser,
+        process=process,
+        x0=x0,
+        y=y,
+        use_label_cond=use_label_cond,
+        step=step,
+        ema=ema,
+    )
     if clean_loop_cfg is not None and clean_loop_cfg.enabled and clean_loop_cfg.version == 2:
         if not isinstance(clean_loop_bank, TrajectoryBank):
             raise TypeError("clean_loop v2 requires a TrajectoryBank")
-        return compute_forward_batch_v2(
+        fwd = compute_forward_batch_v2(
             cfg=cfg,
             runtime=runtime,
             model_ctx=model_ctx,
@@ -331,6 +359,14 @@ def compute_forward_batch(
             clean_loop_cfg=clean_loop_cfg,
             clean_loop_bank=clean_loop_bank,
             ema=ema,
+        )
+        return _attach_terminal_adversarial_payload(
+            cfg=cfg,
+            model_ctx=model_ctx,
+            denoiser=denoiser,
+            process=process,
+            fwd=fwd,
+            prefix=terminal_prefix,
         )
     x0 = x0.to(runtime.device, non_blocking=True)
     bsz = x0.shape[0]
@@ -491,7 +527,23 @@ def compute_forward_batch(
             "clean/fresh_add_n": float(fresh_add_n),
             "clean/bank_add_n": float(bank_add_n),
         })
-    return TrainForwardBatch(loss=total_loss, loss_by_target=unweighted, batch_size=bsz, cond=fresh_cond, fb=fresh_fb, out=fresh_out, extra_metrics=extra_metrics)
+    fwd = TrainForwardBatch(
+        loss=total_loss,
+        loss_by_target=unweighted,
+        batch_size=bsz,
+        cond=fresh_cond,
+        fb=fresh_fb,
+        out=fresh_out,
+        extra_metrics=extra_metrics,
+    )
+    return _attach_terminal_adversarial_payload(
+        cfg=cfg,
+        model_ctx=model_ctx,
+        denoiser=denoiser,
+        process=process,
+        fwd=fwd,
+        prefix=terminal_prefix,
+    )
 
 
 @contextmanager
@@ -592,6 +644,213 @@ def _teacher_heun_step(
         guidance_scale=guidance_scale,
     )
     return x + dt * 0.5 * (velocity + velocity_s), velocity, target_x0, velocity_s
+
+
+def _validate_terminal_kernel(cfg: dict, *, steps: int, sampler: str, guidance_scale: float) -> None:
+    """Require the training rollout to be the declared FID inference kernel."""
+
+    gen_eval = cfg.get("gen_eval", {}) or {}
+    eval_steps = int(gen_eval.get("steps", 20))
+    eval_sampler = str(gen_eval.get("sampler", "heun")).lower()
+    eval_guidance = float(gen_eval.get("guidance_scale", 1.0))
+    guidance_schedule = gen_eval.get("guidance_schedule")
+    if (steps, sampler, guidance_scale) != (eval_steps, eval_sampler, eval_guidance):
+        raise ValueError(
+            "terminal adversarial kernel must match gen_eval exactly: "
+            f"terminal=({steps},{sampler},{guidance_scale}) "
+            f"gen_eval=({eval_steps},{eval_sampler},{eval_guidance})"
+        )
+    if guidance_schedule is not None:
+        raise ValueError(
+            "terminal adversarial v1 requires gen_eval.guidance_schedule=null "
+            "so the rollout and final-step CFG are identical"
+        )
+
+
+@torch.no_grad()
+def _terminal_heun_prefix_from_root(
+    *,
+    denoiser: Denoiser,
+    process: BaseProcess,
+    root: torch.Tensor,
+    steps: int,
+    cond: torch.Tensor | None,
+    null_cond: torch.Tensor | None,
+    guidance_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run every Heun interval except the final Euler interval.
+
+    The returned state is exactly the occupancy seen by the last model call in
+    ``FlowProcess.sample(..., sampler="heun")``. The function intentionally has
+    no trainable graph; Cycle 03 truncates backpropagation at this boundary.
+    """
+
+    pairs = process.schedule.iter_pairs(steps, device=root.device)
+    if not pairs:
+        raise ValueError("terminal adversarial rollout requires at least one solver pair")
+    x = root
+    for t_scalar, s_scalar in pairs[:-1]:
+        x, _, _, _ = _teacher_heun_step(
+            denoiser=denoiser,
+            process=process,
+            x=x,
+            t_scalar=t_scalar,
+            s_scalar=s_scalar,
+            cond=cond,
+            null_cond=null_cond,
+            guidance_scale=guidance_scale,
+            is_last=False,
+        )
+    final_t, final_s = pairs[-1]
+    return x.detach(), final_t, final_s
+
+
+def _terminal_last_step(
+    *,
+    denoiser: Denoiser,
+    process: BaseProcess,
+    x: torch.Tensor,
+    t_scalar: torch.Tensor,
+    s_scalar: torch.Tensor,
+    cond: torch.Tensor | None,
+    null_cond: torch.Tensor | None,
+    guidance_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Differentiable final Euler step used by the actual Heun sampler."""
+
+    t = t_scalar.to(device=x.device, dtype=torch.float32).expand(x.shape[0])
+    out = denoiser.model_output(
+        x,
+        t,
+        cond=cond,
+        null_cond=null_cond,
+        guidance_scale=guidance_scale,
+    )
+    velocity = process.velocity_from_output(x, t, out, aux={})
+    dt = (s_scalar - t_scalar).to(device=x.device, dtype=x.dtype)
+    return x + dt * velocity, out
+
+
+def _prepare_terminal_adversarial_prefix(
+    *,
+    cfg: dict,
+    runtime: RuntimeContext,
+    model_ctx: ModelContext,
+    denoiser: Denoiser,
+    process: BaseProcess,
+    x0: torch.Tensor,
+    y: object,
+    use_label_cond: bool,
+    step: int,
+    ema: EMA | None,
+) -> TerminalAdversarialPrefix | None:
+    adv_cfg = build_adversarial_config(cfg)
+    if adv_cfg.fake_space != "terminal_x0" or adversarial_weight(adv_cfg, step) <= 0.0:
+        return None
+    if ema is None:
+        raise ValueError("terminal adversarial training requires train.use_ema=true")
+    if bool((cfg.get("clean_loop", {}) or {}).get("enabled", False)):
+        raise ValueError(
+            "Cycle 03 terminal adversarial training cannot be combined with clean_loop; "
+            "the registered experiment isolates terminal distribution matching"
+        )
+    _validate_terminal_kernel(
+        cfg,
+        steps=adv_cfg.terminal_steps,
+        sampler=adv_cfg.terminal_sampler,
+        guidance_scale=adv_cfg.terminal_guidance_scale,
+    )
+
+    real_all = x0.to(runtime.device, non_blocking=True)
+    n = max(1, int(round(real_all.shape[0] * adv_cfg.batch_ratio)))
+    real = real_all[:n].detach()
+    if use_label_cond:
+        if not isinstance(y, torch.Tensor):
+            raise ValueError("terminal class-conditional GAN requires tensor labels")
+        cond = y[:n].to(runtime.device, non_blocking=True).long()
+        null_cond = torch.full_like(cond, int(model_ctx.model_cfg.num_classes))
+    else:
+        cond = null_cond = None
+
+    amp_enabled = model_ctx.precision in {"bf16", "fp16"}
+    rng_devices = [runtime.device.index or 0] if runtime.device.type == "cuda" else []
+    rollout_seed = (
+        int(cfg["train"].get("seed", 0))
+        + 2_000_003
+        + int(step) * runtime.world_size
+        + runtime.rank
+    )
+    with torch.random.fork_rng(devices=rng_devices):
+        torch.manual_seed(rollout_seed)
+        root = process.prior_sample(
+            (n, *real.shape[1:]),
+            device=runtime.device,
+            dtype=real.dtype,
+        )
+        with _ema_teacher(denoiser, ema), torch.autocast(
+            device_type=runtime.device.type,
+            dtype=amp_dtype_for_precision(model_ctx.precision),
+            enabled=amp_enabled,
+        ):
+            x, t_scalar, s_scalar = _terminal_heun_prefix_from_root(
+                denoiser=denoiser,
+                process=process,
+                root=root,
+                steps=adv_cfg.terminal_steps,
+                cond=cond,
+                null_cond=null_cond,
+                guidance_scale=adv_cfg.terminal_guidance_scale,
+            )
+    return TerminalAdversarialPrefix(
+        x=x,
+        t_scalar=t_scalar,
+        s_scalar=s_scalar,
+        real=real,
+        cond=cond,
+        null_cond=null_cond,
+    )
+
+
+def _attach_terminal_adversarial_payload(
+    *,
+    cfg: dict,
+    model_ctx: ModelContext,
+    denoiser: Denoiser,
+    process: BaseProcess,
+    fwd: TrainForwardBatch,
+    prefix: TerminalAdversarialPrefix | None,
+) -> TrainForwardBatch:
+    if prefix is None:
+        return fwd
+    adv_cfg = build_adversarial_config(cfg)
+    amp_enabled = model_ctx.precision in {"bf16", "fp16"}
+    with torch.autocast(
+        device_type=prefix.x.device.type,
+        dtype=amp_dtype_for_precision(model_ctx.precision),
+        enabled=amp_enabled,
+    ):
+        fake, output = _terminal_last_step(
+            denoiser=denoiser,
+            process=process,
+            x=prefix.x,
+            t_scalar=prefix.t_scalar,
+            s_scalar=prefix.s_scalar,
+            cond=prefix.cond,
+            null_cond=prefix.null_cond,
+            guidance_scale=adv_cfg.terminal_guidance_scale,
+        )
+    fwd.adv_real = prefix.real
+    fwd.adv_fake = fake
+    fwd.adv_cond = prefix.cond
+    fwd.adv_t = torch.zeros(fake.shape[0], device=fake.device, dtype=torch.float32)
+    fwd.adv_output = output
+    fwd.extra_metrics = {
+        **(fwd.extra_metrics or {}),
+        "gan/terminal_batch": float(fake.shape[0]),
+        "gan/terminal_prefix_t": prefix.t_scalar.detach().float(),
+        "gan/terminal_fake_rms": fake.detach().float().square().mean().sqrt(),
+    }
+    return fwd
 
 
 @torch.no_grad()
@@ -1089,33 +1348,63 @@ def maybe_apply_adversarial(
     g_weight = adversarial_weight(adv_cfg, step)
     if discriminator is None or d_optimizer is None or g_weight <= 0.0:
         return
-    if adv_cfg.fake_space != "x0_hat":
-        raise ValueError(f"Only adversarial.fake_space=x0_hat is supported, got {adv_cfg.fake_space!r}")
     if adv_cfg.update_every <= 0 or adv_cfg.d_steps <= 0:
         raise ValueError("adversarial.update_every and adversarial.d_steps must be > 0")
 
     fb = fwd.fb
     disc_dtype = _discriminator_input_dtype(discriminator)
-    weights = t_weight(fb.t, cfg)
+    if adv_cfg.fake_space == "terminal_x0":
+        if any(
+            value is None
+            for value in (fwd.adv_real, fwd.adv_fake, fwd.adv_t, fwd.adv_output)
+        ):
+            raise RuntimeError("terminal adversarial payload was not attached to the forward batch")
+        real = fwd.adv_real
+        fake_g = fwd.adv_fake
+        disc_t = fwd.adv_t
+        disc_cond = fwd.adv_cond
+        adv_output = fwd.adv_output
+        assert real is not None and fake_g is not None and disc_t is not None and adv_output is not None
+        weights = torch.ones_like(disc_t)
+    else:
+        n = max(1, int(round(fb.x0.shape[0] * adv_cfg.batch_ratio)))
+        real = fb.x0[:n]
+        disc_t = fb.t[:n]
+        disc_cond = fwd.cond[:n] if fwd.cond is not None else None
+        adv_output = fwd.out[:n]
+        fake_g = process.x0_from_output(
+            fb.xt[:n],
+            fb.t[:n],
+            adv_output,
+            aux={},
+        )
+        weights = t_weight(disc_t, cfg)
     enabled_fraction = (weights > 0).float().mean()
-    metrics: dict[str, torch.Tensor | float] = {"gan/g_weight": g_weight, "gan/enabled_t_fraction": enabled_fraction}
-    tbin_values: dict[str, torch.Tensor] = {
-        "advw": weights.detach(),
+    metrics: dict[str, torch.Tensor | float] = {
+        "gan/g_weight_schedule": g_weight,
+        "gan/enabled_t_fraction": enabled_fraction,
+        "gan/batch": float(real.shape[0]),
+        "gan/fake_space_terminal": float(adv_cfg.fake_space == "terminal_x0"),
     }
+    # Per-t GAN diagnostics are meaningful only when every fresh training item
+    # has a matching denoising fake. Terminal distribution samples live at t=0
+    # and must not be mixed into the fresh time-bin accumulator.
+    keep_tbin = adv_cfg.fake_space == "x0_hat" and real.shape[0] == fb.x0.shape[0]
+    tbin_values: dict[str, torch.Tensor] = {"advw": weights.detach()} if keep_tbin else {}
 
     if step % adv_cfg.update_every == 0:
         _set_requires_grad(discriminator, True)
         for _ in range(adv_cfg.d_steps):
             d_optimizer.zero_grad(set_to_none=True)
             with torch.no_grad():
-                fake_d = process.x0_from_output(fb.xt, fb.t, fwd.out.detach(), aux={})
+                fake_d = fake_g.detach()
                 if adv_cfg.clamp_fake_for_d:
                     fake_d = fake_d.clamp(-1.0, 1.0)
                 fake_d = fake_d.to(dtype=disc_dtype)
             use_r1 = adv_cfg.r1_gamma > 0.0 and adv_cfg.r1_interval > 0 and (step % adv_cfg.r1_interval == 0)
-            real_images = fb.x0.detach().to(dtype=disc_dtype).requires_grad_(use_r1)
-            real_logits = discriminator(real_images, fb.t, fwd.cond)
-            fake_logits = discriminator(fake_d, fb.t, fwd.cond)
+            real_images = real.detach().to(dtype=disc_dtype).requires_grad_(use_r1)
+            real_logits = discriminator(real_images, disc_t, disc_cond)
+            fake_logits = discriminator(fake_d, disc_t, disc_cond)
             per_d, per_real, per_fake = discriminator_loss(real_logits, fake_logits, loss=adv_cfg.loss)
             d_loss = _weighted_mean(per_d, weights)
             r1 = torch.zeros((), device=d_loss.device, dtype=d_loss.dtype)
@@ -1139,22 +1428,45 @@ def maybe_apply_adversarial(
             })
             for key, val in accuracy_metrics(real_logits.detach(), fake_logits.detach()).items():
                 metrics[f"gan/{key}"] = val
-            tbin_values.update({
-                "drl": per_real.detach(),
-                "dfl": per_fake.detach(),
-                "dacc": 0.5 * ((real_logits.detach() > 0).float() + (fake_logits.detach() < 0).float()),
-            })
+            if keep_tbin:
+                tbin_values.update({
+                    "drl": per_real.detach(),
+                    "dfl": per_fake.detach(),
+                    "dacc": 0.5 * ((real_logits.detach() > 0).float() + (fake_logits.detach() < 0).float()),
+                })
 
     _set_requires_grad(discriminator, False)
-    fake_g = process.x0_from_output(fb.xt, fb.t, fwd.out, aux={}).to(dtype=disc_dtype)
-    fake_logits_g = discriminator(fake_g, fb.t, fwd.cond)
+    fake_logits_g = discriminator(fake_g.to(dtype=disc_dtype), disc_t, disc_cond)
     per_g_adv = generator_loss(fake_logits_g, loss=adv_cfg.loss)
     g_adv = _weighted_mean(per_g_adv, weights)
-    fwd.loss = fwd.loss + float(g_weight) * g_adv
+    if adv_cfg.gradient_ratio > 0.0:
+        fresh_grad = torch.autograd.grad(fwd.loss, fwd.out, retain_graph=True)[0]
+        adv_grad = torch.autograd.grad(g_adv, adv_output, retain_graph=True)[0]
+        fresh_grad_norm = fresh_grad.float().norm()
+        adv_grad_norm = adv_grad.float().norm()
+        warmup_fraction = min(g_weight / max(adv_cfg.weight, 1.0e-12), 1.0)
+        target_ratio = adv_cfg.gradient_ratio * warmup_fraction
+        g_scale = (
+            target_ratio * fresh_grad_norm / adv_grad_norm.clamp_min(1.0e-12)
+        ).detach().clamp(max=adv_cfg.scale_max)
+        actual_ratio = g_scale * adv_grad_norm.detach() / fresh_grad_norm.detach().clamp_min(1.0e-12)
+        metrics.update({
+            "gan/g_scale": g_scale,
+            "gan/g_output_grad_ratio": actual_ratio,
+            "gan/g_output_grad_target": target_ratio,
+            "gan/fresh_output_grad_norm": fresh_grad_norm.detach(),
+            "gan/adv_output_grad_norm": adv_grad_norm.detach(),
+        })
+    else:
+        g_scale = float(g_weight)
+        metrics["gan/g_scale"] = g_scale
+    fwd.loss = fwd.loss + g_scale * g_adv
     metrics["gan/g_adv_loss"] = g_adv.detach()
-    tbin_values["gadv"] = per_g_adv.detach()
+    if keep_tbin:
+        tbin_values["gadv"] = per_g_adv.detach()
     fwd.extra_metrics = {**(fwd.extra_metrics or {}), **metrics}
-    fwd.extra_tbin = {**(fwd.extra_tbin or {}), **tbin_values}
+    if tbin_values:
+        fwd.extra_tbin = {**(fwd.extra_tbin or {}), **tbin_values}
     _set_requires_grad(discriminator, True)
 
 

@@ -138,7 +138,14 @@ class Logger:
         fresh_scale = val("clean/fresh_scale", 1.0)
         fresh_loss = val("fresh/loss", total_loss)
         step_width = len(str(int(total_steps))) if total_steps is not None and total_steps > 0 else 0
-        if "clean/loss_aux" in kv:
+        if "gan/g_adv_loss" in kv:
+            loss_part = (
+                f"(loss) {cls._fmt_sig(total_loss)} = "
+                f"(fresh) {cls._fmt_sig(val('fresh/loss_contrib', fresh_loss))} + "
+                f"(gan_scale) {cls._fmt_sig(val('gan/g_scale'))} * "
+                f"(g_adv) {cls._fmt_sig(val('gan/g_adv_loss'))}"
+            )
+        elif "clean/loss_aux" in kv:
             aux_label = "aux_x0_mse" if val("clean/aux_target_x0", 0.0) >= 0.5 else "aux_velocity_mse"
             loss_part = (
                 f"(loss) {cls._fmt_sig(total_loss)} = "
@@ -218,6 +225,21 @@ class Logger:
                     clean.append(f"{label}={cls._fmt_num(kv[key])}")
         if clean:
             parts.append(f"(clean) {' '.join(clean)}")
+
+        gan = []
+        for key, label in (
+            ("gan/fake_space_terminal", "terminal"),
+            ("gan/batch", "batch"),
+            ("gan/g_output_grad_target", "grad_target"),
+            ("gan/g_output_grad_ratio", "grad_ratio"),
+            ("gan/d_loss", "d_loss"),
+            ("gan/d_acc_total", "d_acc"),
+            ("gan/terminal_fake_rms", "fake_rms"),
+        ):
+            if key in kv:
+                gan.append(f"{label}={cls._fmt_num(kv[key])}")
+        if gan:
+            parts.append(f"(gan) {' '.join(gan)}")
 
         progress = []
         if "progress_pct" in kv:

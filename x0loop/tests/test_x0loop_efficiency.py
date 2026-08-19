@@ -33,3 +33,20 @@ def test_bank_compute_estimate_counts_cfg_teacher_and_aux_backward():
 def test_online_compute_estimate_counts_uniform_full_grid_occupancy():
     estimate = estimate_compute(_config(enabled=True, mode="online"))
     assert estimate.teacher_forward_equivalent_samples == 2 * 32 * (21 - 1 / 20)
+
+
+def test_terminal_gan_counts_full_prefix_and_trainable_final_cfg_step():
+    cfg = _config(enabled=False)
+    cfg["adversarial"] = {
+        "enabled": True,
+        "fake_space": "terminal_x0",
+        "batch_ratio": 0.125,
+        "terminal": {"steps": 20},
+    }
+
+    estimate = estimate_compute(cfg)
+
+    assert estimate.fresh_forward_equivalent_samples == 768
+    assert estimate.teacher_forward_equivalent_samples == 4 * 32 * 19
+    assert estimate.aux_forward_equivalent_samples == 6 * 32
+    assert estimate.extra_flops_per_step > 0

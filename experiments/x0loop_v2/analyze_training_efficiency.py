@@ -23,6 +23,11 @@ import yaml
 
 
 FORWARD_EQUIVALENT_FLOPS_PER_SAMPLE = 6_711_061_162.666667
+# Measured with FlopCounterMode for the configured base-channel-16
+# discriminator at batch 32: one real/fake D update plus one G-through-D
+# backward. Lazy R1 is omitted because nested autograd is not supported by the
+# counter; at interval 16 it is a small lower-bound error relative to JiT.
+GAN_DISC_FLOPS_BATCH32 = 8_280_670_208.0
 DEFAULT_PEAK_TFLOPS = 989.0
 
 
@@ -31,6 +36,7 @@ class ComputeEstimate:
     fresh_forward_equivalent_samples: float
     aux_forward_equivalent_samples: float
     teacher_forward_equivalent_samples: float
+    extra_flops_per_step: float = 0.0
 
     @property
     def method_forward_equivalent_samples(self) -> float:
@@ -47,31 +53,40 @@ def estimate_compute(config: dict) -> ComputeEstimate:
     batch = int(train["batch_size"])
     # One trainable forward plus backward is counted as three forwards.
     fresh = 3.0 * batch
-    if not bool(clean.get("enabled", False)):
-        return ComputeEstimate(fresh, 0.0, 0.0)
+    aux = teacher = extra_flops = 0.0
+    if bool(clean.get("enabled", False)):
+        aux_n = max(1, int(round(batch * float(clean["aux_batch_ratio"]))))
+        # CFG concatenates conditional and unconditional batches.  The student
+        # auxiliary call is trainable, hence 3 * (2 * aux_n).
+        aux = 6.0 * aux_n
+        mode = str(clean["mode"])
+        if mode == "online":
+            solver_steps = int(clean["solver_steps"])
+            # A uniformly selected solver index k uses 2*(k+1) teacher calls,
+            # except the final index whose last Euler step uses one fewer call.
+            calls_per_root = solver_steps + 1.0 - 1.0 / solver_steps
+            teacher = 2.0 * aux_n * calls_per_root  # factor two is CFG batching
+        elif mode == "bank_fix":
+            refresh_interval = int(clean.get("refresh_interval", 1))
+            refresh_n = aux_n * refresh_interval
+            roots = max(1, int(round(refresh_n * float(clean["root_fraction"]))))
+            advanced = max(0, refresh_n - roots)
+            # Root target: one CFG call. Advanced state: two Heun CFG calls plus
+            # one accepted-state target CFG call. Amortize over refresh interval.
+            teacher = (2.0 * roots + 6.0 * advanced) / refresh_interval
 
-    aux_n = max(1, int(round(batch * float(clean["aux_batch_ratio"]))))
-    # CFG concatenates conditional and unconditional batches.  The student
-    # auxiliary call is trainable, hence 3 * (2 * aux_n).
-    aux = 6.0 * aux_n
-    mode = str(clean["mode"])
-    if mode == "online":
-        solver_steps = int(clean["solver_steps"])
-        # A uniformly selected solver index k uses 2*(k+1) teacher calls,
-        # except the final index whose last Euler step uses one fewer call.
-        calls_per_root = solver_steps + 1.0 - 1.0 / solver_steps
-        teacher = 2.0 * aux_n * calls_per_root  # factor two is CFG batching
-    elif mode == "bank_fix":
-        refresh_interval = int(clean.get("refresh_interval", 1))
-        refresh_n = aux_n * refresh_interval
-        roots = max(1, int(round(refresh_n * float(clean["root_fraction"]))))
-        advanced = max(0, refresh_n - roots)
-        # Root target: one CFG call. Advanced state: two Heun CFG calls plus
-        # one accepted-state target CFG call. Amortize over refresh interval.
-        teacher = (2.0 * roots + 6.0 * advanced) / refresh_interval
-    else:
-        teacher = 0.0
-    return ComputeEstimate(fresh, aux, teacher)
+    adversarial = config.get("adversarial", {}) or {}
+    if bool(adversarial.get("enabled", False)):
+        adv_n = max(1, int(round(batch * float(adversarial.get("batch_ratio", 1.0)))))
+        extra_flops += GAN_DISC_FLOPS_BATCH32 * adv_n / 32.0
+        if str(adversarial.get("fake_space", "x0_hat")) == "terminal_x0":
+            terminal = adversarial.get("terminal", {}) or {}
+            steps = int(terminal.get("steps", (config.get("gen_eval", {}) or {}).get("steps", 20)))
+            # Each prefix Heun interval has two CFG model calls, each on 2N.
+            teacher += 4.0 * adv_n * max(0, steps - 1)
+            # The final CFG call is trainable: forward+backward on 2N.
+            aux += 6.0 * adv_n
+    return ComputeEstimate(fresh, aux, teacher, extra_flops)
 
 
 def _latest_metrics(run_dir: Path) -> Path:
@@ -98,7 +113,10 @@ def analyze_run(
     iter_s = statistics.median(float(row["iter_s"]) for row in rows)
     img_s = statistics.median(float(row["img_s"]) for row in rows)
     fresh_flops = estimate.fresh_forward_equivalent_samples * FORWARD_EQUIVALENT_FLOPS_PER_SAMPLE
-    method_flops = estimate.method_forward_equivalent_samples * FORWARD_EQUIVALENT_FLOPS_PER_SAMPLE
+    method_flops = (
+        estimate.method_forward_equivalent_samples * FORWARD_EQUIVALENT_FLOPS_PER_SAMPLE
+        + estimate.extra_flops_per_step
+    )
     peak_flops_s = peak_tflops * 1.0e12
     return {
         "name": name,

@@ -17,13 +17,21 @@ class AdversarialConfig:
     loss: str = "hinge"
     clamp_fake_for_d: bool = False
     fake_space: str = "x0_hat"
+    batch_ratio: float = 1.0
+    gradient_ratio: float = 0.0
+    scale_max: float = 10.0
     r1_gamma: float = 0.0
     r1_interval: int = 16
+    terminal_steps: int = 20
+    terminal_sampler: str = "heun"
+    terminal_guidance_scale: float = 2.2
 
 
 def build_adversarial_config(cfg: dict) -> AdversarialConfig:
     ac = cfg.get("adversarial", {}) or {}
-    return AdversarialConfig(
+    terminal = ac.get("terminal", {}) or {}
+    gen_eval = cfg.get("gen_eval", {}) or {}
+    result = AdversarialConfig(
         enabled=bool(ac.get("enabled", False)),
         weight=float(ac.get("weight", 0.0)),
         start_step=int(ac.get("start_step", 0)),
@@ -33,9 +41,46 @@ def build_adversarial_config(cfg: dict) -> AdversarialConfig:
         loss=str(ac.get("loss", "hinge")).lower(),
         clamp_fake_for_d=bool(ac.get("clamp_fake_for_d", False)),
         fake_space=str(ac.get("fake_space", "x0_hat")).lower(),
+        batch_ratio=float(ac.get("batch_ratio", 1.0)),
+        gradient_ratio=float(ac.get("gradient_ratio", 0.0)),
+        scale_max=float(ac.get("scale_max", 10.0)),
         r1_gamma=float(((ac.get("r1", {}) or {}).get("gamma", ac.get("r1_gamma", 0.0)))),
         r1_interval=int(((ac.get("r1", {}) or {}).get("interval", ac.get("r1_interval", 16)))),
+        terminal_steps=int(terminal.get("steps", gen_eval.get("steps", 20))),
+        terminal_sampler=str(terminal.get("sampler", gen_eval.get("sampler", "heun"))).lower(),
+        terminal_guidance_scale=float(
+            terminal.get("guidance_scale", gen_eval.get("guidance_scale", 2.2))
+        ),
     )
+    if result.fake_space not in {"x0_hat", "terminal_x0"}:
+        raise ValueError(
+            "adversarial.fake_space must be x0_hat | terminal_x0, "
+            f"got {result.fake_space!r}"
+        )
+    if not (0.0 < result.batch_ratio <= 1.0):
+        raise ValueError(f"adversarial.batch_ratio must be in (0,1], got {result.batch_ratio}")
+    if not (0.0 <= result.gradient_ratio <= 1.0):
+        raise ValueError(
+            f"adversarial.gradient_ratio must be in [0,1], got {result.gradient_ratio}"
+        )
+    if result.scale_max <= 0.0:
+        raise ValueError(f"adversarial.scale_max must be > 0, got {result.scale_max}")
+    if result.fake_space == "terminal_x0":
+        if result.terminal_steps <= 0:
+            raise ValueError(
+                f"adversarial.terminal.steps must be > 0, got {result.terminal_steps}"
+            )
+        if result.terminal_sampler != "heun":
+            raise ValueError(
+                "adversarial.terminal.sampler must be heun for the registered "
+                f"inference kernel, got {result.terminal_sampler!r}"
+            )
+        if result.terminal_guidance_scale < 0.0:
+            raise ValueError(
+                "adversarial.terminal.guidance_scale must be non-negative, "
+                f"got {result.terminal_guidance_scale}"
+            )
+    return result
 
 
 def adversarial_weight(config: AdversarialConfig, step: int) -> float:

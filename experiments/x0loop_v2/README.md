@@ -39,11 +39,20 @@ reproducible:
 | `bank-x0` | stratified EMA Heun replay | teacher native x0 |
 | `online` | current EMA online Heun rollout | legacy teacher velocity |
 | `online-x0` | current EMA online Heun rollout | teacher native x0 |
+| `denoise-gan` | fresh noised training state | class-conditional x0 distribution loss |
+| `terminal-gan` | EMA Heun-20 prefix, differentiable final Euler | class-conditional terminal distribution loss |
 
 All auxiliary branches retain the complete fresh batch. The target output
 gradient ratio, auxiliary batch ratio, compile mode, and resume point must be
 explicitly registered in the analysis document before launch. Training and FID
 both use the correct learnable endpoint, Heun grid, CFG, EMA, and label rules.
+
+Cycle 03 GAN branches use an auxiliary batch of 32 for a fresh batch of 256
+and adapt the generator scale to a measured 10% fresh-output gradient ratio.
+`terminal-gan` runs the first 19 Heun intervals under the current EMA with no
+gradient and backpropagates only through the sampler's actual final
+`t=0.05 -> 0` Euler interval. It rejects any terminal steps/sampler/CFG setting
+that differs from `gen_eval`, and cannot be combined with clean-loop replay.
 
 Start a 300-epoch from-zero FRESH run:
 
@@ -63,6 +72,17 @@ X0LOOP_FINAL_FID_ENABLED=false \
 X0LOOP_AUX_BATCH_RATIO=0.125 \
 X0LOOP_AUX_GRADIENT_RATIO=0.1 \
   experiments/x0loop_v2/run_from_scratch.sh online-x0
+```
+
+Cycle 03 shared-prefix distribution screens use the same command shape:
+
+```bash
+X0LOOP_GPU=7 \
+X0LOOP_CYCLE=cycle03 \
+X0LOOP_RUN_STEPS=5000 \
+X0LOOP_RESUME=runs/x0loop_v2_from_scratch/cycle01/fresh/checkpoints/ckpt_step_00010000.pt \
+X0LOOP_FINAL_FID_ENABLED=false \
+  experiments/x0loop_v2/run_from_scratch.sh terminal-gan
 ```
 
 `X0LOOP_COMPILE_DYNAMIC=true` is an optional, numerically smoke-tested online

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: $0 fresh|bank-fix|bank-x0|online|online-x0" >&2
+  echo "usage: $0 fresh|bank-fix|bank-x0|online|online-x0|denoise-gan|terminal-gan" >&2
   exit 2
 fi
 
@@ -25,32 +25,60 @@ compile_dynamic=${X0LOOP_COMPILE_DYNAMIC:-false}
 aux_batch_ratio=${X0LOOP_AUX_BATCH_RATIO:-0.125}
 aux_gradient_ratio=${X0LOOP_AUX_GRADIENT_RATIO:-0.2}
 aux_target=${X0LOOP_AUX_TARGET:-}
+adv_batch_ratio=${X0LOOP_ADV_BATCH_RATIO:-0.125}
+adv_gradient_ratio=${X0LOOP_ADV_GRADIENT_RATIO:-0.1}
+adv_start_step=${X0LOOP_ADV_START_STEP:-10000}
+adv_warmup_steps=${X0LOOP_ADV_WARMUP_STEPS:-1000}
 
 case "$branch" in
   fresh)
     clean_enabled=false
     clean_mode=bank_fix
     branch_aux_target=velocity
+    adv_enabled=false
+    adv_fake_space=x0_hat
     ;;
   bank-fix)
     clean_enabled=true
     clean_mode=bank_fix
     branch_aux_target=velocity
+    adv_enabled=false
+    adv_fake_space=x0_hat
     ;;
   bank-x0)
     clean_enabled=true
     clean_mode=bank_fix
     branch_aux_target=x0
+    adv_enabled=false
+    adv_fake_space=x0_hat
     ;;
   online)
     clean_enabled=true
     clean_mode=online
     branch_aux_target=velocity
+    adv_enabled=false
+    adv_fake_space=x0_hat
     ;;
   online-x0)
     clean_enabled=true
     clean_mode=online
     branch_aux_target=x0
+    adv_enabled=false
+    adv_fake_space=x0_hat
+    ;;
+  denoise-gan)
+    clean_enabled=false
+    clean_mode=bank_fix
+    branch_aux_target=velocity
+    adv_enabled=true
+    adv_fake_space=x0_hat
+    ;;
+  terminal-gan)
+    clean_enabled=false
+    clean_mode=bank_fix
+    branch_aux_target=velocity
+    adv_enabled=true
+    adv_fake_space=terminal_x0
     ;;
   *)
     echo "unknown branch: $branch" >&2
@@ -93,6 +121,12 @@ CUDA_VISIBLE_DEVICES=$gpu uv run python -m x0loop.train \
   --set "clean_loop.aux_batch_ratio=$aux_batch_ratio" \
   --set "clean_loop.aux_gradient_ratio=$aux_gradient_ratio" \
   --set "clean_loop.aux_target=$aux_target" \
+  --set "adversarial.enabled=$adv_enabled" \
+  --set "adversarial.fake_space=$adv_fake_space" \
+  --set "adversarial.batch_ratio=$adv_batch_ratio" \
+  --set "adversarial.gradient_ratio=$adv_gradient_ratio" \
+  --set "adversarial.start_step=$adv_start_step" \
+  --set "adversarial.warmup_steps=$adv_warmup_steps" \
   --set "gen_eval.enabled=$fid_enabled" \
   --set "gen_eval.final.enabled=$final_fid_enabled" \
   --set "gen_eval.every_steps=$fid_every" \

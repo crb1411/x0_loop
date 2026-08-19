@@ -69,6 +69,39 @@ clean_loop:
   root_fraction: 0.25
   refresh_interval: 1
   drop_fraction: 0.5
+adversarial:
+  enabled: false
+  # Cycle 03 launch branches override fake_space while sharing discriminator,
+  # batch, warmup, and output-gradient controls.
+  fake_space: x0_hat
+  loss: hinge
+  weight: 1.0
+  start_step: 10000
+  warmup_steps: 1000
+  update_every: 1
+  d_steps: 1
+  batch_ratio: 0.125
+  gradient_ratio: 0.10
+  scale_max: 10.0
+  clamp_fake_for_d: false
+  t_weight:
+    name: piecewise
+  r1:
+    gamma: 1.0
+    interval: 16
+  terminal:
+    steps: 20
+    sampler: heun
+    guidance_scale: 2.2
+discriminator:
+  name: x0_resnet
+  base_channels: 16
+  spectral_norm: true
+  time_projection: true
+  class_projection: true
+  lr: 2.0e-4
+  weight_decay: 0.0
+  betas: [0.0, 0.99]
 loss:
   outer_weight: skew_triangular
   outer_weight_power: 1.0

@@ -93,3 +93,12 @@ class ForwardBatch:
     out: torch.Tensor
     extra_metrics: dict | None = None
     extra_tbin: dict | None = None
+    # Optional distribution-level adversarial payload. ``adv_output`` is the
+    # student output tensor whose gradient norm controls the auxiliary scale;
+    # for terminal GAN the rollout prefix that produced ``adv_fake`` is
+    # detached and only the final inference step remains differentiable.
+    adv_real: torch.Tensor | None = None
+    adv_fake: torch.Tensor | None = None
+    adv_cond: torch.Tensor | None = None
+    adv_t: torch.Tensor | None = None
+    adv_output: torch.Tensor | None = None

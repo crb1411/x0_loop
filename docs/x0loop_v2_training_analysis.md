@@ -261,6 +261,43 @@ GAN 从 step-10k 后启用，首轮只用一个保守权重并做 warmup，不�
 时数值回归、方法级 MFU/显存可接受。只有 15k FID 优于 FRESH 才进入独立从零 300-epoch
 训练和 50k FID；否则停止继续堆叠 consistency/replay 变体。
 
+### Cycle 03 精确执行协议
+
+实现与 smoke 通过后，三条筛选分支冻结如下，结果出来前不改变：
+
+| Run | GPU | 训练定义 | 预期稳定 s/step | 峰值显存 | 方法级 MFU |
+|---|---:|---|---:|---:|---:|
+| FRESH | 6 | adversarial/clean-loop 均关闭 | 0.087 | 6.93 GiB | 5.97% |
+| DENOISE-GAN | 7 | fresh `x0_hat` distribution control | 0.109 | 6.94 GiB | 4.78% |
+| TERMINAL-GAN | 7（顺序运行） | EMA Heun prefix + student final Euler | 0.253 | 8.64 GiB | 9.09% |
+
+- 共享前缀：`cycle01/fresh/checkpoints/ckpt_step_00010000.pt`；三者从 global step 10k
+  各继续 5k steps，到 step 15k。它们是机制筛选，不作为独立从零训练。
+- fresh：每步完整 256 样本；GAN 另取同 batch 前 32 个真实图像/标签，绝不替换 fresh。
+- D：类别条件 base-16 spectral-normalized ResNet、hinge、AdamW 2e-4、R1 gamma 1 lazy-16；
+  real/fake 标签 occupancy 严格相同。
+- G 辅助梯度：从 step 10k 启用，在 1,000 steps 内从 0 线性升到 fresh 输出梯度的 0.10；
+  每步实测并记录比例，scale 上限 10。不使用未经测量的固定 GAN loss 系数。
+- DENOISE-GAN：只使用训练 batch 中已有的 `x0_hat`，判别时间仍为对应 fresh t，用于
+  隔离判别器本身是否有益；GAN batch 同样为 32。
+- TERMINAL-GAN：从正确 learnable endpoint 独立采 root noise，EMA 在 `no_grad` 下执行
+  Heun-20 的前 19 个区间，严格使用 CFG 2.2、固定模型时间 0.5 和真实 label/null-label；
+  只对 sampler 本来就采用 Euler 的最后 `t=0.05 -> 0` 区间使用学生并保留梯度。D 的
+  real/fake 均以 terminal t=0 条件化；不使用 replay、paired GT 或 teacher MSE。
+- RNG：terminal rollout 使用由 train seed、global step 和 rank 决定的独立 forked stream；
+  smoke 中两个 GAN 分支的 fresh loss、t-bin 和诊断指标逐项完全一致。
+- 评估：step 15k 固定 seed 20260819、5k samples、EMA Heun-20/CFG-2.2 FID；训练前不做
+  额外中途 FID。任一 GAN 分支未优于同轮 FRESH 即停止，不做 50k；若改善，先做三模型
+  固定 root 全 Heun trace，再决定是否进入随机初始化 300-epoch 正式训练。
+- 预计 wall time：FRESH 纯训练约 7 分钟，DENOISE-GAN 约 9 分钟，TERMINAL-GAN 约
+  21 分钟；各自固定 5k FID 另约 1.5–2 分钟。方法级 MFU 计入 JiT teacher/student 和
+  已测 D forward/backward FLOPs，lazy R1 的二阶项未被 PyTorch counter 计入。
+
+正确性 smoke 已验证：72 个全量单元测试通过；terminal helper 与手算 Heun transition
+逐元素一致；prefix 无梯度、最后一步可反传；EMA 权重交换不会碰触已有 autograd graph；
+D/G detach 与 checkpoint 保存成功；两个分支输出梯度比均精确为 0.100。eager 单步
+TERMINAL fake RMS 为 1.0066，没有复现 Cycle 02 的即时动态范围坍缩。
+
 ## 时间与吞吐分析
 
 300 epochs 在 CIFAR-10、batch 256 下是 58,500 optimizer steps（每 epoch 约
