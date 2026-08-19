@@ -1207,5 +1207,21 @@ def train(cfg: dict) -> None:
             runtime.logger.log_text("[checkpoint] KeyboardInterrupt: saving final checkpoint before exit")
         _save_final_checkpoint()
         raise
+    except Exception as exc:
+        # Preserve the latest optimizer/EMA state for recoverable failures in
+        # evaluation, visualization, or logging. Keep the original exception
+        # as the one that escapes even if the emergency save also fails.
+        if runtime.is_main:
+            runtime.logger.log_text(
+                f"[checkpoint] {type(exc).__name__}: attempting emergency checkpoint at step {resume.global_step}"
+            )
+        try:
+            _save_final_checkpoint()
+        except Exception as save_exc:
+            if runtime.is_main:
+                runtime.logger.log_text(
+                    f"[checkpoint] emergency save failed: {type(save_exc).__name__}: {save_exc}"
+                )
+        raise
     finally:
         runtime.logger.close()
