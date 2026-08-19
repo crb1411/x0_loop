@@ -806,6 +806,24 @@ TensorFlow-compatible resize、标准化和 8-bit floor；量化采用 straight-
 全部通过才实现 `GATED-DIST`；任一失败则固定 Inception minibatch MMD 也不具备稳定训练
 信号资格，需要重新设计 distribution objective，而不是扫描 kernel/batch/阈值。
 
+Inception-MMD readiness 已全部通过。最初用 batch-4 differentiable feature 与 batch-256
+cache 横比得到 0.00404 最大误差；同一输入、同一 batch shape 的逐路径审计证明 uint8 与
+float-ST forward 最大误差严格为 0，差异来自 CUDA 对不同 batch shape 选择等价卷积内核，
+因此校验改为正确的同 batch 比较，不涉及修改门槛。最终结果为：
+
+| readiness check | result | gate |
+|---|---:|---:|
+| exact forward max abs error | 0 | ≤1e-5 |
+| fake-real vs real-real KID gap z | 7.0466 | ≥3.0 |
+| independent-reference gradient cosine median | 0.5897 | ≥0.20 |
+| independent-reference projected descent | 3/4 | ≥3/4 |
+
+四次 projected step 的 display-space RMS 约 0.00496；三次改善的 held-out loss delta 为
+-0.00378、-0.00094、-0.01068，一次退化 +0.01097。这说明信号仍有 minibatch 方差，
+正式分布辅助必须保持参数梯度范数 0.10、使用独立 real reference，并限制在 correction
+path；不允许直接污染共享 backbone。原始 artifact 位于
+`runs/x0loop_v2_from_scratch/cycle06/readiness/fresh_time_step58500/inception_mmd/`。
+
 ## 时间与吞吐分析
 
 300 epochs 在 CIFAR-10、batch 256 下是 58,500 optimizer steps（每 epoch 约

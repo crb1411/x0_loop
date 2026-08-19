@@ -311,10 +311,20 @@ def main() -> None:
     differentiable = DifferentiableFIDInception(extractor).to(device).eval()
 
     check_images = fixed["fake"][:4].to(device).float()
+    check_pixels_hard = model_images_to_fid_pixels(
+        check_images,
+        cfg,
+        straight_through_quantize=False,
+    )
+    with torch.no_grad():
+        check_features_hard = extractor(check_pixels_hard)[0]
     check_features = differentiable(
         model_images_to_fid_pixels(check_images, cfg, straight_through_quantize=True)
-    ).detach().cpu()
-    forward_error = float((check_features - features["fake"][:4]).abs().max())
+    )
+    # Compare identical batch shapes. CUDA may choose a numerically different
+    # convolution algorithm for the batch-256 feature cache than for this
+    # batch-4 differentiability check even though both input paths are exact.
+    forward_error = float((check_features.detach() - check_features_hard).abs().max())
     separation = _bootstrap_separation(
         real_val,
         fake_val,
