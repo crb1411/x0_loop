@@ -11,6 +11,7 @@ gpu=${X0LOOP_GPU:-7}
 cycle=${X0LOOP_CYCLE:-cycle01}
 epochs=${X0LOOP_EPOCHS:-300}
 run_steps=${X0LOOP_RUN_STEPS:-None}
+resume=${X0LOOP_RESUME:-None}
 fid_every=${X0LOOP_FID_EVERY:-5000}
 fid_samples=${X0LOOP_FID_SAMPLES:-5000}
 final_fid_samples=${X0LOOP_FINAL_FID_SAMPLES:-50000}
@@ -40,7 +41,7 @@ esac
 CUDA_VISIBLE_DEVICES=$gpu uv run python -m x0loop.train \
   --config experiments/x0loop_v2/config.yaml \
   --runtime-config x0loop/configs/runtime/single_gpu.yaml \
-  --set train.resume=None \
+  --set "train.resume=$resume" \
   --set "train.epochs=$epochs" \
   --set "train.run_steps=$run_steps" \
   --set train.lr=0.0003 \
@@ -60,4 +61,5 @@ CUDA_VISIBLE_DEVICES=$gpu uv run python -m x0loop.train \
   --set "gen_eval.num_samples=$fid_samples" \
   --set "gen_eval.final.num_samples=$final_fid_samples" \
   --set "distributed.checkpoint.every_steps=$fid_every" \
+  --set logging.sample_every=0 \
   --set "logging.out_dir=runs/x0loop_v2_from_scratch/$cycle/$branch"

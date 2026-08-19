@@ -103,6 +103,11 @@ trace，并逐 step 比较状态、velocity、x0_hat、局部 Euler/Heun defect 
   grad norm 也逐项完全一致，验证了 warmup 可比性及 FID 随机流隔离。
 - 首次 5k FID 单卡耗时约 109–115 秒；生成临时图在计算后清理，指标已写入各 run 的
   `gen_eval_metrics_*.jsonl`。
+- 两条进程首次到 step 10,000 时，训练内的可视化采样读取不存在的 `sample` 配置并以
+  `KeyError` 退出，发生在 optimizer step 完成之后、checkpoint 保存之前。已修复为缺省
+  配置安全读取；正式实验关闭重复的训练内 trace（保留 5k FID 和训练后三模型固定-root
+  trace）。两条分支统一从 step 5,000 checkpoint 恢复，并限制 continuation 为 53,500
+  steps，确保最终仍恰好为 global step 58,500。
 
 ## 运行命令
 

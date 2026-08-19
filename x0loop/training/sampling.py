@@ -258,6 +258,7 @@ def run_sampling_if_due(
         should_run_sample = True
 
     if should_run_sample:
+        sample_cfg = cfg.get("sample", {}) or {}
         sample_ema = ema
         if model_ctx.use_fsdp and ema is not None:
             sample_ema = None
@@ -269,7 +270,7 @@ def run_sampling_if_due(
             if sample_ema is not None:
                 sample_ema.store(model)
                 sample_ema.copy_to(model)
-            sample_num = int(cfg["sample"].get("num", 16))
+            sample_num = int(sample_cfg.get("num", 16))
             sample_cond = build_sample_cond(
                 cfg,
                 sample_num=sample_num,
@@ -277,13 +278,13 @@ def run_sampling_if_due(
                 batch_cond=cond if use_label_cond else None,
             )
             null_cond = build_null_class_cond(cfg, sample_num=sample_num, device=runtime.device)
-            guidance_scale = float(cfg["sample"].get("guidance_scale", 1.0))
-            sample_sampler = cfg["sample"].get("sampler", None)
+            guidance_scale = float(sample_cfg.get("guidance_scale", 1.0))
+            sample_sampler = sample_cfg.get("sampler", None)
             if isinstance(sample_sampler, str) and sample_sampler.lower() == "auto":
                 sample_sampler = None
             result = process.sample(
                 model=model,
-                steps=int(cfg["sample"].get("steps", 50)),
+                steps=int(sample_cfg.get("steps", 50)),
                 shape=(sample_num, model_ctx.model_cfg.in_channels, model_ctx.model_cfg.image_size, model_ctx.model_cfg.image_size),
                 device=runtime.device,
                 dtype=torch.float32,
@@ -292,8 +293,8 @@ def run_sampling_if_due(
                 null_cond=null_cond,
                 guidance_scale=guidance_scale,
                 sampler=sample_sampler,
-                posterior_noise_scale=cfg["sample"].get("posterior_noise_scale", None),
-                refine_time=float(cfg["sample"].get("refine_time", 0.5)),
+                posterior_noise_scale=sample_cfg.get("posterior_noise_scale", None),
+                refine_time=float(sample_cfg.get("refine_time", 0.5)),
             )
             if sample_ema is not None:
                 sample_ema.restore(model)
@@ -318,7 +319,7 @@ def run_sampling_if_due(
                 image_key="x",
                 filename_suffix="xt",
             )
-            if bool(cfg["sample"].get("save_trace", False)) and "trace" in result:
+            if bool(sample_cfg.get("save_trace", False)) and "trace" in result:
                 trace_path = os.path.join(sample_dir, f"step_{resume.global_step:08d}_trace.pt")
                 os.makedirs(os.path.dirname(trace_path), exist_ok=True)
                 torch.save(result["trace"], trace_path)
