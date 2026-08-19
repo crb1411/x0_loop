@@ -28,6 +28,9 @@ FORWARD_EQUIVALENT_FLOPS_PER_SAMPLE = 6_711_061_162.666667
 # backward. Lazy R1 is omitted because nested autograd is not supported by the
 # counter; at interval 16 it is a small lower-bound error relative to JiT.
 GAN_DISC_FLOPS_BATCH32 = 8_280_670_208.0
+# Exact FID-Inception-2048 real forward plus fake forward/backward and
+# polynomial-MMD work, measured at batch 16 with FlopCounterMode.
+INCEPTION_MMD_FLOPS_BATCH16 = 548_278_428_672.0
 DEFAULT_PEAK_TFLOPS = 989.0
 
 
@@ -92,6 +95,20 @@ def estimate_compute(config: dict) -> ComputeEstimate:
             teacher += 4.0 * adv_n * max(0, steps - 1)
             # The final CFG call is trainable: forward+backward on 2N.
             aux += 6.0 * adv_n
+
+    distribution = config.get("distribution_matching", {}) or {}
+    if bool(distribution.get("enabled", False)):
+        dist_n = max(2, int(round(batch * float(distribution.get("batch_ratio", 1.0)))))
+        terminal = distribution.get("terminal", {}) or {}
+        steps = int(terminal.get("steps", (config.get("gen_eval", {}) or {}).get("steps", 20)))
+        suffix_steps = int(terminal.get("suffix_steps", 1))
+        # Prefix Heun intervals each make predictor and corrector calls, and
+        # CFG doubles every call's batch. The truncated suffix follows the
+        # same pattern except that the final interval is Euler. Its base model
+        # calls run without gradients; the tiny correction module is omitted.
+        teacher += 4.0 * dist_n * max(0, steps - suffix_steps)
+        aux += 2.0 * dist_n * max(1, 2 * suffix_steps - 1)
+        extra_flops += INCEPTION_MMD_FLOPS_BATCH16 * dist_n / 16.0
     return ComputeEstimate(fresh, aux, teacher, extra_flops)
 
 

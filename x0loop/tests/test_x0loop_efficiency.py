@@ -59,3 +59,19 @@ def test_terminal_gan_counts_full_prefix_and_trainable_final_cfg_step():
     assert estimate.teacher_forward_equivalent_samples == 4 * 32 * 19
     assert estimate.aux_forward_equivalent_samples == 6 * 32
     assert estimate.extra_flops_per_step > 0
+
+
+def test_terminal_distribution_counts_prefix_suffix_and_inception_mmd():
+    cfg = _config(enabled=False)
+    cfg["distribution_matching"] = {
+        "enabled": True,
+        "batch_ratio": 0.0625,
+        "terminal": {"steps": 20, "suffix_steps": 4},
+    }
+
+    estimate = estimate_compute(cfg)
+
+    assert estimate.fresh_forward_equivalent_samples == 768
+    assert estimate.teacher_forward_equivalent_samples == 4 * 16 * 16
+    assert estimate.aux_forward_equivalent_samples == 2 * 16 * 7
+    assert estimate.extra_flops_per_step == 548_278_428_672.0

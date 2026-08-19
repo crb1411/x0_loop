@@ -843,8 +843,9 @@ EMA 轨迹；Heun predictor/corrector、最后一步 Euler、CFG 合并规则和
 
 终点目标直接比较当前 CIFAR-10 real batch 与生成终点的 exact FID-Inception-2048 feature，
 使用 degree-3 unbiased polynomial MMD。辅助 batch 为 16（主 batch 的 0.0625），step 10,000
-开始并用 1,000 steps warmup，实际 correction 参数梯度范数固定为当前 fresh 全参数梯度范数
-的 0.10，上限保护不变。固定 Inception 不进入 optimizer、EMA 或 checkpoint。该设计不再
+开始并用 1,000 steps warmup；在 distribution 唯一允许更新的 correction 参数子空间内，
+辅助梯度范数固定为 fresh 梯度范数的 0.10，上限保护不变。固定 Inception 不进入 optimizer、
+EMA 或 checkpoint。该设计不再
 使用 paired ancestral GT、历史 x0、moving/frozen teacher 或 replay bank。
 
 实现前 smoke 和公平性审计均通过：
@@ -853,17 +854,30 @@ EMA 轨迹；Heun predictor/corrector、最后一步 Euler、CFG 合并规则和
 |---|---:|
 | eager `GATED-CONTROL` one-step | pass，峰值 10.51 GiB |
 | eager `GATED-DIST` forced-aux one-step | pass，实际梯度比 0.10000，峰值 12.93 GiB |
-| compiled distribution VJP | pass，无 donated-buffer mutation |
+| compiled correction-subspace VJP | pass，无 donated-buffer mutation |
 | correction checkpoint strict load + EMA Heun-20 trace | missing/unexpected keys 均为 0 |
-| compiled 50-step forced-aux stable median | 0.2907 s/step，880.9 img/s，峰值 9.84 GiB |
-| forced-aux parameter cosine median | aux/fresh 0.0752，combined/fresh 0.9952 |
+| compiled 50-step forced-aux stable median | 0.2866 s/step，893.9 img/s，峰值 9.19 GiB |
+| forced-aux correction-parameter cosine median | aux/fresh 0.1855，combined/fresh 0.9955 |
+| forced-aux gradient ratio median | 0.1000000 |
 
-为避免新增模块初始化悄然移动训练数据、噪声或 dropout 随机流，correction 和固定 Inception
-构造都使用隔离的 CPU RNG fork。一步匹配 smoke 中，在 distribution 尚未启用时，
-`GATED-CONTROL` 与 `GATED-DIST` 的 loss、fresh loss、z/x0/v MSE、grad norm 和 LR 逐项
-完全相同；三者与 `FRESH-TIME` 的 loss、z/x0/v MSE 和 LR 也完全相同。FRESH 的 grad norm
-为 17.2608，而两个 gated 分支为 20.6561，这是零输出 correction 的末层仍会收到 fresh
-梯度所致，属于 `GATED-CONTROL` 要隔离的结构效应，不是随机流错位。
+为避免新增模块初始化悄然移动训练数据、噪声或 dropout 随机流，correction 使用隔离的 CPU
+RNG fork，固定 Inception 延迟到 distribution 真正启用的 step 才构造。一步匹配 smoke 中，
+`GATED-CONTROL` 与尚未启用辅助项的 `GATED-DIST` 的 loss、fresh loss、z/x0/v MSE、
+grad norm 和 LR 逐项完全相同；三者与 `FRESH-TIME` 的 loss、z/x0/v MSE 和 LR 也完全相同。
+FRESH 的 grad norm 为 17.2608，而两个 gated 分支为 20.6561，这是零输出 correction 的末层
+仍会收到 fresh 梯度所致，属于 `GATED-CONTROL` 要隔离的结构效应，不是随机流错位。
+
+正式第三支首次启动前又发现一个更隐蔽的公平性问题：原实现为了对完整 59.5M 参数测量
+fresh norm，令 distribution 分支全局设置 `functorch.donated_buffer=false`，而 control 保持
+默认编译路径。两支在 step 1--2 相同，但 BF16 数值差从 step 3 开始放大，故该试跑在 10k
+前约 step 1,290 中止并移至
+`aborted-gated-dist-donated-buffer-confound/`，不计正式实验。修复后两个梯度都只在 12,643
+个 correction 参数上测量，不再对 compiled backbone 做第二次 VJP，也不再修改全局
+donated-buffer。100-step 重复性审计显示两次相同 control 自 step 4 起也会因 BF16 fused
+AdamW 非确定性出现漂移；step 100 的 loss 差为 9.7e-5，而 lazy distribution 与首个
+control 差为 3.2e-4。由于辅助项在这些 runs 中均未启用，这确定了当前硬件栈的自然数值
+漂移量级；不能把“非 bitwise 相同”误报成辅助效果。正式结论只依赖固定评估噪声的 FID
+和完整分支结果。
 
 三次正式训练的配置在看结果前固定如下，运行顺序为 FRESH-TIME、GATED-CONTROL、
 GATED-DIST，均在 GPU 6 独立从 seed 42 随机初始化训练 300 epochs（58,500 optimizer
@@ -886,13 +900,25 @@ GATED-DIST 若在 15k 的 5k FID 至少为同 step GATED-CONTROL 的 1.5 倍，�
 满足，至少运行到 30k。若 15k、30k 两点都比 control 差 25% 以上且轨迹退化方向一致，
 同样提前停止。其他情况完整训练 300 epochs，避免凭单次 5k 波动剪枝。
 
-50-step 性能 smoke 只是短窗口预算而非正式 MFU 结论。按当前稳定值，GATED-DIST 在
-10k warmup 后的 48.5k steps 约需 3.9 小时，连同 warmup、首次编译、三次 5k FID、最终
-50k FID 和写盘约 4.2--4.5 小时；FRESH-TIME 约 1.1--1.3 小时，GATED-CONTROL 预计接近
-基线。三支顺序执行总预算约 6.5--7.5 小时。正式日志完成后必须用完整稳定窗口重算
-step time、MFU、GPU 利用率和各阶段时间占比，不能用该 smoke 外推替代实测。
+前两支正式结果已经完成：
 
-本周期当前正式训练计数为 0/3。完成三支（或按上述规则有效证伪）后，必须先做全局复盘
+| branch | FID@15k (5k) | FID@30k (5k) | FID@45k (5k) | ending FID@58.5k (50k) |
+|---|---:|---:|---:|---:|
+| FRESH-TIME | 15.3022 | 11.2849 | 10.3581 | 5.3542 |
+| GATED-CONTROL | 14.6932 | 10.7190 | 9.8580 | 5.0849 |
+| control 相对 fresh | -3.98% | -5.01% | -4.83% | -5.03% |
+
+因此 correction 结构加 fresh gradient 本身已经在四个固定观测点一致改善 FID；第三支必须
+以 `GATED-CONTROL` 而非 `FRESH-TIME` 为主对照，才能判断终点 KID 的增量价值。两支都按
+预注册规则选择 step 45k 作为后续扩展评测候选；ending 50k FID 保持当前最权威的比较。
+
+50-step 性能 smoke 只是短窗口预算而非正式 MFU 结论。按 0.2866 s/step，GATED-DIST 在
+10k warmup 后的 48.5k steps 约需 3.86 小时，连同约 12 分钟 warmup、首次 Inception/图
+编译、三次 5k FID、最终 50k FID 和写盘，预计从启动到完成约 4.2--4.5 小时。正式日志
+完成后必须用完整稳定窗口重算 step time、MFU、GPU 利用率和各阶段时间占比，不能用该
+smoke 外推替代实测。
+
+本周期当前正式训练计数为 2/3。完成第三支（或按上述规则有效证伪）后，必须先做全局复盘
 和同 root 全 Heun grid 采样分析，再允许设计 Cycle 07。
 
 ## 时间与吞吐分析
@@ -939,6 +965,21 @@ Heun forward 和辅助 backward，并除以本机 700 W H800 的 dense BF16 989 
 | Cycle 04 FRESH-FIXED-REPRO | 0.0667 | 3841 | 7.15 | 7.82% | 7.82% | 5.154 |
 | Cycle 04 FRESH-TIME | 0.0664 | 3855 | 7.15 | 7.85% | 7.85% | 5.154 |
 | Cycle 04 ONLINE-X0-TIME | 0.5400 | 474 | 13.94 | 0.97% | 3.70% | 19.736 |
+| Cycle 06 FRESH-TIME | 0.0682 | 3758 | 7.15 | 7.64% | 7.64% | 5.154 |
+| Cycle 06 GATED-CONTROL | 0.0709 | 3613 | 7.26 | 7.35% | 7.35% | 5.154 |
+| Cycle 06 GATED-DIST forced-aux smoke | 0.2866 | 894 | 9.19 | 1.82% | 4.97% | 14.078 |
+
+Cycle 06 的 distribution 方法级 FLOP 进一步按实际计算图拆分：fresh 主训练 5.154
+TF/step；16-sample EMA Heun prefix 与 current-model correction suffix 的 39 次 CFG base
+forward 合计约 8.376 TF/step；exact Inception 的 real forward、fake forward/backward 与
+MMD 合计实测 0.548 TF/step，总计 14.078 TF/step。辅助开启后单 step 比 control 慢约
+4.04 倍，但 counted FLOP 只增加到 2.73 倍，所以方法级 MFU 从 7.35% 降至 4.97%。
+独立 100-step 采样的稳定区间 GPU 指标约为 SM 75%、显存带宽 20%、功耗 325 W；这不是
+GPU 大面积空闲，而是 batch 16/32 的 39 次串行小模型调用与 FP32 Inception 无法接近
+H800 的 989-TFLOP/s 大矩阵峰值。显存仅约 9.19 GiB 也说明瓶颈不是容量。当前正式实验
+不通过改 batch、降低 rollout 频率或换 sampler 来追求表面利用率，因为这些都会改变已
+预注册的方法；先完成 FID 因果判断，若信号成立再单独注册 compile Inception、CUDA Graph
+或多 root 并行的等价内核优化。
 
 据此，58,500-step/300-epoch 的当前长窗口预算为：FRESH 稳定 step 的纯训练外推约
 1 小时 5 分；Cycle 04 实际从启动到完成训练和三次中途 FID 为 1 小时 8 分 48 秒；

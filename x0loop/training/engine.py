@@ -1879,10 +1879,15 @@ def maybe_apply_distribution_matching(
     )
 
     if dist_cfg.gradient_ratio > 0.0:
+        # Both gradients are measured in the only subspace the distribution
+        # objective is allowed to update.  Besides being the relevant control
+        # quantity, this avoids evaluating a second VJP through the compiled
+        # backbone: doing so requires disabling donated buffers globally and
+        # changes the nominally matched pre-aux optimization trajectory.
         fresh_norm, raw_aux_norm, cosine = _parameter_gradient_pair_stats(
             fwd.loss,
             kid,
-            denoiser,
+            denoiser.solver_correction,
         )
         warmup_fraction = min(scheduled_weight / max(dist_cfg.weight, 1.0e-12), 1.0)
         target_ratio = dist_cfg.gradient_ratio * warmup_fraction
@@ -1948,13 +1953,7 @@ def _configure_parameter_gradient_vjp(cfg: dict) -> bool:
         and int(clean_cfg.get("version", 1)) == 2
         and str(clean_cfg.get("aux_gradient_space", "output")).lower() == "parameter"
     )
-    distribution_cfg = cfg.get("distribution_matching", {}) or {}
-    distribution_needs_reusable_backward = (
-        bool(compile_cfg.get("enabled", False))
-        and bool(distribution_cfg.get("enabled", False))
-        and float(distribution_cfg.get("gradient_ratio", 0.0)) > 0.0
-    )
-    needs_reusable_backward = clean_needs_reusable_backward or distribution_needs_reusable_backward
+    needs_reusable_backward = clean_needs_reusable_backward
     if not needs_reusable_backward:
         return False
 
@@ -2063,19 +2062,6 @@ def train(cfg: dict) -> None:
     )
     distribution_cfg = build_distribution_matching_config(cfg)
     distribution_feature_extractor = None
-    if distribution_cfg.enabled:
-        # FeatureExtractorInceptionV3 initializes layers before loading fixed
-        # weights. Keep that irrelevant initialization out of the experiment's
-        # global CPU RNG stream so pre-aux fresh batches remain branch-identical.
-        with torch.random.fork_rng(devices=[]):
-            torch.manual_seed(0)
-            inception = FeatureExtractorInceptionV3(
-                "inception-v3-compat",
-                ["2048"],
-                feature_extractor_internal_dtype="float32",
-                verbose=False,
-            ).to(runtime.device)
-        distribution_feature_extractor = DifferentiableFIDInception(inception).to(runtime.device).eval()
     clean_loop_cfg = build_clean_loop_config(cfg)
     clean_loop_bank = None
     if clean_loop_cfg.enabled:
@@ -2233,6 +2219,25 @@ def train(cfg: dict) -> None:
                             f"[clean_loop] froze teacher EMA at step {resume.global_step}"
                         )
                 with maybe_no_sync(model_ctx.model, enabled=model_ctx.use_ddp and not did_optimizer_step):
+                    if (
+                        distribution_feature_extractor is None
+                        and distribution_matching_weight(distribution_cfg, resume.global_step) > 0.0
+                    ):
+                        # Construct Inception only when the auxiliary objective
+                        # first becomes active. Keeping distribution-specific
+                        # CUDA allocations out of warm-up removes a needless
+                        # pre-aux execution-path difference from the control.
+                        with torch.random.fork_rng(devices=[]):
+                            torch.manual_seed(0)
+                            inception = FeatureExtractorInceptionV3(
+                                "inception-v3-compat",
+                                ["2048"],
+                                feature_extractor_internal_dtype="float32",
+                                verbose=False,
+                            ).to(runtime.device)
+                        distribution_feature_extractor = DifferentiableFIDInception(inception).to(
+                            runtime.device
+                        ).eval()
                     fwd = compute_forward_batch(
                         cfg=cfg,
                         runtime=runtime,
