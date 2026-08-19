@@ -606,6 +606,85 @@ step-10k checkpoint 运行成熟 auxiliary step，得到 `aux_scale=0.51951`、�
 `0.10000`。全套测试为 83 passed。正式第三支随后从同一 step-10k checkpoint 续跑，
 保持原预注册 15k FID gate；修复前没有 auxiliary 更新，因此不存在回滚或挑选 checkpoint。
 
+### Cycle 04 run 3：ONLINE-X0-TIME 在 15k 门槛证伪
+
+修复后，正式 run 从它自己的完整 step-10k warmup checkpoint 继续；commit `5ed8a7f`、
+GPU 6、`git_dirty=false`，并保持预注册的完整 batch-256 fresh loss、batch-32 online
+Heun state、moving EMA native-x0 target 和实际参数梯度比 0.10。step-10k warmup 的补充
+固定 5k FID 为 19.5863；matched `FRESH-TIME` step-10k 为 19.3437，仅差 0.2426，排除
+了“独立 warmup 起点已经失效”的主要混杂。5k auxiliary 更新后的结果为：
+
+| run | step-10k FID | step-15k FID | 10k→15k 变化 | 相对 matched FRESH@15k |
+|---|---:|---:|---:|---:|
+| FRESH-TIME | 19.3437 | **14.9119** | -4.4318（改善 22.9%） | — |
+| ONLINE-X0-TIME | 19.5863 | **44.8095** | +25.2232（恶化 128.8%） | +29.8976（约 3.00 倍） |
+
+因此该分支按启动前冻结的 gate 提前停止，不运行 30k/45k 或 50k FID，计作一次有效证伪
+训练。中断发生在同步 evaluator 返回后；权威结果和轨迹均使用完整 step-15k checkpoint。
+训练后来得及继续约 420 steps，紧急 checkpoint 又被中断信号打断，产生的 85 MiB 不完整
+文件已删除，避免误加载；完整 step-15k checkpoint 与全部评估 JSON 保留。
+
+step 14.5k–15k 的 fresh loss 与 matched FRESH 几乎相同：均值 0.26351 对 0.26368；
+x0/v 诊断也略低而非变坏。auxiliary loss 已降至约 0.00108，实际参数梯度比每个记录点
+都为 0.10000。这说明 pixel/teacher consistency loss、fresh loss 和梯度范数控制均无法
+预警分布退化；10% 的 self-referential 方向连续积累 5k steps 仍足以改变生成分布。
+
+用 256 个相同 root noise/label 做 time-aware Heun-20/CFG-2.2 trace 后，ONLINE 的最终
+样本 RMS 为 1.09814，FRESH 为 0.98294（高 11.7%），pairwise RMS 距离为 0.38748。
+`|x|>1.5` 像素占比从 13.75% 升至 20.18%，`|x|>2` 从 2.06% 升至 5.23%；低噪声最后
+x0 drift 从 0.01199 增至 0.01523。与此同时，ONLINE 的平均 Heun correction 反而略低
+（0.002034 对 0.002090），最大相对 correction 也略低（0.2037 对 0.2212）。因此当前
+失败不是 solver 数值不自洽，而是 moving-EMA 自蒸馏沿一条错误但更自洽的轨迹放大动态
+范围；trajectory defect 改善不能替代 FID。原始 trace、逐步 JSON 和图像位于
+`runs/x0loop_v2_from_scratch/cycle04/trajectory_time_vs_online_step15000/`。
+
+稳定 500-record 窗口性能为 0.5400 s/step、474.1 image/s、13.94 GiB；主训练 MFU
+0.97%，计入 rollout、两次参数 VJP 和组合 backward 的方法级 MFU 3.70%，每步
+19.736 TFLOP。从 continuation 启动到 step 15k 训练约 46 分钟，5k FID 另用 90 秒。
+
+### Cycle 04 三次训练全局复盘
+
+1. **核心 FID**：FRESH-FIXED-REPRO 的权威 50k FID 为 6.1641；显式时间条件在所有
+   筛选点同向改善，并把权威 FID 降到 5.4704。ONLINE-X0-TIME 在 15k 即以 44.8095
+   被 time-aware FRESH 14.9119 明显支配。Cycle 04 的真实进展是建立更强的 time-aware
+   baseline，不是验证到 x0loop 收益。
+2. **公平性**：前两支均从随机初始化训练完整 300 epochs；第三支也从随机初始化开始，
+   10k warmup 后因代码故障从自身 checkpoint 无损续跑，并按预注册 15k gate 停止。
+   三者 fresh exposure、数据、LR、EMA 和 evaluator 一致；第三支另加辅助 batch，不替换
+   fresh。
+3. **闭环与 occupancy**：ONLINE 状态由实际 time-aware EMA Heun-20/CFG-2.2 在线生成，
+   solver index 均值约 9.5，覆盖完整 0–19 网格；endpoint、label/null-label 与最终 FID
+   sampler 对齐。失败不能归因于旧 bank endpoint、FIFO age 或高噪声 occupancy 集中。
+4. **梯度与监督**：实际全参数梯度比精确为 0.10，但 moving EMA 提供的是自身滞后
+   prediction，而非真实分布锚点。范数受控不代表累计方向安全；下一轮必须记录 fresh/aux
+   参数 cosine，并区分 moving-teacher feedback 与 paired-x0 目标本身。
+5. **采样过程**：time-aware FRESH 相比 fixed baseline 在末段 drift 更低并改善 FID；
+   ONLINE 又进一步降低部分中段 correction，却显著扩大最终动态范围并使 FID 崩溃。
+   因而后续不以 correction/consistency 单独作为成功条件。
+6. **计算效率**：time-aware FRESH 约 0.0664 s/step、7.85% MFU；ONLINE 为
+   0.5400 s/step、方法级 3.70% MFU，单 step 慢约 8.1 倍。除非 FID 先证明信号有效，
+   不再为当前 moving-EMA native-x0 目标继续做性能优化。
+7. **结论边界**：本轮否定“moving EMA + online Heun occupancy + native-x0 MSE +
+   10% 参数梯度”这一实现，不否定历史 x0 或 inference-state training。证据支持的是：
+   自洽性监督缺乏真实分布锚点时，可把 sampler 推向错误的稳定轨迹。
+
+### Cycle 05 启动前机制筛选
+
+在消耗下一组从零 300-epoch 训练前，先用 Cycle 04 ONLINE 自己的 step-10k checkpoint
+做不计正式训练次数的共享前缀筛选，精确隔离 moving teacher feedback：
+
+1. `PREFIX-FRESH`：关闭 auxiliary，续训 5k steps；
+2. `PREFIX-MOVING`：复用 Cycle 04 已完成结果；
+3. `PREFIX-FROZEN`：在 step 10k 冻结 EMA teacher，其他 online state、native-x0、
+   batch、参数梯度 0.10 和 evaluator 完全不变，续训 5k steps。
+
+三者必须使用同一个 step-10k 模型/optimizer/EMA 前缀。实现同时记录 fresh/aux 全参数
+cosine 和 combined/fresh cosine。`PREFIX-FROZEN` 若不能把 15k FID 恢复到 16.40 以下
+（matched FRESH 的 10% 范围），则停止所有 paired-x0 self-distillation，下一方向必须
+引入真实分布锚点或 solver-index gated correction；若恢复但未优于 14.9119，只证明
+moving feedback 是主要故障，仍不进入完整 300-epoch；只有低于 14.9119 且动态范围不
+比 FRESH 偏离超过 3%，才有资格进入下一组三分支从零正式周期。该筛选不能冒充从零结论。
+
 ## 时间与吞吐分析
 
 300 epochs 在 CIFAR-10、batch 256 下是 58,500 optimizer steps（每 epoch 约
@@ -649,6 +728,7 @@ Heun forward 和辅助 backward，并除以本机 700 W H800 的 dense BF16 989 
 | ONLINE-X0 dynamic smoke | 0.3867 | 666 | 8.61 | 1.35% | 4.04% | 15.441 |
 | Cycle 04 FRESH-FIXED-REPRO | 0.0667 | 3841 | 7.15 | 7.82% | 7.82% | 5.154 |
 | Cycle 04 FRESH-TIME | 0.0664 | 3855 | 7.15 | 7.85% | 7.85% | 5.154 |
+| Cycle 04 ONLINE-X0-TIME | 0.5400 | 474 | 13.94 | 0.97% | 3.70% | 19.736 |
 
 据此，58,500-step/300-epoch 的当前长窗口预算为：FRESH 稳定 step 的纯训练外推约
 1 小时 5 分；Cycle 04 实际从启动到完成训练和三次中途 FID 为 1 小时 8 分 48 秒；
