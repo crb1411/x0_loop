@@ -298,6 +298,111 @@ GAN 从 step-10k 后启用，首轮只用一个保守权重并做 warmup，不�
 D/G detach 与 checkpoint 保存成功；两个分支输出梯度比均精确为 0.100。eager 单步
 TERMINAL fake RMS 为 1.0066，没有复现 Cycle 02 的即时动态范围坍缩。
 
+### Cycle 03 筛选结果
+
+三个分支均在实现提交 `03c72bf` 上从同一个 Cycle 01 FRESH step-10k checkpoint 恢复，
+继续恰好 5,000 个 optimizer steps，并以同一 EMA、seed、label 顺序和
+Heun-20/CFG-2.2 协议评估。实际结果为：
+
+| Run | step-15k 固定 5k FID | 相对 FRESH | 纯训练 wall time | 稳定 s/step | img/s | 峰值显存 | 方法级 MFU | 决策 |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| FRESH | 15.9306 | — | 5m31s | 0.0653 | 3922.7 | 6.92 GiB | 7.98% | 同预算基线 |
+| DENOISE-GAN | 16.4591 | +0.5285 | 9m15s | 0.1152 | 2221.8 | 6.94 GiB | 4.53% | 停止，不做 50k |
+| TERMINAL-GAN | 17.9438 | +2.0133 | 21m54s | 0.2526 | 1013.4 | 8.64 GiB | 9.11% | 停止，不做 50k |
+
+这里的 wall time 只计训练；每条 5k FID 单独计时。FRESH 比预注册 smoke 进一步快，说明
+此前 12/21 小时的外推已经不适用于当前向量化、编译后的实现。TERMINAL-GAN 的主训练
+模型 MFU 仅 2.06%，但把 19 段 EMA/CFG rollout 与 D 计算纳入后，方法级 MFU 为 9.11%、
+每 step 22.772 TFLOP；较高的方法级 MFU 不代表更高计算效率，因为最终 FID 更差且每步
+耗时仍是 FRESH 的 3.87 倍。
+
+DENOISE-GAN 最后 100 steps 的 fresh loss 为 0.268933，接近 FRESH 的 0.268151；输出
+梯度比精确维持 0.10。D accuracy 为 0.771，real/fake logit 分别为 0.549/-0.612，说明
+该 control 的判别器确实提供了可分方向，但它仍未改善最终生成 FID。
+
+TERMINAL-GAN 最后 100 steps 的 fresh loss 为 0.273897，已高于 FRESH；输出梯度比虽然
+同样精确维持 0.10，但 D accuracy 只有 0.500，real/fake logit 分别为 -0.233696 和
+-0.233427，几乎完全重合。归一化器仍把极弱且不稳定的 adversarial 输出梯度放大到目标
+比例，G scale 在 0.1647–2.4759 间变化。terminal fake RMS 本身稳定在约 0.998，因此
+退化不是 rollout 当场数值坍缩，而是训练方向缺少可靠的密度比信息。
+
+### Cycle 03 修改训练方法后的采样分析
+
+三模型 step-15k 已用 64 个固定 root、seed 20260819、完整 Heun-20/CFG-2.2 重新生成
+trace；没有沿用 Cycle 02 的轨迹。结果位于
+`runs/x0loop_v2_from_scratch/cycle03/trajectory_analysis_step15000_threeway`：
+
+| 指标 | FRESH | DENOISE-GAN | TERMINAL-GAN |
+|---|---:|---:|---:|
+| endpoint RMS | 0.817177 | 0.817147 | 0.817394 |
+| 最终样本 RMS | 0.999436 | 0.999858 | 0.954461 |
+| 平均 Heun correction RMS | 0.001956 | 0.001989 | 0.003245 |
+| 最大相对 Heun correction | 0.128534 | 0.140660 | 0.456355 |
+| t=0.10 x0 drift RMS | 0.012658 | 0.013446 | 0.034447 |
+| t=0.05 x0 drift RMS | 0.020143 | 0.021703 | 0.080205 |
+
+FRESH 与 DENOISE-GAN 的最终同-root RMS 距离为 0.2865；FRESH 与 TERMINAL-GAN 为
+0.3067。TERMINAL-GAN 的异常从 `t<=0.20` 开始增长：相对 correction 在
+`t=0.20/0.15/0.10` 分别约为 0.0469/0.1244/0.4564，而 FRESH 约为
+0.0260/0.0443/0.1285。固定图像网格中语义仍大致一致，但 TERMINAL-GAN 对比度和纹理
+稍弱；这与最终 RMS 降低 4.5% 及 FID 退化同向。
+
+训练只对最后一个采样区间保留梯度，推理却在所有时间复用同一个忽略时间条件的共享
+backbone。因此“只训练最后一步”并不等于参数影响只局限于最后一步：更新从低噪声末段
+反向污染了整条共享 vector field，采样 trace 已直接显示这种传播。未来若再引入终点
+损失，必须显式限制其作用路径（例如 solver-index gated correction），不能只靠截断
+rollout graph 声称局部化。
+
+### Cycle 03 三次筛选训练复盘
+
+1. **FID 门槛**：DENOISE-GAN 与 TERMINAL-GAN 分别比同轮 FRESH 差 0.5285 和
+   2.0133；均未通过启动前冻结的 15k 门槛，因此不运行 50k FID，也不进入从零 300
+   epochs。当前结论只否定这两个分布损失实现，不否定历史 x0 或终点匹配假设。
+2. **可比性**：三者共享相同 step-10k 前缀、5k continuation、fresh batch、LR、EMA、
+   数据顺序和 evaluator。GAN 另加 32 样本，不替换 256 个 fresh 样本；fresh exposure
+   完整相同。
+3. **梯度约束**：两个 GAN 分支在 1,000-step warmup 后均实测保持 0.10 输出梯度比。
+   但 TERMINAL 的 D 准确率约 0.5，证明“范数受控”不等于“方向可信”；下一轮必须新增
+   辅助方向 readiness 门槛。
+4. **occupancy**：TERMINAL-GAN 的 no-grad EMA prefix 覆盖实际 Heun-20 全网格，学生只
+   对 sampler 本来采用 Euler 的最后区间反传。没有 Cycle 01 bank 集中在高噪声的缺陷。
+5. **off-policy/replay**：本轮不使用 replay；每步由当前 EMA 在线生成 terminal state。
+   因此退化不能归因于 FIFO age、depth 或容量，继续扫描 bank size 没有依据。
+6. **训练/推理闭环**：endpoint、EMA prefix、Heun grid、CFG 2.2、label/null-label、固定
+   时间条件和最后 Euler transition 均与评估 kernel 对齐。剩余问题是 adversarial 方向
+   质量与共享参数作用域，不是 transition 错位。
+7. **不同 NFE**：候选在主 NFE-20 筛选即被支配，按停止规则不追加 NFE 4/8/20。
+   因而尚无证据把终点 GAN 定位为少步纠错。
+8. **precision/recall**：没有为被支配候选运行昂贵的 50k distribution metrics。终点
+   RMS 和图像网格提示轻微动态范围/纹理损失，但不把视觉判断冒充 precision/recall。
+9. **采样过程**：DENOISE-GAN 基本跟随 FRESH；TERMINAL-GAN 从 t=0.2 后逐步偏离，
+   t=0.05 x0 drift 为 FRESH 的 3.98 倍，最大相对 correction 为 3.55 倍。修改终点训练
+   目标确实改变了完整 sampler，而且方向与 FID 退化一致。
+10. **研究决策**：停止 naive terminal GAN、GAN 权重扫描和判别器容量盲扫。下一轮先
+    验证 frozen-generator 下 critic 是否能在 held-out 样本上可靠区分 real/fake，并测量
+    辅助参数梯度与 fresh 梯度的方向关系；readiness 未通过前，不启动第四轮生成器训练。
+
+### Cycle 04 启动前诊断门槛
+
+Cycle 04 暂不预注册为“更强 GAN”。其候选方向是严格的两分布 score-difference 目标：
+冻结的高质量 real-score teacher 与在当前生成分布上训练的 fake-score model 共同给出
+方向，并采用 two-time-scale 更新。这个方向来自 DMD 对真实/生成 score 差的定义，以及
+DMD2 对 fake critic 不准确会导致训练不稳定的修正，而不是把普通判别器损失改名为 DMD：
+[DMD](https://arxiv.org/abs/2311.18828)、[DMD2](https://arxiv.org/abs/2405.14867)、
+[官方 DMD2 实现](https://github.com/tianweiy/DMD2)。它也继续遵循 Self Forcing 的实际
+inference occupancy 与截断反传思想：[Self Forcing](https://arxiv.org/abs/2506.08009)。
+
+在冻结 Cycle 04 三分支之前，必须先完成不更新生成器的诊断：
+
+1. 固定 terminal 样本集，分别训练/验证 critic，报告 held-out accuracy/AUC、real/fake
+   logit margin 和过拟合差；若验证端仍接近随机，当前 critic 不具备 generator 信号资格。
+2. 在固定 fresh/terminal batch 上分别计算参数梯度，报告 cosine、范数和分层贡献；即使
+   输出梯度范数是 0.10，若共享 backbone 梯度与 fresh 长期负相关，也不能直接施加。
+3. 若 score critic 通过 readiness，再比较“全共享 backbone”与“只在声明 solver index
+   生效的 correction path”；训练 sampler 必须同步启用相同路径。
+4. 只有诊断通过后，才冻结 FRESH、score-difference、gated-ablation 三次训练的假设、
+   预算和停止规则。否则更换目标或 critic 定义，不消耗三次训练周期。
+
 ## 时间与吞吐分析
 
 300 epochs 在 CIFAR-10、batch 256 下是 58,500 optimizer steps（每 epoch 约
