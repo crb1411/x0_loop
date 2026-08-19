@@ -118,6 +118,37 @@ def test_clean_loop_rejects_unknown_teacher_mode():
         })
 
 
+def test_clean_loop_accepts_relative_frozen_teacher_checkpoint():
+    cfg = build_clean_loop_config({
+        "clean_loop": {
+            "enabled": True,
+            "version": 2,
+            "teacher_mode": "frozen",
+            "teacher_checkpoint": "runs/teacher.pt",
+        }
+    })
+    assert cfg.teacher_checkpoint == "runs/teacher.pt"
+
+
+@pytest.mark.parametrize(
+    "teacher_mode,teacher_checkpoint",
+    [("moving", "runs/teacher.pt"), ("frozen", "/tmp/teacher.pt")],
+)
+def test_clean_loop_rejects_invalid_teacher_checkpoint(
+    teacher_mode,
+    teacher_checkpoint,
+):
+    with pytest.raises(ValueError, match="teacher_checkpoint"):
+        build_clean_loop_config({
+            "clean_loop": {
+                "enabled": True,
+                "version": 2,
+                "teacher_mode": teacher_mode,
+                "teacher_checkpoint": teacher_checkpoint,
+            }
+        })
+
+
 def test_parameter_gradient_norm_matches_manual_norm_without_populating_grad():
     layer = torch.nn.Linear(2, 1, bias=False)
     x = torch.tensor([[1.0, 2.0], [-3.0, 4.0]])

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
@@ -1627,6 +1628,45 @@ def _clone_ema(model: torch.nn.Module, ema: EMA) -> EMA:
     return clone
 
 
+def _load_frozen_teacher_checkpoint(
+    model: torch.nn.Module,
+    ema: EMA,
+    checkpoint_path: str,
+    cfg: dict,
+) -> tuple[EMA, int]:
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(checkpoint_path)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if "ema" not in checkpoint:
+        raise ValueError(f"Frozen teacher checkpoint has no EMA state: {checkpoint_path}")
+    teacher_cfg = checkpoint.get("config") or {}
+    teacher_ignore_time = bool(
+        teacher_cfg.get("model_conditioning", {}).get("ignore_time", False)
+    )
+    student_ignore_time = bool(
+        cfg.get("model_conditioning", {}).get("ignore_time", False)
+    )
+    if teacher_ignore_time != student_ignore_time:
+        raise ValueError(
+            "Frozen teacher/student model_conditioning.ignore_time mismatch: "
+            f"teacher={teacher_ignore_time}, student={student_ignore_time}"
+        )
+    teacher = EMA(model=model, decay=ema.decay)
+    expected_keys = set(teacher.shadow)
+    teacher_keys = set(checkpoint["ema"].get("shadow", {}))
+    if teacher_keys != expected_keys:
+        missing = sorted(expected_keys - teacher_keys)
+        unexpected = sorted(teacher_keys - expected_keys)
+        raise ValueError(
+            "Frozen teacher EMA keys do not match the student model: "
+            f"missing={missing[:5]}, unexpected={unexpected[:5]}"
+        )
+    teacher.load_state_dict(checkpoint["ema"])
+    checkpoint_step = int(checkpoint.get("step", 0))
+    del checkpoint
+    return teacher, checkpoint_step
+
+
 def log_training_step(*, runtime: RuntimeContext, loop_cfg: LoopConfig, resume: ResumeState, meters: MetricLogger, tbin_stats: TimeBinAccumulator, epoch: int, micro_step: int, current_accum_steps: int, progress: ProgressEstimator | None = None) -> None:
     if not should_log_training_step(loop_cfg=loop_cfg, resume=resume):
         return
@@ -1737,6 +1777,18 @@ def train(cfg: dict) -> None:
             resume.clean_teacher_ema_state = None
             if runtime.is_main:
                 runtime.logger.log_text("[clean_loop] restored frozen teacher EMA from checkpoint")
+        elif clean_loop_cfg.teacher_checkpoint is not None:
+            clean_teacher_ema, teacher_step = _load_frozen_teacher_checkpoint(
+                denoiser,
+                ema,
+                clean_loop_cfg.teacher_checkpoint,
+                cfg,
+            )
+            if runtime.is_main:
+                runtime.logger.log_text(
+                    "[clean_loop] loaded frozen teacher EMA: "
+                    f"path={clean_loop_cfg.teacher_checkpoint}, step={teacher_step}"
+                )
         elif resume.global_step > clean_loop_cfg.warmup_steps:
             raise ValueError(
                 "A frozen-teacher resume after warmup requires a checkpoint with "

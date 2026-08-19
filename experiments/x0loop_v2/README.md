@@ -112,6 +112,12 @@ X0LOOP_AUX_GRADIENT_RATIO=0.10 X0LOOP_FINAL_FID_ENABLED=false \
   experiments/x0loop_v2/run_from_scratch.sh online-x0-time-frozen
 ```
 
+For an explicitly registered external frozen teacher, also set the
+workspace-relative `X0LOOP_TEACHER_CHECKPOINT`. The loader requires an EMA,
+matching time-conditioning semantics, and an exact parameter-key match; the
+resolved path is stored in the run config. This is an external-teacher
+distillation experiment and must not be reported as self-training.
+
 ## Evaluation and analysis
 
 Compare aligned Heun trajectories after any training-method change:

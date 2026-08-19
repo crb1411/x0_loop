@@ -65,6 +65,7 @@ clean_loop:
   # bank-x0/online-x0 launch branches override this to native x0 distillation.
   aux_target: velocity
   teacher_mode: moving
+  teacher_checkpoint: null
   solver_steps: 20
   sampler: heun
   guidance_scale: 2.2

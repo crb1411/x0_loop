@@ -694,6 +694,50 @@ cosine 为 0.9968/0.9959，实际梯度比均为 0.10000。额外从包含 froze
 恢复一步，日志确认 teacher 正确恢复而非重新快照。上述 smoke 只验证实现，不参与 FID
 判断。
 
+#### Cycle 05 共享前缀机制筛选结果
+
+三支均从 Cycle 04 ONLINE 自己的同一个 step-10k model/optimizer/EMA checkpoint 开始，
+各续训 5k steps；moving 复用既有结果，另两支由 commit `a070e6c` 在 GPU 6 运行。固定
+EMA/Heun-20/CFG-2.2/5k FID 为：
+
+| shared-prefix branch | teacher | step-15k FID | 相对 PREFIX-FRESH |
+|---|---|---:|---:|
+| PREFIX-FRESH | 无 auxiliary | **14.9085** | — |
+| PREFIX-MOVING | 当前 moving EMA | 44.8095 | +29.9011 |
+| PREFIX-FROZEN | step-10k frozen EMA | 20.4158 | +5.5073 |
+
+PREFIX-FRESH 与独立从零 FRESH-TIME step-15k 的 14.9119 只差 0.00345，证明共同前缀和
+continuation 没有隐藏质量问题。冻结 teacher 相比 moving 恢复 24.3937 FID，确认 moving
+teacher/student 正反馈是动态范围崩溃的主要来源；但 frozen 仍未达到预注册 16.40 恢复
+线，更未优于 FRESH。因此不启动 paired-x0 的从零 300-epoch 正式周期，也不通过降低
+梯度比例继续扫描。
+
+256 个同 root 三模型 trace 显示，PREFIX-FRESH/FROZEN/MOVING 最终 RMS 分别为
+1.00118/1.00443/1.09814；frozen 相对 fresh 仅高 0.32%，`|x|>1.5` 占比也为
+14.85%/14.92%，已经消除 moving 的尺度膨胀。frozen 的平均 Heun correction 更低
+（0.001966 对 fresh 0.002119），多数中低噪声 x0 drift 也更低，但最终 pairwise RMS
+仍为 0.22376，FID 明显更差。它说明 frozen step-10k teacher 把 student 约束在旧的、
+FID 19.5863 的 inference field 附近，阻止了无辅助 FRESH 在 10k→15k 改善到 14.9085；
+“更直/更自洽”依旧不是“更接近真实分布”。原始结果在
+`runs/x0loop_v2_from_scratch/cycle05-screen/trajectory_prefix_three_step15000/`。
+
+frozen 全窗口 aux 参数 cosine 约 0.49–0.52，combined/fresh cosine 约 0.9967–0.9969；
+aux loss 从约 0.00335 降至 0.00280，实际梯度比始终 0.10000。即使单步全局方向与 fresh
+近乎同向，持续的子空间偏置仍足以损伤生成语义。由此停止 moving/frozen EMA
+paired-x0 **self-distillation**。下一项只允许测试一个不计正式训练次数的强锚点诊断：
+固定使用已收敛 FRESH-TIME step-58.5k EMA（权威 FID 5.4704）生成相同 Heun occupancy
+和 native-x0 target，student 仍从共同 step-10k 前缀续训 5k。该分支是外部 teacher
+distillation readiness，不是 x0loop 改善，也不能冒充从零结果；它必须把 15k FID 降到
+13.42 以下（相对 PREFIX-FRESH 至少改善 10%）且最终 RMS 偏差不超过 3%，才证明
+inference-state paired target 在 teacher 有真实数据质量锚点时值得保留。否则彻底停止
+paired target，转向显式终点分布匹配和 solver-index gated correction。
+
+强 teacher 诊断实现允许 frozen mode 从显式 workspace-relative checkpoint 读取 EMA，并
+校验 time-conditioning 和全部参数 key；路径写入 resolved config，teacher shadow 随 student
+checkpoint 继续保存。全套测试为 89 passed。用 FRESH-TIME step-58.5k EMA 做 one-step
+smoke，日志确认加载 step 58,500，aux 参数 cosine 为 0.1916、combined/fresh cosine 为
+0.9954、实际比例为 0.10000；实现门槛通过，数值结果仍必须由预注册 5k FID 判断。
+
 ## 时间与吞吐分析
 
 300 epochs 在 CIFAR-10、batch 256 下是 58,500 optimizer steps（每 epoch 约

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import torch
@@ -28,6 +29,7 @@ class CleanLoopConfig:
     aux_scale_max: float = 10.0
     aux_target: str = "velocity"
     teacher_mode: str = "moving"
+    teacher_checkpoint: str | None = None
     solver_steps: int = 20
     sampler: str = "heun"
     guidance_scale: float = 2.2
@@ -59,6 +61,10 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
     aux_scale_max = float(raw.get("aux_scale_max", 10.0))
     aux_target = str(raw.get("aux_target", "velocity")).lower()
     teacher_mode = str(raw.get("teacher_mode", "moving")).lower()
+    teacher_checkpoint_raw = raw.get("teacher_checkpoint")
+    teacher_checkpoint = (
+        str(teacher_checkpoint_raw) if teacher_checkpoint_raw is not None else None
+    )
     solver_steps = int(raw.get("solver_steps", 20))
     sampler = str(raw.get("sampler", "heun")).lower()
     guidance_scale = float(raw.get("guidance_scale", 2.2))
@@ -107,6 +113,10 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
             "clean_loop.teacher_mode must be moving | frozen, "
             f"got {teacher_mode!r}"
         )
+    if teacher_checkpoint is not None and teacher_mode != "frozen":
+        raise ValueError("clean_loop.teacher_checkpoint requires teacher_mode=frozen")
+    if teacher_checkpoint is not None and os.path.isabs(teacher_checkpoint):
+        raise ValueError("clean_loop.teacher_checkpoint must be workspace-relative")
     if solver_steps <= 0:
         raise ValueError(f"clean_loop.solver_steps must be > 0, got {solver_steps}")
     if sampler != "heun":
@@ -138,6 +148,7 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
         aux_scale_max=aux_scale_max,
         aux_target=aux_target,
         teacher_mode=teacher_mode,
+        teacher_checkpoint=teacher_checkpoint,
         solver_steps=solver_steps,
         sampler=sampler,
         guidance_scale=guidance_scale,
