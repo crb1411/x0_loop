@@ -43,6 +43,17 @@ class RecordingIncrementNet(torch.nn.Module):
         return x + 1.0
 
 
+class LabelOutputModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def forward(self, x, t, cond=None):
+        del t
+        self.calls += 1
+        return cond.to(x.dtype).reshape(-1, 1, 1, 1).expand_as(x)
+
+
 def test_flow_euler_and_heun_reach_constant_x0():
     shape = (2, 3, 4, 4)
     target = torch.randn(shape)
@@ -69,6 +80,26 @@ def test_flow_euler_and_heun_reach_constant_x0():
         if sampler in {"euler", "heun", "ddim"}:
             assert result["trace"][0]["x_euler"].shape == target.shape
             assert result["trace"][0]["velocity"].shape == target.shape
+
+
+def test_cfg_conditional_and_unconditional_paths_share_one_forward():
+    shape = (2, 1, 1, 1)
+    model = LabelOutputModel()
+    process = FlowProcess(schedule=TimeSchedule(mode="flow", num_steps=1000), output_target="x0")
+    cond = torch.tensor([2, 3])
+    null_cond = torch.tensor([0, 0])
+
+    actual = process._model_output(
+        model,
+        torch.zeros(shape),
+        torch.ones(shape[0]),
+        cond,
+        null_cond,
+        2.0,
+    )
+
+    assert model.calls == 1
+    assert torch.equal(actual.flatten(), torch.tensor([4.0, 6.0]))
 
 
 def test_heun_trace_exposes_local_solver_correction():

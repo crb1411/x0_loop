@@ -155,11 +155,15 @@ class FlowProcess(BaseProcess):
 
     @staticmethod
     def _model_output(model, x, t, cond, null_cond, guidance_scale):
-        out = model(x, t, cond=cond)
         if cond is not None and null_cond is not None and float(guidance_scale) != 1.0:
-            out_uncond = model(x, t, cond=null_cond)
-            out = out_uncond + float(guidance_scale) * (out - out_uncond)
-        return out
+            both = model(
+                torch.cat((x, x), dim=0),
+                torch.cat((t, t), dim=0),
+                cond=torch.cat((cond, null_cond), dim=0),
+            )
+            out, out_uncond = both.chunk(2, dim=0)
+            return out_uncond + float(guidance_scale) * (out - out_uncond)
+        return model(x, t, cond=cond)
 
     @staticmethod
     def _model_time(model, path_t: torch.Tensor) -> torch.Tensor:

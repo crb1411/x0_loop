@@ -17,8 +17,9 @@
 - 主训练：300 epochs，batch size 256，共 58,500 optimizer steps。
 - 优化器：AdamW；10k warmup 后 cosine，LR 3e-4 到 5e-5。
 - EMA decay：0.996。
-- 中途评估：每 5,000 step 保存 checkpoint，并计算固定噪声 Heun-20/CFG-2.2
-  的 5k FID。
+- 中途评估：每 5,000 step 保存 checkpoint；只在 15k/30k/45k 计算固定噪声
+  Heun-20/CFG-2.2 的 5k FID，最终 checkpoint 直接进行 50k FID。中途 FID 是
+  决策门而非训练组成部分。
 - 最终评估：50k FID；随后对最有解释价值的 checkpoint 补 NFE 4/8/20 的
   FID、KID、precision、recall。
 - 训练和 FID 随机流隔离；不同方法的 fresh batch 在相同 seed 下尽量保持一致。
@@ -102,6 +103,33 @@ ONLINE-15k 出现 FID 大幅退化后，先做了同 step、同 root 的 FRESH/O
 
 待三次训练完成后填写。修改必须由最终 FID 和采样轨迹共同支持。
 
+## 时间与吞吐分析
+
+300 epochs 在 CIFAR-10、batch 256 下是 58,500 optimizer steps（每 epoch 约
+195 steps）。此前估计的 12–13 小时 ONLINE 与 21–25 小时 BANK-FIX 并非 epoch
+配置过大，而是旧辅助实现把单 step 分别从 FRESH 的约 0.107 秒放大到约
+0.87–1.0 秒和 1.5–1.6 秒。
+
+旧 BANK-FIX 的主要瓶颈是按 solver index 分组后，针对很小的 parent batch 串行执行
+EMA teacher 和 CFG forward；平均 depth 约 9 时会产生几十到上百次小 kernel，实测
+GPU 利用率仅约 24%。优化保持训练和采样的 Heun-20/CFG-2.2 数学定义不变：
+
+1. 不同 solver time 的 parent state 合并成一个异构时间 batch，一次完成 batched
+   Heun 更新；BANK 稳态由约 1.5–1.6 降至约 0.276 秒/step。
+2. CFG conditional/unconditional 合并成一次双倍 batch forward；BANK 进一步降至
+   约 0.210 秒/step。
+3. `torch.compile(mode=default)` 修复 eager/compile checkpoint 与 EMA key 兼容后，
+   FRESH 稳态由约 0.107 降至约 0.050 秒/step；BANK 组合稳态约 0.19 秒/step。
+   `reduce-overhead` 会与连续 CFG CUDA Graph 输出复用冲突，明确不采用。
+4. 测试过每 4 step 集中刷新 128 条 bank state，但稳态反而约 0.27 秒/step，原因是
+   CPU bank 写入突发；默认保留每 step 刷新。
+
+据此，后续正常 300-epoch 预算调整为：FRESH 纯训练约 50 分钟；向量化、编译后的
+BANK-FIX 纯训练约 2.5–3 小时。中途 5k FID 从十次缩减为 15k/30k/45k 三次，约
+5 分钟；最终 50k FID 约 15 分钟。实际 wall time 还包含首次编译约 1–2 分钟和
+checkpoint 写盘。不能仅为提高利用率增大全局 batch：这会减少 300 epochs 内的
+optimizer steps 并改变 FID 对照定义。
+
 ## 运行记录
 
 ### 2026-08-19：Cycle 01 启动
@@ -159,8 +187,8 @@ ONLINE-15k 出现 FID 大幅退化后，先做了同 step、同 root 的 FRESH/O
   FRESH 最终报告 checkpoint 确定为 step 45,000。
 - ONLINE step 15,000 的 5k FID 为 `26.47479848787509`。它比同 step FRESH
   `16.76314923002724` 差 9.71，也比自身 step-10k warmup 退化 4.29，是明显负向信号。
-  为避免中途改方法污染比较，至少继续到 20k 判断是否只是辅助项启用后的短暂适应期；
-  在 Cycle 01 三次训练复盘前不据此单点修改 BANK-FIX 定义。
+  同 root sampler trace 又确认低噪声末段动态范围坍缩，因此在 step 15,102 提前终止，
+  避免继续消耗约 11 小时；BANK-FIX 仍按原定义运行到 15k 决策门后再统一复盘。
 
 ## 运行命令
 

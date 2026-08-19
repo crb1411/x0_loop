@@ -114,11 +114,15 @@ class Denoiser(nn.Module):
         return uncond_out + float(guidance_scale) * (cond_out - uncond_out)
 
     def model_output(self, x: torch.Tensor, t: torch.Tensor, *, cond=None, null_cond=None, guidance_scale: float = 1.0) -> torch.Tensor:
-        out = self.forward(x, t, cond=cond)
         if cond is not None and null_cond is not None and float(guidance_scale) != 1.0:
-            out_uncond = self.forward(x, t, cond=null_cond)
-            out = self.cfg_combine(out, out_uncond, guidance_scale)
-        return out
+            both = self.forward(
+                torch.cat((x, x), dim=0),
+                torch.cat((t, t), dim=0),
+                cond=torch.cat((cond, null_cond), dim=0),
+            )
+            out, out_uncond = both.chunk(2, dim=0)
+            return self.cfg_combine(out, out_uncond, guidance_scale)
+        return self.forward(x, t, cond=cond)
 
     @torch.no_grad()
     def sample(

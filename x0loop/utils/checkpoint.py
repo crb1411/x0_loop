@@ -35,6 +35,7 @@ def _candidate_state_dicts(state_dict: dict) -> list[tuple[str, dict]]:
         ("net.module._orig_mod.", "net."),
         ("net.module.", "net."),
         ("net._orig_mod.", "net."),
+        ("net.", "net._orig_mod."),
         ("net.", "net.module."),
         ("net.", "net.module._orig_mod."),
         ("net._orig_mod.", "net.module._orig_mod."),
@@ -68,6 +69,18 @@ def _load_model_state_with_fallback(model, state_dict: dict, strict: bool = True
     if last_err is not None:
         raise last_err
     return {"strict": bool(strict), "prefix": "none", "missing_keys": [], "unexpected_keys": []}
+
+
+def _adapt_ema_state_to_model(model, state: dict) -> dict:
+    """Align EMA parameter names across eager/compile/DDP wrappers."""
+    shadow = state.get("shadow")
+    if not isinstance(shadow, dict):
+        return state
+    target = {name for name, param in model.named_parameters() if param.requires_grad}
+    for _, candidate in _candidate_state_dicts(shadow):
+        if set(candidate) == target:
+            return {**state, "shadow": candidate}
+    return state
 
 
 def _get_fsdp_mode(model) -> str:
@@ -190,6 +203,6 @@ def load_checkpoint(
     if scaler is not None and "scaler" in ckpt:
         scaler.load_state_dict(ckpt["scaler"])
     if ema is not None and "ema" in ckpt:
-        ema.load_state_dict(ckpt["ema"])
+        ema.load_state_dict(_adapt_ema_state_to_model(model, ckpt["ema"]))
     ckpt["_load_info"] = load_info
     return ckpt

@@ -1,5 +1,6 @@
 import types
 
+import pytest
 import torch
 
 from x0loop.core.schedules import TimeSchedule
@@ -13,6 +14,8 @@ from x0loop.training.clean_loop import (
     build_clean_loop_config,
     sample_clean_loop_t1,
 )
+from x0loop.training.engine import _teacher_heun_step_batched
+from x0loop.utils.checkpoint import _adapt_ema_state_to_model, _load_model_state_with_fallback
 
 
 def test_clean_loop_config_accepts_requested_aliases():
@@ -41,6 +44,17 @@ def test_clean_loop_config_accepts_requested_aliases():
     assert cfg.bank_input_mode == "step"
     assert cfg.t1_sampler == "local_uniform"
     assert cfg.t1_delta == 0.02
+
+
+def test_clean_loop_refresh_interval_must_be_positive():
+    with pytest.raises(ValueError, match="refresh_interval"):
+        build_clean_loop_config({
+            "clean_loop": {
+                "enabled": True,
+                "version": 2,
+                "refresh_interval": 0,
+            }
+        })
 
 
 def test_clean_loop_bank_fifo_capacity_and_sample_shapes():
@@ -119,3 +133,57 @@ def test_trajectory_bank_preserves_v2_metadata():
     assert torch.equal(sampled.depth, sampled.solver_index)
     assert torch.all(sampled.root_noise_id == 10)
     assert torch.all(sampled.producer_step == 7)
+
+
+def test_batched_teacher_heun_supports_heterogeneous_grid_pairs():
+    class Denoiser:
+        def model_output(self, x, t, **kwargs):
+            del kwargs
+            return t.reshape(-1, 1, 1, 1).expand_as(x)
+
+    class Process:
+        def velocity_from_output(self, x, t, output, aux):
+            del x, t, aux
+            return output
+
+    x = torch.zeros(2, 1, 1, 1)
+    t = torch.tensor([1.0, 0.5])
+    s = torch.tensor([0.75, 0.0])
+    actual, velocity, velocity_s = _teacher_heun_step_batched(
+        denoiser=Denoiser(),
+        process=Process(),
+        x=x,
+        t=t,
+        s=s,
+        cond=None,
+        null_cond=None,
+        guidance_scale=1.0,
+    )
+
+    expected = ((s - t) * 0.5 * (t + s)).reshape_as(x)
+    assert torch.allclose(actual, expected)
+    assert torch.equal(velocity.flatten(), t)
+    assert torch.equal(velocity_s.flatten(), s)
+
+
+def test_checkpoint_and_ema_load_across_compile_wrapper_prefix():
+    class CompiledLike(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.net = torch.nn.Module()
+            self.net._orig_mod = torch.nn.Linear(2, 2)
+
+    model = CompiledLike()
+    eager_weight = torch.full_like(model.net._orig_mod.weight, 3.0)
+    eager_bias = torch.full_like(model.net._orig_mod.bias, 4.0)
+    eager = {"net.weight": eager_weight, "net.bias": eager_bias}
+
+    info = _load_model_state_with_fallback(model, eager)
+    ema_state = _adapt_ema_state_to_model(model, {"decay": 0.9, "shadow": eager})
+
+    assert info["prefix"] == "net.->net._orig_mod."
+    assert torch.equal(model.net._orig_mod.weight, eager_weight)
+    assert set(ema_state["shadow"]) == {
+        "net._orig_mod.weight",
+        "net._orig_mod.bias",
+    }

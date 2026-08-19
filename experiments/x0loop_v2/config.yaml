@@ -59,6 +59,7 @@ clean_loop:
   sampler: heun
   guidance_scale: 2.2
   root_fraction: 0.25
+  refresh_interval: 1
   drop_fraction: 0.5
 loss:
   outer_weight: skew_triangular
@@ -79,7 +80,7 @@ augment:
 train:
   seed: 42
   deterministic: false
-  epochs: 500
+  epochs: 300
   run_steps: 5000
   batch_size: 256
   gradient_accumulation_steps: 1
@@ -105,9 +106,9 @@ eval:
   enabled: false
 gen_eval:
   # FID is the primary iteration objective. Use a cheaper fixed-noise 5k FID
-  # every checkpoint interval, then one 50k FID at the end.
+  # at sparse decision gates, then one 50k FID at the end.
   enabled: true
-  every_steps: 500
+  every_steps: 15000
   seed: 20260819
   num_samples: 5000
   batch_size: 256

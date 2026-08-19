@@ -29,6 +29,7 @@ class CleanLoopConfig:
     sampler: str = "heun"
     guidance_scale: float = 2.2
     root_fraction: float = 0.25
+    refresh_interval: int = 1
     drop_fraction: float = 0.5
 
 
@@ -56,6 +57,7 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
     sampler = str(raw.get("sampler", "heun")).lower()
     guidance_scale = float(raw.get("guidance_scale", 2.2))
     root_fraction = float(raw.get("root_fraction", 0.25))
+    refresh_interval = int(raw.get("refresh_interval", 1))
     drop_fraction = float(raw.get("drop_fraction", 0.5))
     if bank_size <= 0:
         raise ValueError(f"clean_loop.bank_size must be > 0, got {bank_size}")
@@ -93,6 +95,8 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
         raise ValueError("clean_loop v2 currently locks the training kernel to sampler=heun")
     if not (0.0 <= root_fraction <= 1.0):
         raise ValueError(f"clean_loop.root_fraction must be in [0,1], got {root_fraction}")
+    if refresh_interval <= 0:
+        raise ValueError(f"clean_loop.refresh_interval must be > 0, got {refresh_interval}")
     if not (0.0 <= drop_fraction < 1.0):
         raise ValueError(f"clean_loop.drop_fraction must be in [0,1), got {drop_fraction}")
     return CleanLoopConfig(
@@ -117,6 +121,7 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
         sampler=sampler,
         guidance_scale=guidance_scale,
         root_fraction=root_fraction,
+        refresh_interval=refresh_interval,
         drop_fraction=drop_fraction,
     )
 
