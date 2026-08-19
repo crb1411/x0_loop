@@ -32,7 +32,7 @@ paths. GPU 7 is preferred, with GPU 6 as fallback.
 `run_from_scratch.sh` has explicit names so historical definitions remain
 reproducible:
 
-| branch | rollout source | auxiliary target |
+| branch | rollout source | auxiliary target/control |
 |---|---|---|
 | `fresh` | none | none |
 | `fresh-fixed-repro` | none, fixed model time 0.5 | none |
@@ -41,6 +41,7 @@ reproducible:
 | `bank-x0` | stratified EMA Heun replay | teacher native x0 |
 | `online` | current EMA online Heun rollout | legacy teacher velocity |
 | `online-x0` | current EMA online Heun rollout | teacher native x0 |
+| `online-x0-time` | time-aware EMA online Heun rollout | native x0, 10% parameter-gradient norm |
 | `denoise-gan` | fresh noised training state | class-conditional x0 distribution loss |
 | `terminal-gan` | EMA Heun-20 prefix, differentiable final Euler | class-conditional terminal distribution loss |
 
@@ -87,10 +88,13 @@ X0LOOP_FINAL_FID_ENABLED=false \
   experiments/x0loop_v2/run_from_scratch.sh terminal-gan
 ```
 
-`X0LOOP_COMPILE_DYNAMIC=true` is an optional, numerically smoke-tested online
-rollout optimization. It has a longer initial compilation but avoids static
-batch-shape recompilations. It must be recorded in the run configuration and
-must not be mixed across compared branches without a matching baseline.
+`X0LOOP_COMPILE_DYNAMIC=true` is an optional, numerically smoke-tested
+optimization for the historical output-gradient online branches. It has a
+longer initial compilation but avoids static batch-shape recompilations. Exact
+parameter-gradient VJPs retain the graph and are incompatible with the current
+AOTAutograd donated-buffer dynamic path, so `online-x0-time` formally locks
+`compile.dynamic=false`. Compile mode must always be recorded in the run
+configuration.
 
 ## Evaluation and analysis
 

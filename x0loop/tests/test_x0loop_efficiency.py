@@ -35,6 +35,15 @@ def test_online_compute_estimate_counts_uniform_full_grid_occupancy():
     assert estimate.teacher_forward_equivalent_samples == 2 * 32 * (21 - 1 / 20)
 
 
+def test_parameter_gradient_control_counts_two_measurement_vjps():
+    cfg = _config(enabled=True, mode="online")
+    cfg["clean_loop"]["aux_gradient_space"] = "parameter"
+
+    estimate = estimate_compute(cfg)
+
+    assert estimate.aux_forward_equivalent_samples == 6 * 32 + 2 * 256 + 4 * 32
+
+
 def test_terminal_gan_counts_full_prefix_and_trainable_final_cfg_step():
     cfg = _config(enabled=False)
     cfg["adversarial"] = {

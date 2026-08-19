@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: $0 fresh|fresh-fixed-repro|fresh-time|bank-fix|bank-x0|online|online-x0|denoise-gan|terminal-gan" >&2
+  echo "usage: $0 fresh|fresh-fixed-repro|fresh-time|bank-fix|bank-x0|online|online-x0|online-x0-time|denoise-gan|terminal-gan" >&2
   exit 2
 fi
 
@@ -24,6 +24,7 @@ compile_mode=${X0LOOP_COMPILE_MODE:-default}
 compile_dynamic=${X0LOOP_COMPILE_DYNAMIC:-false}
 aux_batch_ratio=${X0LOOP_AUX_BATCH_RATIO:-0.125}
 aux_gradient_ratio=${X0LOOP_AUX_GRADIENT_RATIO:-0.2}
+aux_gradient_space=${X0LOOP_AUX_GRADIENT_SPACE:-}
 aux_target=${X0LOOP_AUX_TARGET:-}
 adv_batch_ratio=${X0LOOP_ADV_BATCH_RATIO:-0.125}
 adv_gradient_ratio=${X0LOOP_ADV_GRADIENT_RATIO:-0.1}
@@ -39,6 +40,7 @@ case "$branch" in
     adv_fake_space=x0_hat
     model_ignore_time=true
     time_jitter_enabled=true
+    branch_aux_gradient_space=output
     ;;
   fresh-fixed-repro)
     clean_enabled=false
@@ -48,6 +50,7 @@ case "$branch" in
     adv_fake_space=x0_hat
     model_ignore_time=true
     time_jitter_enabled=true
+    branch_aux_gradient_space=output
     ;;
   fresh-time)
     clean_enabled=false
@@ -57,6 +60,7 @@ case "$branch" in
     adv_fake_space=x0_hat
     model_ignore_time=false
     time_jitter_enabled=false
+    branch_aux_gradient_space=output
     ;;
   bank-fix)
     clean_enabled=true
@@ -66,6 +70,7 @@ case "$branch" in
     adv_fake_space=x0_hat
     model_ignore_time=true
     time_jitter_enabled=true
+    branch_aux_gradient_space=output
     ;;
   bank-x0)
     clean_enabled=true
@@ -75,6 +80,7 @@ case "$branch" in
     adv_fake_space=x0_hat
     model_ignore_time=true
     time_jitter_enabled=true
+    branch_aux_gradient_space=output
     ;;
   online)
     clean_enabled=true
@@ -84,6 +90,7 @@ case "$branch" in
     adv_fake_space=x0_hat
     model_ignore_time=true
     time_jitter_enabled=true
+    branch_aux_gradient_space=output
     ;;
   online-x0)
     clean_enabled=true
@@ -93,6 +100,17 @@ case "$branch" in
     adv_fake_space=x0_hat
     model_ignore_time=true
     time_jitter_enabled=true
+    branch_aux_gradient_space=output
+    ;;
+  online-x0-time)
+    clean_enabled=true
+    clean_mode=online
+    branch_aux_target=x0
+    adv_enabled=false
+    adv_fake_space=x0_hat
+    model_ignore_time=false
+    time_jitter_enabled=false
+    branch_aux_gradient_space=parameter
     ;;
   denoise-gan)
     clean_enabled=false
@@ -102,6 +120,7 @@ case "$branch" in
     adv_fake_space=x0_hat
     model_ignore_time=true
     time_jitter_enabled=true
+    branch_aux_gradient_space=output
     ;;
   terminal-gan)
     clean_enabled=false
@@ -111,6 +130,7 @@ case "$branch" in
     adv_fake_space=terminal_x0
     model_ignore_time=true
     time_jitter_enabled=true
+    branch_aux_gradient_space=output
     ;;
   *)
     echo "unknown branch: $branch" >&2
@@ -120,6 +140,9 @@ esac
 
 if [[ -z "$aux_target" ]]; then
   aux_target=$branch_aux_target
+fi
+if [[ -z "$aux_gradient_space" ]]; then
+  aux_gradient_space=$branch_aux_gradient_space
 fi
 
 git_commit=$(git rev-parse HEAD)
@@ -154,6 +177,7 @@ CUDA_VISIBLE_DEVICES=$gpu uv run python -m x0loop.train \
   --set "clean_loop.warmup_steps=$clean_warmup" \
   --set "clean_loop.aux_batch_ratio=$aux_batch_ratio" \
   --set "clean_loop.aux_gradient_ratio=$aux_gradient_ratio" \
+  --set "clean_loop.aux_gradient_space=$aux_gradient_space" \
   --set "clean_loop.aux_target=$aux_target" \
   --set "adversarial.enabled=$adv_enabled" \
   --set "adversarial.fake_space=$adv_fake_space" \

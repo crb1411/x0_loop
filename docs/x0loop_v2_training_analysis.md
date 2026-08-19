@@ -575,6 +575,22 @@ root grid 保存在 `runs/x0loop_v2_from_scratch/cycle04/trajectory_fixed_vs_tim
 FRESH 比较，不能再以旧 fixed baseline 为对手。辅助 batch 为 32、完整保留 fresh，
 训练/评估均使用 time-aware Heun-20/CFG-2.2；辅助强度按参数梯度范数目标 0.10 控制。
 
+实现加入 `clean_loop.aux_gradient_space=parameter`，用全体可训练参数上的 fresh/aux VJP
+范数逐 step 设置辅助 scale，不写入 `.grad`，随后只对组合 loss 做 optimizer backward。
+完整测试为 81 passed；从成熟 time-aware step-10k checkpoint 的 one-step smoke 得到
+fresh/aux 原始参数梯度范数 0.50636/0.10259、scale 0.49356，实际比例精确为 0.10000。
+随机初始化时 EMA 与 student 相同导致 native-x0 auxiliary 近零、scale cap 暂时无法达到
+目标，因此正式分支保持预注册 10k warmup，不能从 step 0 开辅助。
+
+动态 compile 会因 exact VJP 的 retained graph 与 AOTAutograd donated buffer 冲突，两个
+独立 smoke 均在 optimizer 前明确失败，故正式分支锁定 `compile.dynamic=false`；这不是
+数值早停而是启动前排除无效性能路径。成熟 checkpoint 的 100-step static benchmark
+后 8 个稳定日志点为 0.5265 s/step、486.2 image/s、13.94 GiB、参数梯度比 0.10000。
+计入 fresh/aux 两次测量 VJP、online teacher 和组合 backward 后，每步 19.736 TFLOP，
+主训练 MFU 0.99%、方法级 MFU 3.79%。预计 15k 门槛约 57–60 分钟；若通过并完整运行，
+总训练约 7.2 小时，另加稀疏/最终 FID。15k 门槛固定为必须优于同 step
+`FRESH-TIME=14.9119`，否则停止并进入三次训练周期复盘。
+
 ## 时间与吞吐分析
 
 300 epochs 在 CIFAR-10、batch 256 下是 58,500 optimizer steps（每 epoch 约

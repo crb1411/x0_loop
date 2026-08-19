@@ -308,6 +308,30 @@ def _diagnostic_losses(process: BaseProcess, fb: ProcessForwardBatch, out: torch
     return diag
 
 
+def _parameter_gradient_norm(loss: torch.Tensor, module: torch.nn.Module) -> torch.Tensor:
+    """Return the L2 norm of a loss gradient over all trainable parameters.
+
+    ``autograd.grad`` leaves ``parameter.grad`` untouched, so this diagnostic
+    can set an auxiliary scale before the normal combined backward pass.
+    The retained graph is consumed later by ``backward_loss``.
+    """
+
+    parameters = tuple(parameter for parameter in module.parameters() if parameter.requires_grad)
+    if not parameters:
+        return torch.zeros((), device=loss.device, dtype=torch.float32)
+    gradients = torch.autograd.grad(
+        loss,
+        parameters,
+        retain_graph=True,
+        allow_unused=True,
+    )
+    squared_norm = torch.zeros((), device=loss.device, dtype=torch.float32)
+    for gradient in gradients:
+        if gradient is not None:
+            squared_norm = squared_norm + gradient.detach().float().square().sum()
+    return squared_norm.sqrt()
+
+
 def compute_forward_batch(
     *,
     cfg: dict,
@@ -1182,7 +1206,8 @@ def compute_forward_batch_v2(
         fresh_loss = loss_dict["total"]
         fresh_scale = float(n_fresh) / float(bsz) if clean_loop_cfg.mode == "drop" else 1.0
         total_loss = fresh_scale * fresh_loss
-        aux_loss = aux_contrib = aux_scale = aux_output_grad_ratio = None
+        aux_loss = aux_contrib = aux_scale = aux_gradient_ratio_actual = None
+        fresh_aux_grad_norm = raw_aux_grad_norm = None
         if aux is not None:
             aux_null = (
                 torch.full_like(aux.cond, int(model_ctx.model_cfg.num_classes))
@@ -1208,16 +1233,24 @@ def compute_forward_batch_v2(
                 aux_target = aux.target_v
             aux_loss = regress("mse", aux_prediction, aux_target).mean()
             if clean_loop_cfg.aux_gradient_ratio > 0.0:
-                fresh_grad = torch.autograd.grad(fresh_loss, fresh_out, retain_graph=True)[0]
-                aux_grad = torch.autograd.grad(aux_loss, aux_out, retain_graph=True)[0]
-                fresh_grad_norm = fresh_grad.float().norm()
-                aux_grad_norm = aux_grad.float().norm()
+                if clean_loop_cfg.aux_gradient_space == "parameter":
+                    fresh_grad_norm = _parameter_gradient_norm(fresh_scale * fresh_loss, denoiser)
+                    aux_grad_norm = _parameter_gradient_norm(aux_loss, denoiser)
+                else:
+                    fresh_grad = torch.autograd.grad(fresh_loss, fresh_out, retain_graph=True)[0]
+                    aux_grad = torch.autograd.grad(aux_loss, aux_out, retain_graph=True)[0]
+                    fresh_grad_norm = fresh_grad.float().norm()
+                    aux_grad_norm = aux_grad.float().norm()
+                fresh_aux_grad_norm = fresh_grad_norm.detach()
+                raw_aux_grad_norm = aux_grad_norm.detach()
                 aux_scale = (
                     clean_loop_cfg.aux_gradient_ratio
                     * fresh_grad_norm
                     / aux_grad_norm.clamp_min(1.0e-12)
                 ).clamp(max=clean_loop_cfg.aux_scale_max).detach()
-                aux_output_grad_ratio = (aux_scale * aux_grad_norm / fresh_grad_norm.clamp_min(1.0e-12)).detach()
+                aux_gradient_ratio_actual = (
+                    aux_scale * aux_grad_norm / fresh_grad_norm.clamp_min(1.0e-12)
+                ).detach()
                 aux_contrib = aux_scale * aux_loss
                 total_loss = total_loss + aux_contrib
         with torch.no_grad():
@@ -1232,6 +1265,7 @@ def compute_forward_batch_v2(
         "clean/bank_size": float(len(clean_loop_bank)),
         "clean/bank_refresh_n": float(bank_refresh_n),
         "clean/aux_gradient_target": clean_loop_cfg.aux_gradient_ratio,
+        "clean/aux_gradient_space_parameter": float(clean_loop_cfg.aux_gradient_space == "parameter"),
         "clean/aux_target_x0": float(clean_loop_cfg.aux_target == "x0"),
     }
     if aux is not None and aux_loss is not None and aux_contrib is not None and aux_scale is not None:
@@ -1239,7 +1273,21 @@ def compute_forward_batch_v2(
             "clean/loss_aux": aux_loss.detach(),
             "clean/loss_aux_contrib": aux_contrib.detach(),
             "clean/aux_scale": aux_scale,
-            "clean/aux_output_grad_ratio": aux_output_grad_ratio if aux_output_grad_ratio is not None else 0.0,
+            "clean/aux_gradient_ratio_actual": (
+                aux_gradient_ratio_actual if aux_gradient_ratio_actual is not None else 0.0
+            ),
+            "clean/fresh_aux_grad_norm": fresh_aux_grad_norm if fresh_aux_grad_norm is not None else 0.0,
+            "clean/raw_aux_grad_norm": raw_aux_grad_norm if raw_aux_grad_norm is not None else 0.0,
+            "clean/aux_output_grad_ratio": (
+                aux_gradient_ratio_actual
+                if clean_loop_cfg.aux_gradient_space == "output" and aux_gradient_ratio_actual is not None
+                else 0.0
+            ),
+            "clean/aux_parameter_grad_ratio": (
+                aux_gradient_ratio_actual
+                if clean_loop_cfg.aux_gradient_space == "parameter" and aux_gradient_ratio_actual is not None
+                else 0.0
+            ),
             "clean/solver_index": aux.solver_index.float().mean(),
             "clean/depth": aux.depth.float().mean(),
             "clean/bank_age": (float(step) - aux.producer_step.float().mean()).clamp_min(0.0),

@@ -14,7 +14,7 @@ from x0loop.training.clean_loop import (
     build_clean_loop_config,
     sample_clean_loop_t1,
 )
-from x0loop.training.engine import _teacher_heun_step_batched, _teacher_targets
+from x0loop.training.engine import _parameter_gradient_norm, _teacher_heun_step_batched, _teacher_targets
 from x0loop.utils.checkpoint import _adapt_ema_state_to_model, _load_model_state_with_fallback
 
 
@@ -66,6 +66,42 @@ def test_clean_loop_accepts_native_x0_aux_target():
         }
     })
     assert cfg.aux_target == "x0"
+
+
+def test_clean_loop_accepts_parameter_gradient_control():
+    cfg = build_clean_loop_config({
+        "clean_loop": {
+            "enabled": True,
+            "version": 2,
+            "aux_gradient_space": "parameter",
+        }
+    })
+    assert cfg.aux_gradient_space == "parameter"
+
+
+def test_clean_loop_rejects_unknown_gradient_space():
+    with pytest.raises(ValueError, match="aux_gradient_space"):
+        build_clean_loop_config({
+            "clean_loop": {
+                "enabled": True,
+                "version": 2,
+                "aux_gradient_space": "activation",
+            }
+        })
+
+
+def test_parameter_gradient_norm_matches_manual_norm_without_populating_grad():
+    layer = torch.nn.Linear(2, 1, bias=False)
+    x = torch.tensor([[1.0, 2.0], [-3.0, 4.0]])
+    loss = layer(x).square().mean()
+    expected_gradient = torch.autograd.grad(loss, layer.weight, retain_graph=True)[0]
+
+    actual = _parameter_gradient_norm(loss, layer)
+
+    assert torch.allclose(actual, expected_gradient.float().norm())
+    assert layer.weight.grad is None
+    loss.backward()
+    assert torch.allclose(layer.weight.grad, expected_gradient)
 
 
 def test_clean_loop_bank_fifo_capacity_and_sample_shapes():

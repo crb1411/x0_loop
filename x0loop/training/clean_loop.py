@@ -24,6 +24,7 @@ class CleanLoopConfig:
     mode: str = "legacy"
     aux_batch_ratio: float = 0.25
     aux_gradient_ratio: float = 0.2
+    aux_gradient_space: str = "output"
     aux_scale_max: float = 10.0
     aux_target: str = "velocity"
     solver_steps: int = 20
@@ -53,6 +54,7 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
     mode = str(raw.get("mode", "legacy" if version == 1 else "bank_fix")).lower()
     aux_batch_ratio = float(raw.get("aux_batch_ratio", raw.get("bank_prob", 0.25)))
     aux_gradient_ratio = float(raw.get("aux_gradient_ratio", 0.2))
+    aux_gradient_space = str(raw.get("aux_gradient_space", "output")).lower()
     aux_scale_max = float(raw.get("aux_scale_max", 10.0))
     aux_target = str(raw.get("aux_target", "velocity")).lower()
     solver_steps = int(raw.get("solver_steps", 20))
@@ -89,6 +91,11 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
         raise ValueError(f"clean_loop.aux_batch_ratio must be in (0,1], got {aux_batch_ratio}")
     if not (0.0 <= aux_gradient_ratio <= 1.0):
         raise ValueError(f"clean_loop.aux_gradient_ratio must be in [0,1], got {aux_gradient_ratio}")
+    if aux_gradient_space not in {"output", "parameter"}:
+        raise ValueError(
+            "clean_loop.aux_gradient_space must be output | parameter, "
+            f"got {aux_gradient_space!r}"
+        )
     if aux_scale_max <= 0.0:
         raise ValueError(f"clean_loop.aux_scale_max must be > 0, got {aux_scale_max}")
     if aux_target not in {"velocity", "x0"}:
@@ -120,6 +127,7 @@ def build_clean_loop_config(cfg: dict) -> CleanLoopConfig:
         mode=mode,
         aux_batch_ratio=aux_batch_ratio,
         aux_gradient_ratio=aux_gradient_ratio,
+        aux_gradient_space=aux_gradient_space,
         aux_scale_max=aux_scale_max,
         aux_target=aux_target,
         solver_steps=solver_steps,

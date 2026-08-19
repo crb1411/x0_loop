@@ -59,6 +59,12 @@ def estimate_compute(config: dict) -> ComputeEstimate:
         # CFG concatenates conditional and unconditional batches.  The student
         # auxiliary call is trainable, hence 3 * (2 * aux_n).
         aux = 6.0 * aux_n
+        if str(clean.get("aux_gradient_space", "output")) == "parameter":
+            # Exact parameter-norm control measures a fresh backward
+            # (approximately two forward equivalents per sample) and a CFG
+            # auxiliary backward (two equivalents over the doubled batch)
+            # before the normal combined backward.
+            aux += 2.0 * batch + 4.0 * aux_n
         mode = str(clean["mode"])
         if mode == "online":
             solver_steps = int(clean["solver_steps"])
