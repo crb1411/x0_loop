@@ -8,6 +8,6 @@ distributed:
   activation_ckpt: false
   checkpoint:
     mode: full
-    every_steps: 5000
+    every_steps: 500
 compile:
   enabled: false

@@ -1,6 +1,7 @@
 gen_eval:
   enabled: true
   every_steps: 1
+  seed: 20260819
   num_samples: 50000
   batch_size: 256
   sampler: heun

@@ -25,6 +25,7 @@ def _cfg(cfg: dict) -> dict[str, Any]:
         "every_steps": int(gen_cfg.get("every_steps", 10000)),
         "num_samples": int(gen_cfg.get("num_samples", gen_cfg.get("num", 5000))),
         "batch_size": int(gen_cfg.get("batch_size", 128)),
+        "seed": int(gen_cfg.get("seed", (cfg.get("train", {}) or {}).get("seed", 0))),
         "steps": int(gen_cfg.get("steps", 20)),
         "sampler": str(gen_cfg.get("sampler", sample_cfg.get("sampler", "heun"))),
         "guidance_scale": float(gen_cfg.get("guidance_scale", 3.0)),
@@ -164,6 +165,14 @@ def _torch_fidelity_load_compat():
         torch.load = original_load
 
 
+@contextmanager
+def _fixed_eval_rng(device: torch.device, *, seed: int, rank: int):
+    devices = list(range(torch.cuda.device_count())) if device.type == "cuda" else []
+    with torch.random.fork_rng(devices=devices):
+        torch.manual_seed(int(seed) + int(rank))
+        yield
+
+
 @torch.no_grad()
 def _export_fake_images(
     *,
@@ -275,7 +284,16 @@ def _run_generative_eval(
         gen_ema.store(model)
         gen_ema.copy_to(model)
     try:
-        _export_fake_images(cfg=cfg, gen_cfg=gen_cfg, model=model, runtime=runtime, model_ctx=model_ctx, process=process, fake_dir=fake_dir)
+        with _fixed_eval_rng(runtime.device, seed=int(gen_cfg["seed"]), rank=runtime.rank):
+            _export_fake_images(
+                cfg=cfg,
+                gen_cfg=gen_cfg,
+                model=model,
+                runtime=runtime,
+                model_ctx=model_ctx,
+                process=process,
+                fake_dir=fake_dir,
+            )
     finally:
         if gen_ema is not None:
             gen_ema.restore(model)
@@ -301,6 +319,7 @@ def _run_generative_eval(
             "fake_dir": fake_dir if gen_cfg["keep_images"] or int(gen_cfg["keep_images_count"]) > 0 else None,
             "num_samples": int(gen_cfg["num_samples"]),
             "batch_size": int(gen_cfg["batch_size"]),
+            "seed": int(gen_cfg["seed"]),
             "steps": int(gen_cfg["steps"]),
             "sampler": str(gen_cfg["sampler"]),
             "guidance_scale": float(gen_cfg["guidance_scale"]),

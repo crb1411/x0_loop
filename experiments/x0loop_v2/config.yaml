@@ -104,9 +104,36 @@ logging:
 eval:
   enabled: false
 gen_eval:
-  enabled: false
+  # FID is the primary iteration objective. Use a cheaper fixed-noise 5k FID
+  # every checkpoint interval, then one 50k FID at the end.
+  enabled: true
+  every_steps: 500
+  seed: 20260819
+  num_samples: 5000
+  batch_size: 256
+  steps: 20
+  sampler: heun
+  guidance_scale: 2.2
+  guidance_schedule: null
+  input2: cifar10-train
+  datasets_root: /mnt/data/crb/data
+  datasets_download: false
+  keep_images: false
+  metrics:
+    isc: false
+    fid: true
+    kid: false
+    ppl: false
+    prc: false
+    mind: false
   final:
-    enabled: false
+    enabled: true
+    num_samples: 50000
+    batch_size: 256
+    steps: 20
+    sampler: heun
+    guidance_scale: 2.2
+    guidance_schedule: null
 distributed:
   mode: none
   backend: nccl
@@ -117,6 +144,6 @@ distributed:
   activation_ckpt: false
   checkpoint:
     mode: full
-    every_steps: 5000
+    every_steps: 500
 compile:
   enabled: false
