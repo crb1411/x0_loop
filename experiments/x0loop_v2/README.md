@@ -37,6 +37,9 @@ reproducible:
 | `fresh` | none | none |
 | `fresh-fixed-repro` | none, fixed model time 0.5 | none |
 | `fresh-time` | none, explicit path time | none |
+| `gated-control` | none, explicit path time | nominal index 16--19 residual, fresh loss only |
+| `gated-wide` | none, explicit path time | nominal index 12--19 residual, fresh loss only |
+| `gated-dist` | EMA Heun-20 prefix/current suffix | index 16--19 residual + terminal Inception KID |
 | `bank-fix` | stratified EMA Heun replay | legacy teacher velocity |
 | `bank-x0` | stratified EMA Heun replay | teacher native x0 |
 | `online` | current EMA online Heun rollout | legacy teacher velocity |
@@ -64,6 +67,21 @@ Start a 300-epoch from-zero FRESH run:
 X0LOOP_GPU=7 X0LOOP_CYCLE=cycleNN \
   experiments/x0loop_v2/run_from_scratch.sh fresh
 ```
+
+Cycle 07 uses a paired seed-43 replication and active-range comparison:
+
+```bash
+X0LOOP_GPU=6 X0LOOP_CYCLE=cycle07 X0LOOP_SEED=43 \
+  experiments/x0loop_v2/run_from_scratch.sh fresh-time
+X0LOOP_GPU=6 X0LOOP_CYCLE=cycle07 X0LOOP_SEED=43 \
+  experiments/x0loop_v2/run_from_scratch.sh gated-control
+X0LOOP_GPU=6 X0LOOP_CYCLE=cycle07 X0LOOP_SEED=43 \
+  experiments/x0loop_v2/run_from_scratch.sh gated-wide
+```
+
+For checkpoint-only causal ablation, override
+`solver_correction.output_scale=0`; its default is 1. This changes the sampler
+and therefore must never be used silently in a formal training evaluation.
 
 Example pre-registered 5k-step x0-target screen from a shared step-10k prefix:
 

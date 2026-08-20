@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -13,6 +14,7 @@ class SolverCorrectionConfig:
     solver_steps: int = 20
     start_index: int = 16
     hidden_channels: int = 32
+    output_scale: float = 1.0
 
 
 def build_solver_correction_config(cfg: dict | None) -> SolverCorrectionConfig:
@@ -22,6 +24,7 @@ def build_solver_correction_config(cfg: dict | None) -> SolverCorrectionConfig:
         solver_steps=int(raw.get("solver_steps", 20)),
         start_index=int(raw.get("start_index", 16)),
         hidden_channels=int(raw.get("hidden_channels", 32)),
+        output_scale=float(raw.get("output_scale", 1.0)),
     )
     if result.solver_steps <= 0:
         raise ValueError(f"solver_correction.solver_steps must be positive, got {result.solver_steps}")
@@ -33,6 +36,10 @@ def build_solver_correction_config(cfg: dict | None) -> SolverCorrectionConfig:
     if result.hidden_channels <= 0:
         raise ValueError(
             f"solver_correction.hidden_channels must be positive, got {result.hidden_channels}"
+        )
+    if not math.isfinite(result.output_scale):
+        raise ValueError(
+            f"solver_correction.output_scale must be finite, got {result.output_scale}"
         )
     return result
 
@@ -72,4 +79,4 @@ class SolverIndexCorrection(nn.Module):
         embedding = self.solver_embedding(index).to(dtype=features.dtype).view(features.shape[0], -1, 1, 1)
         features = F.silu(self.norm1(features) + embedding)
         features = F.silu(self.norm2(self.hidden(features)))
-        return gate * self.output(features).to(dtype=x.dtype)
+        return gate * self.cfg.output_scale * self.output(features).to(dtype=x.dtype)

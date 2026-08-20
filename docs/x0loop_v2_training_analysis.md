@@ -900,26 +900,102 @@ GATED-DIST 若在 15k 的 5k FID 至少为同 step GATED-CONTROL 的 1.5 倍，�
 满足，至少运行到 30k。若 15k、30k 两点都比 control 差 25% 以上且轨迹退化方向一致，
 同样提前停止。其他情况完整训练 300 epochs，避免凭单次 5k 波动剪枝。
 
-前两支正式结果已经完成：
+三支正式结果已经完成：
 
 | branch | FID@15k (5k) | FID@30k (5k) | FID@45k (5k) | ending FID@58.5k (50k) |
 |---|---:|---:|---:|---:|
 | FRESH-TIME | 15.3022 | 11.2849 | 10.3581 | 5.3542 |
 | GATED-CONTROL | 14.6932 | 10.7190 | 9.8580 | 5.0849 |
+| GATED-DIST | 14.1346 | 10.6087 | 9.8937 | 5.2534 |
 | control 相对 fresh | -3.98% | -5.01% | -4.83% | -5.03% |
+| dist 相对 control | -3.80% | -1.03% | +0.36% | +3.31% |
 
-因此 correction 结构加 fresh gradient 本身已经在四个固定观测点一致改善 FID；第三支必须
-以 `GATED-CONTROL` 而非 `FRESH-TIME` 为主对照，才能判断终点 KID 的增量价值。两支都按
-预注册规则选择 step 45k 作为后续扩展评测候选；ending 50k FID 保持当前最权威的比较。
+因此 correction 结构加 fresh gradient 本身在四个固定观测点一致改善 FID，且最终权威
+50k FID 从 5.3542 降至 5.0849。终点 KID 相对结构对照在 15k/30k 暂时改善，但 45k 打平，
+ending 反而退化 3.31%；Cycle 06 的主假设没有通过。不能把 GATED-DIST 相对 FRESH 的
+1.88% ending 改善归因于 KID，因为它落后真正的 `GATED-CONTROL`。
 
-50-step 性能 smoke 只是短窗口预算而非正式 MFU 结论。按 0.2866 s/step，GATED-DIST 在
-10k warmup 后的 48.5k steps 约需 3.86 小时，连同约 12 分钟 warmup、首次 Inception/图
-编译、三次 5k FID、最终 50k FID 和写盘，预计从启动到完成约 4.2--4.5 小时。正式日志
-完成后必须用完整稳定窗口重算 step time、MFU、GPU 利用率和各阶段时间占比，不能用该
-smoke 外推替代实测。
+按预注册规则，三支都由最低中途 5k FID 选中 step 45k 做 50k 扩展评测。结果同时暴露了
+5k 选点的局限：FRESH/CONTROL step45 的 50k FID 分别为 5.6567/5.2611，均差于各自
+ending 的 5.3542/5.0849。后续周期不再用单个最低 5k 值替换 ending 主 checkpoint；5k
+只作曲线和停止信号，ending 50k 保持默认主结果。
 
-本周期当前正式训练计数为 2/3。完成第三支（或按上述规则有效证伪）后，必须先做全局复盘
-和同 root 全 Heun grid 采样分析，再允许设计 Cycle 07。
+step45 的 50k NFE 扩展如下：
+
+| branch | NFE4 FID | NFE8 FID | NFE20 FID |
+|---|---:|---:|---:|
+| FRESH-TIME | 10.5911 | 7.4442 | 5.6567 |
+| GATED-CONTROL | 10.0815 | 6.7253 | 5.2611 |
+| GATED-DIST | **9.5068** | **6.3247** | 5.2975 |
+
+| branch@NFE20 | KID | precision | recall | F-score |
+|---|---:|---:|---:|---:|
+| FRESH-TIME | 0.0016130 | 0.71818 | 0.48264 | 0.57731 |
+| GATED-CONTROL | 0.0013400 | 0.71686 | **0.48944** | **0.58171** |
+| GATED-DIST | **0.0013335** | **0.72294** | 0.48262 | 0.57883 |
+
+DIST 相对 CONTROL 在 NFE4/8 的 FID 改善 5.70%/5.96%，但 NFE20 差 0.69%；因此当前
+terminal KID 只能定位为少步采样信号，不能作为主 Heun-20 改善。NFE4 的 nominal-20
+solver index 为 0/5/10/15，correction 实际不直接启用，故该点的差异是 correction 参与
+fresh 训练后对 backbone 的间接影响；NFE8 只有最后一个 t=0.125 调用直接启用 correction，
+不能把所有低-NFE 改善都简单解释为终点 residual。
+
+当前最佳 ending CONTROL 的完整指标为 FID 5.08495、KID 0.0013169、precision 0.72866、
+recall 0.48726、F-score 0.58400。256 个同 root ending trace 位于
+`runs/x0loop_v2_from_scratch/cycle06/trajectory_ending_threeway/`：
+
+| model | final RMS | mean Heun correction | max relative correction |
+|---|---:|---:|---:|
+| FRESH-TIME | 0.992589 | 0.002294 | 0.202511 |
+| GATED-CONTROL | **0.999979** | 0.002292 | 0.201350 |
+| GATED-DIST | 0.995786 | **0.002264** | **0.192753** |
+
+较低的平均 trajectory correction 没有保证较低 FID。更具体地，DIST 在 index18 的最后
+Heun corrector RMS 比 CONTROL 高 6.1%，最终 x0 drift 高约 6.0%，并把 final RMS 从
+0.99998 拉到 0.99579；这与 KID 后期失去 FID 增量方向一致，但只是机制证据而非单独的
+质量判据。三模型最终样本两两 RMS 距离为 fresh-control 0.31476、fresh-dist 0.35225、
+control-dist 0.33018，说明小型 correction 通过训练耦合产生的影响并不限于最后四次调用。
+
+同 checkpoint inference ablation 新增 `solver_correction.output_scale`（默认 1，不改变旧
+checkpoint）。在 ending 固定 5k 噪声下关闭 correction，CONTROL NFE8 FID 从 10.9413
+退化到 13.9907、NFE20 从 9.7520 退化到 13.3121；DIST 分别从 10.9956/9.7933 退化到
+14.2134/14.5296。这证明 residual 本身是强因果组件。CONTROL NFE20 的预注册 scale 网格
+得到 0/0.5/0.75/1/1.25/1.5 对应 13.3121/10.9535/9.9646/**9.7520**/11.0898/13.9007，
+训练默认 scale=1 已是网格最优，不进行事后 sampler 调参。
+
+正式稳定窗口与 wall time 为：FRESH 0.0691 s/step、3715 img/s、约 1h23m；CONTROL
+0.0711 s/step、3603 img/s、约 1h26m；DIST 0.2840 s/step、901 img/s、约 4h24m。扣除
+三次中途 5k FID 和最终 50k FID 后，三支训练/编译约 68.5m、70.6m、4h08.6m；最终
+50k FID 分别耗时 683.0/691.2/691.8 秒。DIST 的辅助期方法级 MFU 约 5.01%，仍以小 batch
+串行 rollout 为瓶颈。它花约 3.1 倍 wall time 却落后 CONTROL 的最终 FID，因此不进入
+下一周期主训练；暂不优化 Inception/rollout 性能。
+
+本周期正式训练计数为 3/3，全局复盘完成。结论边界为：验证了“低噪声 solver-conditioned
+residual + 完整 fresh loss”是有希望且低成本的结构；没有验证“online terminal minibatch
+KID 能改善 Heun-20 最终 FID”。Cycle 07 不继续调 KID batch/权重，也不扫 FIFO。
+
+### Cycle 07：跨 seed 复现与 correction active range
+
+Cycle 07 在看结果前注册三支 seed 43、独立从零、300-epoch 实验：
+
+| branch | correction active nominal index | 用途 |
+|---|---|---|
+| FRESH-TIME | off | 新 seed 配对基线 |
+| GATED-CONTROL | 16--19 | 复现 Cycle 06 的 last-4 收益 |
+| GATED-WIDE | 12--19 | 检验更宽低噪声 residual 是否进一步降 FID |
+
+三支保留相同 time-aware fresh loss、Heun-20/CFG-2.2、正确 endpoint、batch 256、EMA、LR
+schedule、固定评估 seed/label 和 58,500 steps；不使用 KID、bank、paired GT 或额外 teacher。
+训练仍在 15k/30k/45k 跑 5k FID，ending step58.5k 固定跑 50k FID。5k 只用于失稳/明显
+退化监控，不再替代 ending checkpoint。LAST4 只有在 ending 50k FID 优于同 seed FRESH，
+且至少两个中途点同向时才算跨 seed 复现；WIDE 只有在 ending 优于 LAST4 且 precision/recall
+没有明显代价时才进入后续默认。三支均为接近 baseline 的快速训练，除数值失稳或 15k/30k
+连续差于配对基线 25% 外完整跑完，避免因 5k 波动提前选胜者。
+
+该周期的唯一训练变量是 `solver_correction.start_index`。`GATED-WIDE` 将同一个 12,643
+参数 head 从 t<=0.2 扩到 nominal-20 的 t<=0.4，不增加参数量；训练/采样仍调用同一 head
+和 t-to-index 映射。预期稳定速度接近 CONTROL 0.071 s/step，三支含最终 FID 顺序执行约
+4.3 小时。运行顺序固定为 FRESH-TIME、GATED-CONTROL、GATED-WIDE，GPU 6 优先。
 
 ## 时间与吞吐分析
 
@@ -965,15 +1041,15 @@ Heun forward 和辅助 backward，并除以本机 700 W H800 的 dense BF16 989 
 | Cycle 04 FRESH-FIXED-REPRO | 0.0667 | 3841 | 7.15 | 7.82% | 7.82% | 5.154 |
 | Cycle 04 FRESH-TIME | 0.0664 | 3855 | 7.15 | 7.85% | 7.85% | 5.154 |
 | Cycle 04 ONLINE-X0-TIME | 0.5400 | 474 | 13.94 | 0.97% | 3.70% | 19.736 |
-| Cycle 06 FRESH-TIME | 0.0682 | 3758 | 7.15 | 7.64% | 7.64% | 5.154 |
-| Cycle 06 GATED-CONTROL | 0.0709 | 3613 | 7.26 | 7.35% | 7.35% | 5.154 |
-| Cycle 06 GATED-DIST forced-aux smoke | 0.2866 | 894 | 9.19 | 1.82% | 4.97% | 14.078 |
+| Cycle 06 FRESH-TIME formal | 0.0691 | 3715 | 7.15 | 7.55% | 7.55% | 5.154 |
+| Cycle 06 GATED-CONTROL formal | 0.0711 | 3603 | 7.26 | 7.33% | 7.33% | 5.154 |
+| Cycle 06 GATED-DIST formal | 0.2840 | 901 | 9.19 | 1.84% | 5.01% | 14.078 |
 
 Cycle 06 的 distribution 方法级 FLOP 进一步按实际计算图拆分：fresh 主训练 5.154
 TF/step；16-sample EMA Heun prefix 与 current-model correction suffix 的 39 次 CFG base
 forward 合计约 8.376 TF/step；exact Inception 的 real forward、fake forward/backward 与
 MMD 合计实测 0.548 TF/step，总计 14.078 TF/step。辅助开启后单 step 比 control 慢约
-4.04 倍，但 counted FLOP 只增加到 2.73 倍，所以方法级 MFU 从 7.35% 降至 4.97%。
+3.99 倍，但 counted FLOP 只增加到 2.73 倍，所以方法级 MFU 从 7.33% 降至 5.01%。
 独立 100-step 采样的稳定区间 GPU 指标约为 SM 75%、显存带宽 20%、功耗 325 W；这不是
 GPU 大面积空闲，而是 batch 16/32 的 39 次串行小模型调用与 FP32 Inception 无法接近
 H800 的 989-TFLOP/s 大矩阵峰值。显存仅约 9.19 GiB 也说明瓶颈不是容量。当前正式实验

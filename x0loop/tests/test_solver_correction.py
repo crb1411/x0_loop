@@ -41,6 +41,25 @@ def test_solver_correction_is_zero_initialized_and_gated_to_last_four_intervals(
     assert module.solver_index(torch.tensor([1.0, 0.2, 0.0])).tolist() == [0, 16, 19]
 
 
+def test_solver_correction_output_scale_supports_inference_ablation():
+    module = SolverIndexCorrection(
+        SolverCorrectionConfig(
+            enabled=True,
+            solver_steps=20,
+            start_index=16,
+            hidden_channels=8,
+            output_scale=0.0,
+        ),
+        channels=3,
+    )
+    with torch.no_grad():
+        module.output.bias.fill_(1.0)
+    x = torch.randn(2, 3, 8, 8)
+    t = torch.full((2,), 0.1)
+
+    assert torch.equal(module(x, t, torch.randn_like(x)), torch.zeros_like(x))
+
+
 def test_denoiser_correction_zero_init_is_functionally_identical_to_base():
     net = _Net()
     model = Denoiser(net, process=object(), solver_correction=_config())

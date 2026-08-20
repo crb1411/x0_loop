@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: $0 fresh|fresh-fixed-repro|fresh-time|gated-control|gated-dist|bank-fix|bank-x0|online|online-x0|online-x0-time|online-x0-time-frozen|denoise-gan|terminal-gan" >&2
+  echo "usage: $0 fresh|fresh-fixed-repro|fresh-time|gated-control|gated-wide|gated-dist|bank-fix|bank-x0|online|online-x0|online-x0-time|online-x0-time-frozen|denoise-gan|terminal-gan" >&2
   exit 2
 fi
 
@@ -10,6 +10,7 @@ branch=$1
 gpu=${X0LOOP_GPU:-7}
 cycle=${X0LOOP_CYCLE:-cycle01}
 epochs=${X0LOOP_EPOCHS:-300}
+train_seed=${X0LOOP_SEED:-42}
 run_steps=${X0LOOP_RUN_STEPS:-None}
 resume=${X0LOOP_RESUME:-None}
 fid_every=${X0LOOP_FID_EVERY:-15000}
@@ -36,7 +37,9 @@ dist_batch_ratio=${X0LOOP_DIST_BATCH_RATIO:-0.0625}
 dist_gradient_ratio=${X0LOOP_DIST_GRADIENT_RATIO:-0.10}
 dist_start_step=${X0LOOP_DIST_START_STEP:-10000}
 dist_warmup_steps=${X0LOOP_DIST_WARMUP_STEPS:-1000}
+correction_start_index=${X0LOOP_CORRECTION_START_INDEX:-}
 branch_teacher_mode=moving
+branch_correction_start_index=16
 correction_enabled=false
 dist_enabled=false
 
@@ -81,6 +84,18 @@ case "$branch" in
     time_jitter_enabled=false
     branch_aux_gradient_space=output
     correction_enabled=true
+    ;;
+  gated-wide)
+    clean_enabled=false
+    clean_mode=bank_fix
+    branch_aux_target=velocity
+    adv_enabled=false
+    adv_fake_space=x0_hat
+    model_ignore_time=false
+    time_jitter_enabled=false
+    branch_aux_gradient_space=output
+    correction_enabled=true
+    branch_correction_start_index=12
     ;;
   gated-dist)
     clean_enabled=false
@@ -190,6 +205,9 @@ fi
 if [[ -z "$teacher_mode" ]]; then
   teacher_mode=$branch_teacher_mode
 fi
+if [[ -z "$correction_start_index" ]]; then
+  correction_start_index=$branch_correction_start_index
+fi
 
 git_commit=$(git rev-parse HEAD)
 git_dirty=false
@@ -210,7 +228,9 @@ CUDA_VISIBLE_DEVICES=$gpu uv run python -m x0loop.train \
   --set "model_conditioning.ignore_time=$model_ignore_time" \
   --set "time_condition_jitter.enabled=$time_jitter_enabled" \
   --set "solver_correction.enabled=$correction_enabled" \
+  --set "solver_correction.start_index=$correction_start_index" \
   --set "train.resume=$resume" \
+  --set "train.seed=$train_seed" \
   --set "train.epochs=$epochs" \
   --set "train.run_steps=$run_steps" \
   --set train.lr=0.0003 \

@@ -56,6 +56,7 @@ solver_correction:
   solver_steps: 20
   start_index: 16
   hidden_channels: 32
+  output_scale: 1.0
 clean_loop:
   enabled: false
   version: 2
