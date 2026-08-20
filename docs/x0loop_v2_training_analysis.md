@@ -997,6 +997,119 @@ schedule、固定评估 seed/label 和 58,500 steps；不使用 KID、bank、pai
 和 t-to-index 映射。预期稳定速度接近 CONTROL 0.071 s/step，三支含最终 FID 顺序执行约
 4.3 小时。运行顺序固定为 FRESH-TIME、GATED-CONTROL、GATED-WIDE，GPU 6 优先。
 
+三次正式训练均已完成，未触发提前停止。所有分支都明确设置 `clean_loop.enabled=false`，
+因此本周期完全不使用 bank、replay、paired GT、teacher 或终点 KID；这里的纯 Flow
+Matching 基线就是 `FRESH-TIME`。固定 ending checkpoint 的权威结果为：
+
+| branch | FID@15k (5k) | FID@30k (5k) | FID@45k (5k) | ending FID@58.5k (50k) |
+|---|---:|---:|---:|---:|
+| FRESH-TIME | 15.0253 | 11.4393 | 10.0530 | 5.2591 |
+| GATED-CONTROL, last-4 | 14.0995 | 10.7748 | 10.1540 | 5.1900 |
+| GATED-WIDE, last-8 | **13.9885** | **10.7708** | **9.8230** | **5.0187** |
+| last-4 相对 fresh | -6.16% | -5.81% | +1.00% | -1.31% |
+| last-8 相对 fresh | -6.90% | -5.84% | -2.29% | -4.57% |
+| last-8 相对 last-4 | -0.79% | -0.04% | -3.26% | -3.30% |
+
+last-4 在 15k/30k 与 ending 三个预注册条件上优于同 seed FRESH，故通过跨 seed 复现
+门槛。它在 seed 42/43 的 ending 收益分别为 5.03%/1.31%，方向稳定但幅度明显受 seed
+影响。last-8 又把 seed-43 ending FID 从 5.1900 降至 5.0187，且 45k 与 ending 同向；
+这是当前最低权威 FID，但只有一个 seed，不能把 3.30% 增量视为已经跨 seed 稳定。
+
+ending checkpoint 的固定 50k NFE 扩展如下：
+
+| branch | NFE4 FID | NFE8 FID | NFE20 FID |
+|---|---:|---:|---:|
+| FRESH-TIME | 9.8718 | 7.1008 | 5.2591 |
+| GATED-CONTROL | 9.8314 | 6.6176 | 5.1900 |
+| GATED-WIDE | **9.2638** | **6.3113** | **5.0187** |
+| last-8 相对 fresh | -6.16% | -11.12% | -4.57% |
+| last-8 相对 last-4 | -5.77% | -4.63% | -3.30% |
+
+| branch/NFE | KID | precision | recall | F-score |
+|---|---:|---:|---:|---:|
+| FRESH NFE4 | 0.0043070 | 0.72262 | **0.35138** | **0.47284** |
+| CONTROL NFE4 | 0.0045530 | 0.72862 | 0.34436 | 0.46768 |
+| WIDE NFE4 | **0.0040361** | **0.73764** | 0.34622 | 0.47125 |
+| FRESH NFE8 | 0.0026608 | 0.69088 | 0.45870 | 0.55134 |
+| CONTROL NFE8 | 0.0019174 | 0.69764 | 0.46170 | 0.55566 |
+| WIDE NFE8 | **0.0018333** | **0.69806** | **0.47596** | **0.56600** |
+| FRESH NFE20 | 0.0013919 | **0.73032** | 0.47800 | 0.57782 |
+| CONTROL NFE20 | 0.0012879 | 0.72994 | 0.48094 | 0.57984 |
+| WIDE NFE20 | **0.0012532** | 0.72654 | **0.48850** | **0.58420** |
+
+last-8 的 NFE20 precision 相对 fresh 只下降 0.00378，而 recall 上升 0.01050、F-score
+上升 0.00639；当前没有明显 mode dropping 代价。NFE4 的 recall 小幅下降 0.00516，但
+precision 上升 0.01502，且 NFE8 的 precision/recall 同时改善。收益覆盖 NFE 4/8/20，
+所以该结构不只应定位成少步纠错；不过最大相对收益出现在 NFE8，少步误差仍是优势区间。
+
+为区分训练耦合与新增 index 直接参与 sampling 的作用，对同一个 last-8 ending
+checkpoint 做了固定 5k noise 的只读 inference 消融。三档在看数值前固定为原生
+`start_index=12`、只保留 `start_index=16` 和 `output_scale=0`；它们不是调参结果：
+
+| last-8 checkpoint inference | NFE4 FID | NFE8 FID | NFE20 FID |
+|---|---:|---:|---:|
+| native start=12 | **13.6000** | **10.9688** | **9.5596** |
+| start=16 | 18.3583 | 12.5432 | 10.0637 |
+| correction off | 18.3583 | 18.6102 | 18.3511 |
+
+NFE4 的 nominal-20 index 为 0/5/10/15，因此 start=16 与完全关闭严格相同；把 index 15
+纳入 start=12 后 FID 改善 25.9%。NFE8/NFE20 中，start=12 相对 start=16 又改善
+12.55%/5.01%。完全关闭在三种 NFE 都显著退化，证明 residual 是当前 checkpoint 的强
+因果组件；indices 12--15 的额外收益也来自真实 inference 调用，不能只解释为 correction
+训练时对 backbone 的间接正则化。
+
+256 个同 root ending trace 位于
+`runs/x0loop_v2_from_scratch/cycle07/trajectory_ending_threeway/`：
+
+| model | final RMS | mean Heun correction | max relative correction |
+|---|---:|---:|---:|
+| FRESH-TIME | 0.987842 | **0.002294** | 0.206377 |
+| GATED-CONTROL | 0.984608 | 0.002300 | 0.203354 |
+| GATED-WIDE | 0.985299 | 0.002300 | **0.198069** |
+
+三支 final RMS 相差不到 0.33%，mean Heun correction 也几乎相同；因此 FID 改善不是简单
+依靠缩小整体动态范围或让轨迹普遍更平滑。last-8 的最大相对 Heun correction 比 fresh
+低 4.0%，但逐 index 并非单调变小：例如 t=0.25/index15 的 corrector 比 last-4 小 7.3%，
+而 index16--18 中有些反而略大。最终样本 RMS 距离为 fresh-last4 0.31595、fresh-last8
+0.32623、last4-last8 0.31257，说明小 residual 经完整训练后改变了整条生成映射，而不是
+只对最后像素做微小后处理。轨迹统计用于解释机制，真正质量判断仍来自上述 FID/PR。
+
+正式末 1,000-step 稳定窗口的效率为：
+
+| branch | median s/step | img/s | peak GiB | counted MFU |
+|---|---:|---:|---:|---:|
+| FRESH-TIME | 0.0673 | 3805 | 7.15 | 7.74% |
+| GATED-CONTROL | 0.0708 | 3617 | 7.26 | 7.36% |
+| GATED-WIDE | 0.0763 | 3357 | 7.26 | 6.83% |
+
+三支从启动到最终 50k FID 写盘的 wall time 分别约 79.6、82.2、83.3 分钟。last-8 相对
+fresh 吞吐低 11.8%，原因是更大比例的随机时间样本进入 correction path，而不是显存或
+bank 开销；换来 ending FID 4.57% 和 NFE8 FID 11.12% 改善，当前计算/质量交换可接受。
+MFU 仍低是 CIFAR 小模型、小 kernel 和控制流主导；后续只做保持数学等价的融合优化。
+
+本周期正式训练计数为 3/3，全局复盘完成。结论边界是：支持“用完整 fresh loss 训练、
+与 Heun inference 同 index 闭环的轻量 correction 能降低 FID”，并支持将 active range 从
+t<=0.2 扩到 t<=0.4；它仍不是 replay-bank 或历史 x0 监督的成功证据。当前方法利用当前
+solver state 与 base output 做 trajectory correction，但没有使用 FIFO bank。下一周期不
+恢复 bank、不加入 KID，也不扫描 output scale。
+
+### Cycle 08：last-8 跨 seed 复现与继续扩大 active range
+
+Cycle 08 在启动前注册 seed 44 的三支独立从零 300-epoch 实验：
+
+| branch | correction active nominal index | 因果用途 |
+|---|---|---|
+| FRESH-TIME | off | seed-44 配对纯 Flow Matching 基线 |
+| GATED-WIDE | 12--19 | 复现 seed-43 last-8 的 ending/NFE 收益 |
+| GATED-EXTENDED | 8--19 | 检验收益能否从 t<=0.4 继续扩到 t<=0.6 |
+
+除 `start_index` 外，三支锁定 Cycle 07 的 Heun-20/CFG-2.2、正确 endpoint、EMA、batch 256、
+LR schedule、58,500 steps、固定评估 noise/label；继续禁用 bank、teacher、KID 和 paired
+target。WIDE 只有 ending 50k FID 优于同 seed FRESH 且至少两个中途点同向时才算第二个
+seed 复现。EXTENDED 只有 ending 优于 WIDE、NFE4/8/20 不出现一致退化且 precision/recall
+无明显代价时才替代 start=12。15k/30k 连续比配对分支差 25% 以上或数值失稳才提前停止；
+5k FID 仍只作监控，ending 50k 为主结果。三支完成后再次暂停训练并做完整采样复盘。
+
 ## 时间与吞吐分析
 
 300 epochs 在 CIFAR-10、batch 256 下是 58,500 optimizer steps（每 epoch 约

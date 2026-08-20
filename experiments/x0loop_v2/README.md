@@ -39,6 +39,7 @@ reproducible:
 | `fresh-time` | none, explicit path time | none |
 | `gated-control` | none, explicit path time | nominal index 16--19 residual, fresh loss only |
 | `gated-wide` | none, explicit path time | nominal index 12--19 residual, fresh loss only |
+| `gated-extended` | none, explicit path time | nominal index 8--19 residual, fresh loss only |
 | `gated-dist` | EMA Heun-20 prefix/current suffix | index 16--19 residual + terminal Inception KID |
 | `bank-fix` | stratified EMA Heun replay | legacy teacher velocity |
 | `bank-x0` | stratified EMA Heun replay | teacher native x0 |
@@ -77,6 +78,24 @@ X0LOOP_GPU=6 X0LOOP_CYCLE=cycle07 X0LOOP_SEED=43 \
   experiments/x0loop_v2/run_from_scratch.sh gated-control
 X0LOOP_GPU=6 X0LOOP_CYCLE=cycle07 X0LOOP_SEED=43 \
   experiments/x0loop_v2/run_from_scratch.sh gated-wide
+```
+
+Cycle 07 completed with ending 50k FID 5.2591 / 5.1900 / 5.0187 for
+FRESH-TIME / last-4 / last-8. The fixed ending NFE 4/8/20 FIDs for last-8 are
+9.2638 / 6.3113 / 5.0187. Full precision/recall, trajectory, causal inference
+ablation, and efficiency analysis are recorded in the research analysis
+document; these branches do not use bank or replay.
+
+Cycle 08 pre-registers seed 44 to replicate last-8 and test one further active
+range extension without changing capacity or training budget:
+
+```bash
+X0LOOP_GPU=6 X0LOOP_CYCLE=cycle08 X0LOOP_SEED=44 \
+  experiments/x0loop_v2/run_from_scratch.sh fresh-time
+X0LOOP_GPU=6 X0LOOP_CYCLE=cycle08 X0LOOP_SEED=44 \
+  experiments/x0loop_v2/run_from_scratch.sh gated-wide
+X0LOOP_GPU=6 X0LOOP_CYCLE=cycle08 X0LOOP_SEED=44 \
+  experiments/x0loop_v2/run_from_scratch.sh gated-extended
 ```
 
 For checkpoint-only causal ablation, override

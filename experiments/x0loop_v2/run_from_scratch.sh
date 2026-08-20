@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: $0 fresh|fresh-fixed-repro|fresh-time|gated-control|gated-wide|gated-dist|bank-fix|bank-x0|online|online-x0|online-x0-time|online-x0-time-frozen|denoise-gan|terminal-gan" >&2
+  echo "usage: $0 fresh|fresh-fixed-repro|fresh-time|gated-control|gated-wide|gated-extended|gated-dist|bank-fix|bank-x0|online|online-x0|online-x0-time|online-x0-time-frozen|denoise-gan|terminal-gan" >&2
   exit 2
 fi
 
@@ -96,6 +96,18 @@ case "$branch" in
     branch_aux_gradient_space=output
     correction_enabled=true
     branch_correction_start_index=12
+    ;;
+  gated-extended)
+    clean_enabled=false
+    clean_mode=bank_fix
+    branch_aux_target=velocity
+    adv_enabled=false
+    adv_fake_space=x0_hat
+    model_ignore_time=false
+    time_jitter_enabled=false
+    branch_aux_gradient_space=output
+    correction_enabled=true
+    branch_correction_start_index=8
     ;;
   gated-dist)
     clean_enabled=false
